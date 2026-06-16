@@ -6,7 +6,7 @@ import { Droppable } from "@hello-pangea/dnd";
 import { KanbanCard } from "@/components/board/kanban-card";
 import { SessionCreator } from "@/components/board/session-creator";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { useBoardStore } from "@/lib/store/board-store";
+import { useBoardStore, selectFilteredCards } from "@/lib/store/board-store";
 import { Column } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -15,7 +15,7 @@ interface KanbanColumnProps {
 }
 
 export function KanbanColumn({ column }: KanbanColumnProps) {
-  const cards = useBoardStore(useShallow((state) => state.cards.filter((c) => c.phase === column.id)));
+  const cards = useBoardStore(useShallow((state) => selectFilteredCards(state).filter((c) => c.phase === column.id)));
   const isOverWip = column.wipLimit ? cards.length > column.wipLimit : false;
 
   return (

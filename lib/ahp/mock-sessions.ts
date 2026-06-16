@@ -25,6 +25,7 @@ export const mockAHPSessions: AHPSessionSummary[] = [
     modifiedAt: new Date(Date.now() - 120000).toISOString(),
     model: "gpt-5",
     workingDirectory: "src/auth/",
+    project: { name: "webapp", path: "file:///Users/dev/projects/webapp" },
     changes: { additions: 34, deletions: 12, files: 3 },
   },
   {
@@ -36,6 +37,7 @@ export const mockAHPSessions: AHPSessionSummary[] = [
     createdAt: new Date(Date.now() - 7200000).toISOString(),
     modifiedAt: new Date(Date.now() - 300000).toISOString(),
     model: "claude-sonnet",
+    project: { name: "webapp", path: "file:///Users/dev/projects/webapp" },
     changes: { additions: 8, deletions: 3, files: 1 },
   },
   {
@@ -45,6 +47,7 @@ export const mockAHPSessions: AHPSessionSummary[] = [
     status: AHPStatus.Idle,
     createdAt: new Date(Date.now() - 86400000).toISOString(),
     modifiedAt: new Date(Date.now() - 3600000).toISOString(),
+    project: { name: "api-gateway", path: "file:///Users/dev/projects/api-gateway" },
   },
   {
     resource: "ahp-session:/session-4",
@@ -56,6 +59,7 @@ export const mockAHPSessions: AHPSessionSummary[] = [
     modifiedAt: new Date(Date.now() - 480000).toISOString(),
     model: "gpt-5",
     workingDirectory: "src/search/",
+    project: { name: "api-gateway", path: "file:///Users/dev/projects/api-gateway" },
     changes: { additions: 156, deletions: 23, files: 8 },
   },
   {
@@ -67,6 +71,7 @@ export const mockAHPSessions: AHPSessionSummary[] = [
     createdAt: new Date(Date.now() - 10800000).toISOString(),
     modifiedAt: new Date(Date.now() - 60000).toISOString(),
     model: "claude-sonnet",
+    project: { name: "webapp", path: "file:///Users/dev/projects/webapp" },
     changes: { additions: 89, deletions: 45, files: 6 },
   },
   {
@@ -78,6 +83,7 @@ export const mockAHPSessions: AHPSessionSummary[] = [
     createdAt: new Date(Date.now() - 5400000).toISOString(),
     modifiedAt: new Date(Date.now() - 200000).toISOString(),
     model: "gpt-5",
+    project: { name: "design-system", path: "file:///Users/dev/projects/design-system" },
   },
   {
     resource: "ahp-session:/session-7",
@@ -88,6 +94,7 @@ export const mockAHPSessions: AHPSessionSummary[] = [
     createdAt: new Date(Date.now() - 9000000).toISOString(),
     modifiedAt: new Date(Date.now() - 180000).toISOString(),
     model: "claude-sonnet",
+    project: { name: "api-gateway", path: "file:///Users/dev/projects/api-gateway" },
     changes: { additions: 42, deletions: 18, files: 4 },
   },
   {

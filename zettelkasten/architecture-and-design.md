@@ -99,7 +99,7 @@ Dragging a card forward logs a "manual override" to the orchestrator feed and ma
 | --- | --- |
 | Framework | Next.js 15 (App Router) |
 | UI | shadcn/ui + Tailwind CSS v4 |
-| State | Zustand (client) with `useShallow` for derived selectors |
+| State | Zustand (client) with `useShallow` for derived selectors, workspace filter via `selectFilteredCards` |
 | Real-time | Server-Sent Events bridging AHP WebSocket |
 | AHP Client | `@microsoft/agent-host-protocol` TypeScript SDK |
 | Orchestrator | `@github/copilot-sdk` (server-side, long-running) |
@@ -135,6 +135,7 @@ Dragging a card forward logs a "manual override" to the orchestrator feed and ma
 | F8 | Notifications | Card pulses, column badges, title bar count, desktop notifs |
 | F9 | Work Creation | + button, Cmd+K, orchestrator chat |
 | F10 | AHP Connection | Onboarding, mock mode, saved connections |
+| F11 | Workspace Filter | Dropdown in TitleBar to filter board by AHP project; derived selector, stale-filter auto-reset |
 
 ---
 
