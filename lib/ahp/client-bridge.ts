@@ -1,12 +1,14 @@
-import { AhpClient } from "@tylerl0706/ahpx";
-import type { SessionSummary } from "@tylerl0706/ahpx";
+import { AhpClient } from "@microsoft/agent-host-protocol/client";
+import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
+import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
+import type { SessionSummary } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus } from "./types";
 
-// Use string values directly since const enums can't be accessed with isolatedModules
-const NOTIFICATION_SESSION_ADDED = "root/sessionAdded";
-const NOTIFICATION_SESSION_REMOVED = "root/sessionRemoved";
-const NOTIFICATION_SESSION_SUMMARY_CHANGED = "root/sessionSummaryChanged";
+export type BridgeEvent =
+  | { type: "init"; sessions: AHPSessionSummary[] }
+  | AHPEvent
+  | { type: "error"; message: string };
 
 const LOG_PREFIX = "[ahp:bridge]";
 const debug = (...args: unknown[]) => {
@@ -15,11 +17,6 @@ const debug = (...args: unknown[]) => {
 const info = (...args: unknown[]) => console.info(LOG_PREFIX, ...args);
 const warn = (...args: unknown[]) => console.warn(LOG_PREFIX, ...args);
 const error = (...args: unknown[]) => console.error(LOG_PREFIX, ...args);
-
-export type BridgeEvent =
-  | { type: "init"; sessions: AHPSessionSummary[] }
-  | AHPEvent
-  | { type: "error"; message: string };
 
 /**
  * Maps an AHP SDK SessionSummary to Planwerk's AHPSessionSummary format.
@@ -46,16 +43,12 @@ function mapSdkSession(summary: SessionSummary): AHPSessionSummary {
   if (summary.workingDirectory) {
     mapped.workingDirectory = summary.workingDirectory;
   }
-  if (summary.changesets && summary.changesets.length > 0) {
-    let additions = 0;
-    let deletions = 0;
-    for (const edit of summary.changesets) {
-      if (edit.diff) {
-        additions += edit.diff.added ?? 0;
-        deletions += edit.diff.removed ?? 0;
-      }
-    }
-    mapped.changes = { additions, deletions, files: summary.changesets.length };
+  if (summary.changes) {
+    mapped.changes = {
+      additions: summary.changes.additions ?? 0,
+      deletions: summary.changes.deletions ?? 0,
+      files: summary.changes.files ?? 0,
+    };
   }
 
   return mapped;
@@ -72,29 +65,51 @@ export interface AHPBridgeOptions {
  * Returns a cleanup function. Emits events via the onEvent callback.
  */
 export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOptions): Promise<() => void> {
-  const client = new AhpClient({ initialSubscriptions: ["ahp-root://"] });
   const sessions = new Map<string, AHPSessionSummary>();
 
   let disposed = false;
+  let client: AhpClient | null = null;
+
   function dispose() {
     if (disposed) return;
     disposed = true;
-    try {
-      client.disconnect();
-    } catch {
-      // ignore disconnect errors
-    }
+    client?.shutdown().catch(() => {});
   }
 
   if (signal) {
     signal.addEventListener("abort", dispose, { once: true });
   }
 
+  // Connect WebSocket transport
+  let transport: Awaited<ReturnType<typeof WebSocketTransport.connect>>;
   try {
-    await client.connect(hostUrl);
+    transport = await WebSocketTransport.connect(hostUrl);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to connect to AHP host";
     error("connect failed:", message);
+    onEvent({ type: "error", message });
+    return dispose;
+  }
+
+  if (disposed) {
+    transport.close();
+    return dispose;
+  }
+
+  client = new AhpClient(transport);
+  client.connect();
+
+  // Initialize the protocol
+  const clientId = crypto.randomUUID();
+  try {
+    await client.initialize({
+      clientId,
+      protocolVersions: SUPPORTED_PROTOCOL_VERSIONS,
+      initialSubscriptions: ["ahp-root://"],
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Protocol initialization failed";
+    error("initialize failed:", message);
     onEvent({ type: "error", message });
     dispose();
     return dispose;
@@ -106,9 +121,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
   // Fetch initial session list
   try {
-    const result = await client.listSessions();
+    const result = await client.request("listSessions", { channel: "ahp-root://" });
     for (const summary of result.items) {
-      // Skip archived sessions
       if (summary.status & AHPStatus.IsArchived) continue;
       const mapped = mapSdkSession(summary);
       sessions.set(summary.resource, mapped);
@@ -123,66 +137,75 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     return dispose;
   }
 
-  // Listen for session notifications
-  client.on("notification", (notification: { type: string; summary?: SessionSummary; session?: string; changes?: Partial<SessionSummary> }) => {
-    if (disposed) return;
+  // Attach subscription to root channel (already subscribed via initialSubscriptions)
+  const rootSub = client.attachSubscription("ahp-root://");
 
-    if (notification.type === NOTIFICATION_SESSION_ADDED && notification.summary) {
-      const mapped = mapSdkSession(notification.summary);
-      sessions.set(notification.summary.resource, mapped);
-      debug("sessionAdded:", mapped.resource, mapped.title);
-      onEvent({ type: "sessionAdded", session: mapped });
-    } else if (notification.type === NOTIFICATION_SESSION_REMOVED && notification.session) {
-      debug("sessionRemoved:", notification.session);
-      sessions.delete(notification.session);
-      onEvent({ type: "sessionRemoved", resource: notification.session });
-    } else if (notification.type === NOTIFICATION_SESSION_SUMMARY_CHANGED && notification.session && notification.changes) {
-      const existing = sessions.get(notification.session);
-      if (existing) {
-        // Apply partial changes
-        const changes = notification.changes;
-        debug("sessionChanged:", notification.session, Object.keys(changes).join(","));
-        if (changes.title !== undefined) existing.title = changes.title;
-        if (changes.status !== undefined) existing.status = changes.status;
-        if (changes.activity !== undefined) existing.activity = changes.activity;
-        if (changes.modifiedAt !== undefined) existing.modifiedAt = new Date(changes.modifiedAt).toISOString();
-        if (changes.model !== undefined) existing.model = changes.model?.id;
-        if (changes.workingDirectory !== undefined) existing.workingDirectory = changes.workingDirectory;
-        if (changes.project !== undefined) {
-          existing.project = changes.project
-            ? { name: changes.project.displayName, path: changes.project.uri }
-            : undefined;
-        }
-        if (changes.changesets !== undefined && changes.changesets.length > 0) {
-          let additions = 0;
-          let deletions = 0;
-          for (const edit of changes.changesets) {
-            if (edit.diff) {
-              additions += edit.diff.added ?? 0;
-              deletions += edit.diff.removed ?? 0;
+  // Process events in background
+  (async () => {
+    try {
+      for await (const event of rootSub) {
+        if (disposed) break;
+
+        if (event.type === "sessionAdded") {
+          const mapped = mapSdkSession(event.params.summary);
+          sessions.set(event.params.summary.resource, mapped);
+          debug("sessionAdded:", mapped.resource, mapped.title);
+          onEvent({ type: "sessionAdded", session: mapped });
+        } else if (event.type === "sessionRemoved") {
+          debug("sessionRemoved:", event.params.session);
+          sessions.delete(event.params.session);
+          onEvent({ type: "sessionRemoved", resource: event.params.session });
+        } else if (event.type === "sessionSummaryChanged") {
+          const { session: sessionUri, changes } = event.params;
+          const existing = sessions.get(sessionUri);
+          if (existing) {
+            debug("sessionChanged:", sessionUri, Object.keys(changes).join(","));
+            if (changes.title !== undefined) existing.title = changes.title;
+            if (changes.status !== undefined) existing.status = changes.status;
+            if (changes.activity !== undefined) existing.activity = changes.activity;
+            if (changes.modifiedAt !== undefined) existing.modifiedAt = new Date(changes.modifiedAt).toISOString();
+            if (changes.model !== undefined) existing.model = changes.model?.id;
+            if (changes.workingDirectory !== undefined) existing.workingDirectory = changes.workingDirectory;
+            if (changes.project !== undefined) {
+              existing.project = changes.project
+                ? { name: changes.project.displayName, path: changes.project.uri }
+                : undefined;
             }
+            if (changes.changes !== undefined) {
+              existing.changes = {
+                additions: changes.changes.additions ?? 0,
+                deletions: changes.changes.deletions ?? 0,
+                files: changes.changes.files ?? 0,
+              };
+            }
+            sessions.set(sessionUri, existing);
+            onEvent({ type: "sessionSummaryChanged", session: existing });
           }
-          existing.changes = { additions, deletions, files: changes.changesets.length };
         }
-        sessions.set(notification.session, existing);
-        onEvent({ type: "sessionSummaryChanged", session: existing });
+      }
+    } catch (err) {
+      if (!disposed) {
+        const message = err instanceof Error ? err.message : "Event stream error";
+        warn("event loop error:", message);
+        onEvent({ type: "error", message });
       }
     }
-  });
+  })();
 
-  client.on("disconnected", () => {
-    if (!disposed) {
-      warn("disconnected from", hostUrl);
-      onEvent({ type: "error", message: "Connection to AHP host lost" });
+  // Watch connection state for disconnection
+  (async () => {
+    for await (const state of client!.stateChanges()) {
+      if (disposed) break;
+      if (state.status === "closed") {
+        const reason = state.reason.type === "transport"
+          ? state.reason.error.message
+          : "Connection closed";
+        warn("disconnected:", reason);
+        onEvent({ type: "error", message: `Connection to AHP host lost: ${reason}` });
+        break;
+      }
     }
-  });
-
-  client.on("error", (err: Error) => {
-    if (!disposed) {
-      error("client error:", err.message);
-      onEvent({ type: "error", message: err.message || "AHP connection error" });
-    }
-  });
+  })();
 
   return dispose;
 }
