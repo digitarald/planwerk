@@ -11,6 +11,10 @@ import { KanbanCard } from "@/lib/types";
 
 export function useLiveSessions() {
   const status = useConnectionStore((s) => s.status);
+  const mode = useConnectionStore((s) => s.mode);
+  const hostUrl = useConnectionStore((s) => s.hostUrl);
+  const setConnected = useConnectionStore((s) => s.setConnected);
+  const setError = useConnectionStore((s) => s.setError);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   const setCards = useBoardStore((s) => s.setCards);
@@ -21,7 +25,8 @@ export function useLiveSessions() {
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
 
   useEffect(() => {
-    if (status !== "connected") {
+    // Only connect when status indicates we should be connected/connecting
+    if (status !== "connected" && status !== "reconnecting") {
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
@@ -29,12 +34,33 @@ export function useLiveSessions() {
       return;
     }
 
-    const es = new EventSource("/api/ahp/events");
+    // Build the SSE URL — pass host for remote mode
+    let sseUrl = "/api/ahp/events";
+    if (mode === "remote" && hostUrl && hostUrl !== "mock://localhost") {
+      sseUrl += `?host=${encodeURIComponent(hostUrl)}`;
+    }
+
+    const es = new EventSource(sseUrl);
     eventSourceRef.current = es;
+
+    es.onopen = () => {
+      // SSE connected — mark connection as established
+      if (status === "reconnecting") {
+        setConnected();
+      }
+    };
 
     es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+
+        if (data.type === "error") {
+          // Server-side connection error (e.g., AHP host unreachable)
+          setError(data.message || "Connection error");
+          es.close();
+          eventSourceRef.current = null;
+          return;
+        }
 
         if (data.type === "init") {
           const cards: KanbanCard[] = data.sessions.map((s: AHPSessionSummary) =>
@@ -72,12 +98,19 @@ export function useLiveSessions() {
     };
 
     es.onerror = () => {
-      console.warn("SSE connection error, will auto-reconnect");
+      if (status === "reconnecting") {
+        // Failed during initial connection attempt
+        setError("Could not connect. Is the AHP host running?");
+        es.close();
+        eventSourceRef.current = null;
+      } else {
+        console.warn("SSE connection error, will auto-reconnect");
+      }
     };
 
     return () => {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [status, setCards, updateCard, addCard, removeCard, getCard, addFeedItem]);
+  }, [status, mode, hostUrl, setCards, updateCard, addCard, removeCard, getCard, addFeedItem, setConnected, setError]);
 }

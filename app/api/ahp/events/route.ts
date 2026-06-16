@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
+import { createAHPBridge, BridgeEvent } from "@/lib/ahp/client-bridge";
 import { mockAHPSessions } from "@/lib/ahp/mock-sessions";
 import { AHPEvent, AHPSessionSummary } from "@/lib/ahp/types";
 
@@ -33,12 +34,12 @@ function generateRandomUpdate(sessions: AHPSessionSummary[]): AHPEvent {
   };
 }
 
-export async function GET() {
+function createMockStream(): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   let interval: ReturnType<typeof setInterval> | undefined;
   let autoClose: ReturnType<typeof setTimeout> | undefined;
 
-  const stream = new ReadableStream<Uint8Array>({
+  return new ReadableStream<Uint8Array>({
     start(controller) {
       const initEvent = `data: ${JSON.stringify({ type: "init", sessions: mockAHPSessions })}\n\n`;
       controller.enqueue(encoder.encode(initEvent));
@@ -72,6 +73,46 @@ export async function GET() {
       }
     },
   });
+}
+
+function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const abortController = new AbortController();
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        await createAHPBridge({
+          hostUrl,
+          signal: abortController.signal,
+          onEvent(event: BridgeEvent) {
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+            } catch {
+              // Stream closed by client
+              abortController.abort();
+            }
+          },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Connection failed";
+        try {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ type: "error", message })}\n\n`)
+          );
+          controller.close();
+        } catch {}
+      }
+    },
+    cancel() {
+      abortController.abort();
+    },
+  });
+}
+
+export async function GET(request: NextRequest) {
+  const hostUrl = request.nextUrl.searchParams.get("host");
+  const stream = hostUrl ? createRemoteStream(hostUrl) : createMockStream();
 
   return new NextResponse(stream, {
     headers: {

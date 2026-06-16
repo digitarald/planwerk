@@ -6,14 +6,19 @@ import { cn } from "@/lib/utils";
 
 const statusConfig: Record<ConnectionStatus, { color: string; label: string }> = {
   connected: { color: "bg-emerald-500", label: "Connected" },
-  reconnecting: { color: "bg-amber-500 animate-pulse", label: "Reconnecting..." },
+  reconnecting: { color: "bg-amber-500 animate-pulse", label: "Connecting..." },
   disconnected: { color: "bg-red-500", label: "Disconnected" },
 };
 
 export function ConnectionDot() {
   const status = useConnectionStore((state) => state.status);
+  const mode = useConnectionStore((state) => state.mode);
   const hostUrl = useConnectionStore((state) => state.hostUrl);
   const config = statusConfig[status];
+
+  const tooltip = mode === "mock"
+    ? (status === "connected" ? "Demo mode (simulated data)" : "No connection")
+    : (hostUrl || "No AHP host configured");
 
   return (
     <TooltipProvider>
@@ -25,7 +30,7 @@ export function ConnectionDot() {
           <span className="text-xs text-muted-foreground">{config.label}</span>
         </TooltipTrigger>
         <TooltipContent>
-          <p>{hostUrl || "No AHP host configured"}</p>
+          <p>{tooltip}</p>
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>

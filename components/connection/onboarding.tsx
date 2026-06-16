@@ -34,7 +34,7 @@ export function Onboarding() {
           )}
 
           <button
-            onClick={() => connect("ws://localhost:8081")}
+            onClick={() => connect("ws://localhost:8082")}
             disabled={isConnecting}
             className="w-full rounded-md border border-border p-3 text-left transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
             type="button"
@@ -43,14 +43,14 @@ export function Onboarding() {
               <Monitor className="h-4 w-4 text-primary" />
               <div>
                 <div className="text-sm font-medium">VS Code (local)</div>
-                <div className="text-xs text-muted-foreground">Auto-detect on localhost</div>
+                <div className="text-xs text-muted-foreground">Connect to localhost:8082</div>
               </div>
             </div>
           </button>
 
           <div className="flex items-center gap-2">
             <Input
-              placeholder="ws://remote-host:port"
+              placeholder="ws://remote-host:8082"
               value={remoteUrl}
               onChange={(event) => setRemoteUrl(event.target.value)}
               className="h-9 text-sm"
