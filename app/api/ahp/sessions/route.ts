@@ -48,6 +48,7 @@ export async function GET(request: NextRequest) {
         if (s.activity) mapped.activity = s.activity;
         if (s.project) mapped.project = { name: s.project.displayName, path: s.project.uri };
         if (s.model) mapped.model = s.model.id;
+        if (s.agent) mapped.agent = s.agent.uri;
         if (s.workingDirectory) mapped.workingDirectory = s.workingDirectory;
         if (s.changes) {
           mapped.changes = {

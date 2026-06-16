@@ -1,4 +1,12 @@
-import { KanbanCard, RiskLevel } from "@/lib/types";
+import { RiskLevel } from "@/lib/types";
+
+export interface RiskInput {
+  title: string;
+  activity?: string;
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+}
 
 interface RiskFactors {
   fileCount: number;
@@ -27,25 +35,25 @@ const DATABASE_KEYWORDS = [
   "index",
 ];
 
-export function assessRisk(card: KanbanCard): {
+export function assessRisk(input: RiskInput): {
   level: RiskLevel;
   factors: string[];
 } {
   const factors: string[] = [];
   let score = 0;
 
-  const titleLower = card.title.toLowerCase();
-  const activityLower = (card.activity || "").toLowerCase();
+  const titleLower = input.title.toLowerCase();
+  const activityLower = (input.activity || "").toLowerCase();
   const combined = `${titleLower} ${activityLower}`;
   const metrics: RiskFactors = {
-    fileCount: card.filesChanged,
-    totalChanges: card.additions + card.deletions,
+    fileCount: input.filesChanged,
+    totalChanges: input.additions + input.deletions,
     hasSecurityKeywords: SECURITY_KEYWORDS.some((kw) => combined.includes(kw)),
     hasDatabaseChanges: DATABASE_KEYWORDS.some((kw) => combined.includes(kw)),
     complexityScore:
-      card.filesChanged > 10
+      input.filesChanged > 10
         ? 2
-        : card.filesChanged > 5
+        : input.filesChanged > 5
           ? 1
           : 0,
   };

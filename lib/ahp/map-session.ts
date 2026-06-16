@@ -1,6 +1,6 @@
 import { Artifact, KanbanCard, Phase, RuntimeStatus } from "@/lib/types";
+import { assessRisk } from "@/lib/orchestrator/risk-assessor";
 
-import { mockPhaseAssignments } from "./mock-sessions";
 import { AHPSessionSummary, parseAHPStatus } from "./types";
 
 export function mapAHPRuntimeStatus(statusBits: number): RuntimeStatus {
@@ -74,7 +74,7 @@ function inferArtifacts(session: AHPSessionSummary): Artifact[] {
 
 /**
  * Derive the most likely phase from session signals.
- * Priority: existingPhase > mock assignment > inferred from data > "define".
+ * Priority: existingPhase > inferred from data > "define".
  */
 function inferPhase(
   session: AHPSessionSummary,
@@ -82,9 +82,6 @@ function inferPhase(
   artifacts: Artifact[]
 ): Phase {
   if (existingPhase) return existingPhase;
-
-  const mock = mockPhaseAssignments[session.resource];
-  if (mock) return mock;
 
   const activity = (session.activity ?? "").toLowerCase();
   const hasChanges = (session.changes?.files ?? 0) > 0;
@@ -109,6 +106,16 @@ export function mapSessionToCard(
   const runtime = mapAHPRuntimeStatus(session.status);
   const artifacts = inferArtifacts(session);
   const phase = inferPhase(session, existingPhase, artifacts);
+  const additions = session.changes?.additions || 0;
+  const deletions = session.changes?.deletions || 0;
+  const filesChanged = session.changes?.files || 0;
+  const risk = assessRisk({
+    title: session.title,
+    activity: session.activity,
+    filesChanged,
+    additions,
+    deletions,
+  });
 
   return {
     id: session.resource,
@@ -122,11 +129,11 @@ export function mapSessionToCard(
         : runtime === "error"
           ? "error"
           : "none",
-    risk: session.title.toLowerCase().includes("migration") || session.title.toLowerCase().includes("payment") ? "high" : "medium",
+    risk: risk.level,
     activity: session.activity || "No activity",
-    additions: session.changes?.additions || 0,
-    deletions: session.changes?.deletions || 0,
-    filesChanged: session.changes?.files || 0,
+    additions,
+    deletions,
+    filesChanged,
     planSteps: phase === "build" ? { total: 7, done: 4 } : phase === "plan" ? { total: 8, done: 2 } : phase === "review" ? { total: 5, done: 5 } : { total: 0, done: 0 },
     modifiedAt: new Date(session.modifiedAt).getTime(),
     model: session.model,

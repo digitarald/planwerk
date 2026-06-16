@@ -176,10 +176,8 @@ export function CardExpansion({ card }: CardExpansionProps) {
             <span className="text-red-600">-{card.deletions}</span>
           </button>
           {showFiles && (
-            <div className="mt-1 space-y-0.5 pl-4 font-mono text-[10px] text-muted-foreground">
-              <div>src/auth/middleware.ts</div>
-              <div>src/auth/refresh.ts</div>
-              <div>tests/auth.test.ts</div>
+            <div className="mt-1 pl-4 text-[10px] text-muted-foreground/50 italic">
+              File details require session subscription
             </div>
           )}
         </div>

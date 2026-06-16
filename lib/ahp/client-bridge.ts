@@ -47,6 +47,9 @@ function mapSdkSession(summary: SessionSummary): AHPSessionSummary {
   if (summary.model) {
     mapped.model = summary.model.id;
   }
+  if (summary.agent) {
+    mapped.agent = summary.agent.uri;
+  }
   if (summary.workingDirectory) {
     mapped.workingDirectory = summary.workingDirectory;
   }
@@ -172,6 +175,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
             if (changes.activity !== undefined) existing.activity = changes.activity;
             if (changes.modifiedAt !== undefined) existing.modifiedAt = new Date(changes.modifiedAt).toISOString();
             if (changes.model !== undefined) existing.model = changes.model?.id;
+            if (changes.agent !== undefined) existing.agent = changes.agent?.uri;
             if (changes.workingDirectory !== undefined) existing.workingDirectory = changes.workingDirectory;
             if (changes.project !== undefined) {
               existing.project = changes.project
