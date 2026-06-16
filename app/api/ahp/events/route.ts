@@ -112,6 +112,7 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
 
 export async function GET(request: NextRequest) {
   const hostUrl = request.nextUrl.searchParams.get("host");
+  console.info("[ahp:sse]", hostUrl ? `remote stream → ${hostUrl}` : "mock stream");
   const stream = hostUrl ? createRemoteStream(hostUrl) : createMockStream();
 
   return new NextResponse(stream, {

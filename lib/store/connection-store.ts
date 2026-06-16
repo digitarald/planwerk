@@ -24,21 +24,27 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
     try {
       new URL(url);
     } catch {
+      console.error("[ahp:conn]", "invalid URL:", url);
       set({ status: "disconnected", error: "Invalid connection URL" });
       return;
     }
+    console.info("[ahp:conn]", "connecting →", url);
     set({ status: "reconnecting", mode: "remote", hostUrl: url, error: null });
   },
   disconnect: () => {
+    console.info("[ahp:conn]", "disconnecting");
     set({ status: "disconnected", mode: "mock", hostUrl: null, error: null });
   },
   setConnected: () => {
+    console.info("[ahp:conn]", "connected");
     set({ status: "connected", error: null });
   },
   setError: (error: string) => {
+    console.error("[ahp:conn]", "error:", error);
     set({ status: "disconnected", error });
   },
   useMockMode: () => {
+    console.info("[ahp:conn]", "mock mode");
     set({ status: "connected", mode: "mock", hostUrl: "mock://localhost", error: null });
   },
 }));

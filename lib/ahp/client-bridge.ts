@@ -8,6 +8,14 @@ const NOTIFICATION_SESSION_ADDED = "root/sessionAdded";
 const NOTIFICATION_SESSION_REMOVED = "root/sessionRemoved";
 const NOTIFICATION_SESSION_SUMMARY_CHANGED = "root/sessionSummaryChanged";
 
+const LOG_PREFIX = "[ahp:bridge]";
+const debug = (...args: unknown[]) => {
+  if (process.env.AHP_DEBUG) console.debug(LOG_PREFIX, ...args);
+};
+const info = (...args: unknown[]) => console.info(LOG_PREFIX, ...args);
+const warn = (...args: unknown[]) => console.warn(LOG_PREFIX, ...args);
+const error = (...args: unknown[]) => console.error(LOG_PREFIX, ...args);
+
 export type BridgeEvent =
   | { type: "init"; sessions: AHPSessionSummary[] }
   | AHPEvent
@@ -86,12 +94,15 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     await client.connect(hostUrl);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to connect to AHP host";
+    error("connect failed:", message);
     onEvent({ type: "error", message });
     dispose();
     return dispose;
   }
 
   if (disposed) return dispose;
+
+  info("connected to", hostUrl);
 
   // Fetch initial session list
   try {
@@ -102,9 +113,11 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       const mapped = mapSdkSession(summary);
       sessions.set(summary.resource, mapped);
     }
+    info(`loaded ${sessions.size} sessions (${result.items.length} total, archived filtered)`);
     onEvent({ type: "init", sessions: Array.from(sessions.values()) });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to list sessions";
+    error("listSessions failed:", message);
     onEvent({ type: "error", message });
     dispose();
     return dispose;
@@ -117,8 +130,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     if (notification.type === NOTIFICATION_SESSION_ADDED && notification.summary) {
       const mapped = mapSdkSession(notification.summary);
       sessions.set(notification.summary.resource, mapped);
+      debug("sessionAdded:", mapped.resource, mapped.title);
       onEvent({ type: "sessionAdded", session: mapped });
     } else if (notification.type === NOTIFICATION_SESSION_REMOVED && notification.session) {
+      debug("sessionRemoved:", notification.session);
       sessions.delete(notification.session);
       onEvent({ type: "sessionRemoved", resource: notification.session });
     } else if (notification.type === NOTIFICATION_SESSION_SUMMARY_CHANGED && notification.session && notification.changes) {
@@ -126,6 +141,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       if (existing) {
         // Apply partial changes
         const changes = notification.changes;
+        debug("sessionChanged:", notification.session, Object.keys(changes).join(","));
         if (changes.title !== undefined) existing.title = changes.title;
         if (changes.status !== undefined) existing.status = changes.status;
         if (changes.activity !== undefined) existing.activity = changes.activity;
@@ -156,12 +172,14 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
   client.on("disconnected", () => {
     if (!disposed) {
+      warn("disconnected from", hostUrl);
       onEvent({ type: "error", message: "Connection to AHP host lost" });
     }
   });
 
   client.on("error", (err: Error) => {
     if (!disposed) {
+      error("client error:", err.message);
       onEvent({ type: "error", message: err.message || "AHP connection error" });
     }
   });

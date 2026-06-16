@@ -40,10 +40,12 @@ export function useLiveSessions() {
       sseUrl += `?host=${encodeURIComponent(hostUrl)}`;
     }
 
+    console.info("[ahp:sse]", `opening ${mode} stream →`, sseUrl);
     const es = new EventSource(sseUrl);
     eventSourceRef.current = es;
 
     es.onopen = () => {
+      console.info("[ahp:sse]", "stream open");
       // SSE connected — mark connection as established
       if (status === "reconnecting") {
         setConnected();
@@ -56,6 +58,7 @@ export function useLiveSessions() {
 
         if (data.type === "error") {
           // Server-side connection error (e.g., AHP host unreachable)
+          console.error("[ahp:sse]", "server error:", data.message);
           setError(data.message || "Connection error");
           es.close();
           eventSourceRef.current = null;
@@ -63,6 +66,7 @@ export function useLiveSessions() {
         }
 
         if (data.type === "init") {
+          console.info("[ahp:sse]", `init: ${data.sessions.length} sessions`);
           const cards: KanbanCard[] = data.sessions.map((s: AHPSessionSummary) =>
             mapSessionToCard(s, getCard(s.resource)?.phase)
           );
@@ -100,11 +104,12 @@ export function useLiveSessions() {
     es.onerror = () => {
       if (status === "reconnecting") {
         // Failed during initial connection attempt
+        console.error("[ahp:sse]", "connection failed during handshake");
         setError("Could not connect. Is the AHP host running?");
         es.close();
         eventSourceRef.current = null;
       } else {
-        console.warn("SSE connection error, will auto-reconnect");
+        console.warn("[ahp:sse]", "stream error, browser will auto-reconnect");
       }
     };
 
