@@ -11,7 +11,7 @@ import { useConnectionStore } from "@/lib/store/connection-store";
 export default function Home() {
   const status = useConnectionStore((state) => state.status);
 
-  if (status !== "connected") {
+  if (status === "disconnected") {
     return (
       <AppShell>
         <Onboarding />
@@ -23,8 +23,8 @@ export default function Home() {
     <NotificationProvider>
       <LiveSessionProvider>
         <AppShell>
-          <KanbanBoard />
-          <CommandPalette />
+          {status === "reconnecting" ? <Onboarding /> : <KanbanBoard />}
+          {status === "connected" && <CommandPalette />}
         </AppShell>
       </LiveSessionProvider>
     </NotificationProvider>
