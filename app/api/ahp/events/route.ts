@@ -1,11 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { createAHPBridge, BridgeEvent } from "@/lib/ahp/client-bridge";
+import { enrichSessionToCard } from "@/lib/ahp/enrich-card";
+import { ConnectionError } from "@/lib/ahp/connection-error";
 import { mockAHPSessions } from "@/lib/ahp/mock-sessions";
 import { AHPEvent, AHPSessionSummary } from "@/lib/ahp/types";
+import { KanbanCard } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+type CardStreamEvent =
+  | { type: "init"; cards: KanbanCard[] }
+  | { type: "cardChanged"; card: KanbanCard }
+  | { type: "cardRemoved"; cardId: string }
+  | ConnectionError;
 
 function generateRandomUpdate(sessions: AHPSessionSummary[]): AHPEvent {
   const session = sessions[Math.floor(Math.random() * sessions.length)];
@@ -34,6 +43,54 @@ function generateRandomUpdate(sessions: AHPSessionSummary[]): AHPEvent {
   };
 }
 
+function projectRemoteEvent(event: BridgeEvent): CardStreamEvent {
+  if (event.type === "error") {
+    return event;
+  }
+
+  if (event.type === "init") {
+    return {
+      type: "init",
+      cards: event.sessions.map(enrichSessionToCard),
+    };
+  }
+
+  if (event.type === "sessionRemoved") {
+    return {
+      type: "cardRemoved",
+      cardId: event.resource,
+    };
+  }
+
+  return {
+    type: "cardChanged",
+    card: enrichSessionToCard(event.session),
+  };
+}
+
+function projectMockEvent(
+  event: { type: "init"; sessions: AHPSessionSummary[] } | AHPEvent
+): CardStreamEvent {
+  if (event.type === "init") {
+    return {
+      type: "init",
+      cards: event.sessions.map(enrichSessionToCard),
+    };
+  }
+
+  if (event.type === "sessionRemoved") {
+    return {
+      type: "cardRemoved",
+      cardId: event.resource,
+    };
+  }
+
+  return {
+    type: "cardChanged",
+    card: enrichSessionToCard(event.session),
+  };
+}
+
 function createMockStream(): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   let interval: ReturnType<typeof setInterval> | undefined;
@@ -41,12 +98,14 @@ function createMockStream(): ReadableStream<Uint8Array> {
 
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      const initEvent = `data: ${JSON.stringify({ type: "init", sessions: mockAHPSessions })}\n\n`;
+      const initEvent = `data: ${JSON.stringify(
+        projectMockEvent({ type: "init", sessions: mockAHPSessions })
+      )}\n\n`;
       controller.enqueue(encoder.encode(initEvent));
 
       interval = setInterval(() => {
         try {
-          const event = generateRandomUpdate(mockAHPSessions);
+          const event = projectMockEvent(generateRandomUpdate(mockAHPSessions));
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
         } catch {
           if (interval) {
@@ -87,7 +146,8 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
           signal: abortController.signal,
           onEvent(event: BridgeEvent) {
             try {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+              const projected = projectRemoteEvent(event);
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(projected)}\n\n`));
             } catch {
               // Stream closed by client
               abortController.abort();

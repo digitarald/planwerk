@@ -2,12 +2,9 @@
 
 import { useEffect, useRef } from "react";
 
-import { mapSessionToCard } from "@/lib/ahp/map-session";
-import { AHPSessionSummary } from "@/lib/ahp/types";
 import { useBoardStore } from "@/lib/store/board-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
-import { KanbanCard } from "@/lib/types";
 
 export function useLiveSessions() {
   const status = useConnectionStore((s) => s.status);
@@ -21,7 +18,6 @@ export function useLiveSessions() {
   const updateCard = useBoardStore((s) => s.updateCard);
   const addCard = useBoardStore((s) => s.addCard);
   const removeCard = useBoardStore((s) => s.removeCard);
-  const getCard = useBoardStore((s) => s.getCard);
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
 
   useEffect(() => {
@@ -66,36 +62,30 @@ export function useLiveSessions() {
         }
 
         if (data.type === "init") {
-          console.info("[ahp:sse]", `init: ${data.sessions.length} sessions`);
-          const cards: KanbanCard[] = data.sessions.map((s: AHPSessionSummary) =>
-            mapSessionToCard(s, getCard(s.resource)?.phase)
-          );
-          setCards(cards);
+          console.info("[ahp:sse]", `init: ${data.cards.length} cards`);
+          setCards(data.cards);
           setConnected();
           addFeedItem({
             type: "transition",
-            message: `Connected. Monitoring ${data.sessions.length} sessions across the board.`,
+            message: `Connected. Monitoring ${data.cards.length} sessions across the board.`,
           });
-        } else if (data.type === "sessionSummaryChanged") {
-          const session: AHPSessionSummary = data.session;
-          const existing = getCard(session.resource);
+        } else if (data.type === "cardChanged") {
+          const card = data.card;
+          const existing = useBoardStore.getState().getCard(card.id);
           if (existing) {
-            const updated = mapSessionToCard(session, existing.phase);
-            updateCard(session.resource, updated);
-            if (updated.attention === "needs-human" && existing.attention !== "needs-human") {
+            updateCard(card.id, card);
+            if (card.attention === "needs-human" && existing.attention !== "needs-human") {
               addFeedItem({
                 type: "alert",
-                message: `"${updated.title}" needs your input: ${updated.activity}`,
-                cardId: updated.id,
+                message: `"${card.title}" needs your input: ${card.activity}`,
+                cardId: card.id,
               });
             }
           } else {
-            addCard(mapSessionToCard(session));
+            addCard(card);
           }
-        } else if (data.type === "sessionAdded") {
-          addCard(mapSessionToCard(data.session));
-        } else if (data.type === "sessionRemoved") {
-          removeCard(data.resource);
+        } else if (data.type === "cardRemoved") {
+          removeCard(data.cardId);
         }
       } catch (e) {
         console.error("Failed to parse SSE event:", e);
@@ -122,5 +112,5 @@ export function useLiveSessions() {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [status, mode, hostUrl, setCards, updateCard, addCard, removeCard, getCard, addFeedItem, setConnected, setError]);
+  }, [status, mode, hostUrl, setCards, updateCard, addCard, removeCard, addFeedItem, setConnected, setError]);
 }

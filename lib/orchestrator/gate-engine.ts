@@ -1,7 +1,7 @@
 import "server-only";
 
 import { getDb } from "@/lib/db/schema";
-import { Phase, PHASE_ORDER } from "@/lib/types";
+import { GateStatus, Phase, PHASE_ORDER } from "@/lib/types";
 
 export type GateType = "lint" | "typecheck" | "test" | "review" | "custom";
 
@@ -219,6 +219,32 @@ export function canAdvancePhase(
     allowed: pendingGates.length === 0,
     pendingGates,
   };
+}
+
+export function getPersistedCardPhase(cardId: string): Phase | undefined {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT phase FROM card_phases WHERE card_id = ?")
+    .get(cardId) as { phase: string } | undefined;
+  if (!row) return undefined;
+  const phase = row.phase;
+  if (phase === "verify") return "review";
+  return phase as Phase;
+}
+
+export function deriveGateStatus(cardId: string, fromPhase: Phase, toPhase: Phase): GateStatus {
+  const gates = getGatesForTransition(fromPhase, toPhase);
+  const requiredGates = gates.filter((g) => g.required);
+  if (requiredGates.length === 0) return "pending";
+
+  const runs = getGateRunsForCard(cardId);
+  const relevantRuns = runs.filter((r) => r.fromPhase === fromPhase && r.toPhase === toPhase);
+
+  if (relevantRuns.some((r) => r.status === "failed")) return "failed";
+  if (relevantRuns.some((r) => r.status === "running")) return "evaluating";
+
+  const { allowed } = canAdvancePhase(cardId, fromPhase, toPhase);
+  return allowed ? "passed" : "pending";
 }
 
 export function getCardPhase(cardId: string): Phase {

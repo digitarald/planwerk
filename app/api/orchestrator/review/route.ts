@@ -23,46 +23,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  await new Promise((resolve) =>
-    setTimeout(resolve, 1000 + Math.random() * 2000)
-  );
-
-  const reviewResults: Record<SkillType, { verdict: string; findings: string[] }> =
-    {
-      "plan-review": {
-        verdict: "approved_with_notes",
-        findings: [
-          "Plan is clear and actionable.",
-          "Consider adding error handling for edge case in step 3.",
-          "Dependency on external API should be noted as a risk.",
-        ],
-      },
-      "code-review": {
-        verdict: "approved",
-        findings: [
-          "Code follows project conventions.",
-          "Good test coverage for critical paths.",
-          "Minor: consider extracting utility function for reuse.",
-        ],
-      },
-      "security-review": {
-        verdict: "approved_with_notes",
-        findings: [
-          "No critical vulnerabilities found.",
-          "Recommendation: add rate limiting to new endpoint.",
-          "Input validation present but could be stricter on email field.",
-        ],
-      },
-      "architecture-review": {
-        verdict: "needs_changes",
-        findings: [
-          "Coupling between auth and user modules is concerning.",
-          "Consider using dependency injection for better testability.",
-          "The proposed pattern may not scale beyond 10k requests/s.",
-        ],
-      },
-    };
-
   const availableSkills =
     phaseTransition && riskLevel
       ? getSkillsForTransition(phaseTransition, riskLevel)
@@ -77,9 +37,12 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const result = reviewResults[skillId] || {
-    verdict: "approved",
-    findings: ["No issues found."],
+  const result = {
+    verdict: "not_implemented" as const,
+    findings: [
+      `Review skill "${skillId}" is not yet connected to a real analysis engine.`,
+      "This will be backed by LLM-powered code review in a future update.",
+    ],
   };
 
   return NextResponse.json({
