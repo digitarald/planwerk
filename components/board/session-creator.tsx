@@ -6,6 +6,7 @@ import { Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useBoardStore, selectWorkspaces } from "@/lib/store/board-store";
+import { useConnectionStore } from "@/lib/store/connection-store";
 import { useShallow } from "zustand/react/shallow";
 import { type KanbanCard } from "@/lib/types";
 
@@ -24,28 +25,49 @@ export function SessionCreator() {
     return ws ? { name: ws.name, path: ws.path } : undefined;
   })();
 
-  const handleCreate = (event: FormEvent) => {
+  const handleCreate = async (event: FormEvent) => {
     event.preventDefault();
     if (!title.trim()) return;
 
-    const newCard: KanbanCard = {
-      id: `new-${Date.now()}`,
-      title: title.trim(),
-      phase: "define",
-      runtime: "idle",
-      gateStatus: "pending",
-      attention: "none",
-      risk: "medium",
-      activity: "Awaiting scope definition",
-      additions: 0,
-      deletions: 0,
-      filesChanged: 0,
-      planSteps: { total: 0, done: 0 },
-      modifiedAt: Date.now(),
-      project: inheritedProject,
-    };
+    const trimmedTitle = title.trim();
+    const { mode, hostUrl } = useConnectionStore.getState();
 
-    addCard(newCard);
+    if (mode === "remote" && hostUrl) {
+      try {
+        const response = await fetch("/api/ahp/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ hostUrl, title: trimmedTitle }),
+        });
+
+        if (!response.ok) {
+          const data = await response.json();
+          console.error("Failed to create session:", data.error);
+        }
+      } catch (err) {
+        console.error("Failed to create session:", err);
+      }
+    } else {
+      const newCard: KanbanCard = {
+        id: `new-${Date.now()}`,
+        title: trimmedTitle,
+        phase: "define",
+        runtime: "idle",
+        gateStatus: "pending",
+        attention: "none",
+        risk: "low",
+        activity: "Awaiting scope definition",
+        additions: 0,
+        deletions: 0,
+        filesChanged: 0,
+        planSteps: { total: 0, done: 0 },
+        modifiedAt: Date.now(),
+        project: inheritedProject,
+      };
+
+      addCard(newCard);
+    }
+
     setTitle("");
     setIsOpen(false);
   };

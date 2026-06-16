@@ -134,9 +134,11 @@ export function mapSessionToCard(
     additions,
     deletions,
     filesChanged,
-    planSteps: phase === "build" ? { total: 7, done: 4 } : phase === "plan" ? { total: 8, done: 2 } : phase === "review" ? { total: 5, done: 5 } : { total: 0, done: 0 },
+    // TODO: Derive planSteps from session turns[] via session-level subscription
+    planSteps: { total: 0, done: 0 },
     modifiedAt: new Date(session.modifiedAt).getTime(),
     model: session.model,
+    // TODO: Extract branch from SessionState._meta["git"] via session subscription
     branch: undefined,
     workingDirectory: session.workingDirectory,
     project: session.project,

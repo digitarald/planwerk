@@ -68,3 +68,44 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
+
+export async function POST(request: NextRequest) {
+  const { hostUrl, title, provider, model, workingDirectory } = (await request.json()) as {
+    hostUrl?: string;
+    title?: string;
+    provider?: string;
+    model?: string;
+    workingDirectory?: string;
+  };
+
+  if (!hostUrl) {
+    return NextResponse.json({ error: "hostUrl required" }, { status: 400 });
+  }
+
+  if (!title) {
+    return NextResponse.json({ error: "title required" }, { status: 400 });
+  }
+
+  try {
+    const { getAHPClient, releaseAHPClient } = await import("@/lib/ahp/client-manager");
+    const client = await getAHPClient(hostUrl);
+    const sessionId = crypto.randomUUID();
+    const channel = `ahp-session:/${sessionId}`;
+
+    try {
+      await client.request("createSession", {
+        channel,
+        provider: provider || "copilot",
+        ...(model ? { model: { id: model } } : {}),
+        ...(workingDirectory ? { workingDirectory } : {}),
+      });
+    } finally {
+      releaseAHPClient();
+    }
+
+    return NextResponse.json({ resource: channel, title });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to create session";
+    return NextResponse.json({ error: message }, { status: 502 });
+  }
+}

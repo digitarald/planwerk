@@ -33,6 +33,7 @@ export async function POST(request: NextRequest) {
     gateType?: GateType;
     gateName?: string;
     workingDirectory?: string;
+    projectPath?: string;
   };
   const { cardId, action } = body;
 
@@ -48,7 +49,7 @@ export async function POST(request: NextRequest) {
   }
 
   if (action === "check") {
-    const result = canAdvancePhase(cardId, currentPhase, nextPhase);
+    const result = canAdvancePhase(cardId, currentPhase, nextPhase, body.projectPath);
 
     return NextResponse.json({
       cardId,
@@ -62,7 +63,8 @@ export async function POST(request: NextRequest) {
     const { allowed, pendingGates } = canAdvancePhase(
       cardId,
       currentPhase,
-      nextPhase
+      nextPhase,
+      body.projectPath
     );
 
     if (!allowed) {
@@ -99,7 +101,7 @@ export async function POST(request: NextRequest) {
       gateName
     );
 
-    const gates = getGatesForTransition(currentPhase, nextPhase);
+    const gates = getGatesForTransition(currentPhase, nextPhase, body.projectPath);
     const gate = gates.find(
       (g) => g.gateType === gateType && (!gateName || g.gateName === gateName)
     );
@@ -138,6 +140,7 @@ export async function POST(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   const cardId = request.nextUrl.searchParams.get("cardId");
+  const projectPath = request.nextUrl.searchParams.get("projectPath") || undefined;
 
   if (!cardId) {
     return NextResponse.json({ error: "cardId required" }, { status: 400 });
@@ -156,11 +159,12 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const gates = getGatesForTransition(currentPhase, nextPhase);
+  const gates = getGatesForTransition(currentPhase, nextPhase, projectPath);
   const { allowed, pendingGates } = canAdvancePhase(
     cardId,
     currentPhase,
-    nextPhase
+    nextPhase,
+    projectPath
   );
 
   return NextResponse.json({
