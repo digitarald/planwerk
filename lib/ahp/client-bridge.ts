@@ -5,6 +5,9 @@ import type { SessionSummary } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus } from "./types";
 
+// Offer both SDK-supported versions and newer server versions we're compatible with
+const OFFERED_PROTOCOL_VERSIONS = [...SUPPORTED_PROTOCOL_VERSIONS, "0.4.0"];
+
 export type BridgeEvent =
   | { type: "init"; sessions: AHPSessionSummary[] }
   | AHPEvent
@@ -104,7 +107,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   try {
     await client.initialize({
       clientId,
-      protocolVersions: SUPPORTED_PROTOCOL_VERSIONS,
+      protocolVersions: OFFERED_PROTOCOL_VERSIONS,
       initialSubscriptions: ["ahp-root://"],
     });
   } catch (err) {

@@ -6,6 +6,8 @@ import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
 import { mockAHPSessions } from "@/lib/ahp/mock-sessions";
 import { AHPSessionSummary, AHPStatus } from "@/lib/ahp/types";
 
+const OFFERED_PROTOCOL_VERSIONS = [...SUPPORTED_PROTOCOL_VERSIONS, "0.4.0"];
+
 export async function GET(request: NextRequest) {
   const hostUrl = request.nextUrl.searchParams.get("host");
 
@@ -27,7 +29,7 @@ export async function GET(request: NextRequest) {
   try {
     await client.initialize({
       clientId: crypto.randomUUID(),
-      protocolVersions: SUPPORTED_PROTOCOL_VERSIONS,
+      protocolVersions: OFFERED_PROTOCOL_VERSIONS,
       initialSubscriptions: [],
     });
 
