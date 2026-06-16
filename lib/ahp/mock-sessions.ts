@@ -1,4 +1,18 @@
+import { Phase } from "@/lib/types";
+
 import { AHPSessionSummary, AHPStatus } from "./types";
+
+// Mock phase assignments — in real usage, phases are persisted in SQLite
+export const mockPhaseAssignments: Record<string, Phase> = {
+  "ahp-session:/session-1": "build",
+  "ahp-session:/session-2": "ship",
+  "ahp-session:/session-3": "define",
+  "ahp-session:/session-4": "build",
+  "ahp-session:/session-5": "verify",
+  "ahp-session:/session-6": "plan",
+  "ahp-session:/session-7": "review",
+  "ahp-session:/session-8": "build",
+};
 
 export const mockAHPSessions: AHPSessionSummary[] = [
   {

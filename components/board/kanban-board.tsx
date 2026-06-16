@@ -60,25 +60,8 @@ export function KanbanBoard() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
-      <header className="border-b border-border px-5 py-4">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="text-[11px] font-semibold tracking-[0.24em] text-muted-foreground uppercase">
-              Planwerk
-            </p>
-            <h1 className="mt-1 text-xl font-semibold tracking-tight">
-              SDLC Kanban Board
-            </h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Six-phase workflow for defining, planning, building, verifying,
-              reviewing, and shipping work.
-            </p>
-          </div>
-        </div>
-      </header>
-
       <DragDropContext onDragEnd={handleDragEnd}>
-        <div className="flex min-h-0 flex-1 gap-0 overflow-x-auto p-4">
+        <div className="flex min-h-0 flex-1 gap-0 overflow-x-auto p-4 pt-3">
           {COLUMNS.map((column) => (
             <KanbanColumn key={column.id} column={column} />
           ))}

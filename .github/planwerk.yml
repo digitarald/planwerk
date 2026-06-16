@@ -1,0 +1,100 @@
+# Planwerk — Convention-Based Project Config
+#
+# This file is read by Planwerk's gate engine and orchestrator to determine
+# how to validate, build, and quality-check sessions working on this project.
+
+project:
+  name: Planwerk
+  description: AI-first SDLC work management system built on Agent Host Protocol
+
+# Scripts map to quality gates and lifecycle hooks.
+# Each script has a name, command, and trigger conditions.
+scripts:
+  - name: Install
+    command: npm install
+    triggers: [session.create]
+
+  - name: Lint
+    command: npm run lint
+    triggers: [gate.build-to-verify]
+    gate: true
+
+  - name: Type Check
+    command: npx tsc --noEmit
+    triggers: [gate.build-to-verify]
+    gate: true
+
+  - name: Build
+    command: npm run build
+    triggers: [gate.verify-to-review]
+    gate: true
+
+  - name: Dev Server
+    command: npm run dev
+    triggers: [session.create]
+    background: true
+
+# Gate definitions per phase transition.
+# Required gates MUST pass before the orchestrator advances a card.
+gates:
+  define-to-plan:
+    required: []
+    optional: []
+
+  plan-to-build:
+    required:
+      - type: review
+        skill: plan-review
+        description: Adversarial plan review — challenges assumptions and gaps
+    optional:
+      - type: review
+        skill: architecture-review
+        risk_threshold: high
+
+  build-to-verify:
+    required:
+      - type: script
+        name: Lint
+      - type: script
+        name: Type Check
+    optional: []
+
+  verify-to-review:
+    required:
+      - type: script
+        name: Build
+    optional: []
+
+  review-to-ship:
+    required:
+      - type: review
+        skill: code-review
+        description: Code quality and correctness review
+    optional:
+      - type: review
+        skill: security-review
+        risk_threshold: medium
+
+# Risk assessment hints for the orchestrator
+risk:
+  high_keywords:
+    - database
+    - migration
+    - auth
+    - payment
+    - security
+    - encryption
+  file_threshold: 10
+  line_threshold: 200
+
+# WIP limits per phase (orchestrator enforces these)
+wip_limits:
+  build: 3
+  verify: 2
+
+# Orchestrator behavior
+orchestrator:
+  heartbeat_interval: 30s
+  stale_threshold: 10m
+  auto_nudge: true
+  max_retry_on_failure: 2

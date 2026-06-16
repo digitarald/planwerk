@@ -9,7 +9,7 @@ import { useConnectionStore } from "@/lib/store/connection-store";
 
 export function Onboarding() {
   const [remoteUrl, setRemoteUrl] = useState("");
-  const { connect, useMockMode, status } = useConnectionStore();
+  const { connect, useMockMode, status, error } = useConnectionStore();
   const isConnecting = status === "reconnecting";
 
   return (
@@ -21,8 +21,20 @@ export function Onboarding() {
         </p>
 
         <div className="space-y-3">
+          {isConnecting && (
+            <div className="rounded-md border border-primary/30 bg-primary/5 p-3 text-center text-xs text-primary">
+              Connecting...
+            </div>
+          )}
+
+          {error && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+              {error}
+            </div>
+          )}
+
           <button
-            onClick={() => connect("ws://localhost:3712")}
+            onClick={() => connect("ws://localhost:8081")}
             disabled={isConnecting}
             className="w-full rounded-md border border-border p-3 text-left transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
             type="button"
