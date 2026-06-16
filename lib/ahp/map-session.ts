@@ -24,7 +24,7 @@ export function mapSessionToCard(
     title: session.title,
     phase,
     runtime,
-    gateStatus: phase === "verify" ? "evaluating" : phase === "ship" ? "passed" : "pending",
+    gateStatus: phase === "review" ? "evaluating" : phase === "ship" ? "passed" : "pending",
     attention:
       runtime === "input-needed"
         ? "needs-human"
@@ -36,7 +36,7 @@ export function mapSessionToCard(
     additions: session.changes?.additions || 0,
     deletions: session.changes?.deletions || 0,
     filesChanged: session.changes?.files || 0,
-    planSteps: phase === "build" ? { total: 7, done: 4 } : phase === "plan" ? { total: 8, done: 2 } : phase === "verify" ? { total: 5, done: 5 } : { total: 0, done: 0 },
+    planSteps: phase === "build" ? { total: 7, done: 4 } : phase === "plan" ? { total: 8, done: 2 } : phase === "review" ? { total: 5, done: 5 } : { total: 0, done: 0 },
     modifiedAt: new Date(session.modifiedAt).getTime(),
     model: session.model,
     branch: undefined,

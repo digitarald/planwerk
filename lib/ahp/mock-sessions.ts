@@ -8,7 +8,7 @@ export const mockPhaseAssignments: Record<string, Phase> = {
   "ahp-session:/session-2": "ship",
   "ahp-session:/session-3": "define",
   "ahp-session:/session-4": "build",
-  "ahp-session:/session-5": "verify",
+  "ahp-session:/session-5": "review",
   "ahp-session:/session-6": "plan",
   "ahp-session:/session-7": "review",
   "ahp-session:/session-8": "build",

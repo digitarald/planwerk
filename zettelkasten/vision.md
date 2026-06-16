@@ -41,12 +41,12 @@ Loop engineering says: stop prompting agents yourself — design the system that
 ## How It Works
 
 ```
-Define → Plan → Build → Verify → Review → Ship
+Define → Plan → Build → Review → Ship
 ```
 
 Each card is a live agent session. The orchestrator ("CTO agent") runs persistently — detecting stuck sessions, assigning risk levels, managing WIP, and escalating to humans only when judgment is needed.
 
-**Quality gates** block every phase transition. Deterministic checks (lint, test, typecheck) run automatically. Indeterministic reviews (plan review, code review, security) run as sub-agents with maker-checker separation. Failed gates feed back into the session — the agent fixes and re-attempts until pass or escalation.
+**Quality gates** block every phase transition. Deterministic checks (lint, test, typecheck) must pass before leaving Build. Indeterministic reviews (code review, security) run as sub-agents in the Review phase with maker-checker separation. Failed reviews feed back into Build — the agent fixes and re-attempts until pass or escalation.
 
 **The board** shows real-time progress across all sessions. A conversational sidebar lets you command the orchestrator naturally. Drag-and-drop respects gates. The attention system surfaces what needs you.
 

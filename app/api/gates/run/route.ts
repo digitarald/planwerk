@@ -19,6 +19,7 @@ export async function POST(request: NextRequest) {
     cardId?: string;
     action?: string;
     gateType?: GateType;
+    gateName?: string;
   };
   const { cardId, action } = body;
 
@@ -71,13 +72,19 @@ export async function POST(request: NextRequest) {
   }
 
   if (action === "run-gate") {
-    const { gateType } = body;
+    const { gateType, gateName } = body;
 
     if (!gateType) {
       return NextResponse.json({ error: "gateType required" }, { status: 400 });
     }
 
-    const runId = startGateRun(cardId, currentPhase, nextPhase, gateType);
+    const runId = startGateRun(
+      cardId,
+      currentPhase,
+      nextPhase,
+      gateType,
+      gateName
+    );
 
     setTimeout(() => {
       const passed = Math.random() > 0.3;

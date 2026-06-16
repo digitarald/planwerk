@@ -46,10 +46,6 @@ export function useLiveSessions() {
 
     es.onopen = () => {
       console.info("[ahp:sse]", "stream open");
-      // SSE connected — mark connection as established
-      if (status === "reconnecting") {
-        setConnected();
-      }
     };
 
     es.onmessage = (event) => {
@@ -59,7 +55,11 @@ export function useLiveSessions() {
         if (data.type === "error") {
           // Server-side connection error (e.g., AHP host unreachable)
           console.error("[ahp:sse]", "server error:", data.message);
-          setError(data.message || "Connection error");
+          setError({
+            message: data.message || "Connection error",
+            code: data.code || "unknown",
+            hint: data.hint,
+          });
           es.close();
           eventSourceRef.current = null;
           return;
@@ -71,6 +71,7 @@ export function useLiveSessions() {
             mapSessionToCard(s, getCard(s.resource)?.phase)
           );
           setCards(cards);
+          setConnected();
           addFeedItem({
             type: "transition",
             message: `Connected. Monitoring ${data.sessions.length} sessions across the board.`,
@@ -105,7 +106,11 @@ export function useLiveSessions() {
       if (status === "reconnecting") {
         // Failed during initial connection attempt
         console.error("[ahp:sse]", "connection failed during handshake");
-        setError("Could not connect. Is the AHP host running?");
+        setError({
+          message: "Could not connect to the AHP host",
+          code: "connection_refused",
+          hint: "Make sure the agent host server is running. In VS Code, enable \"Chat: Agent Host\" in settings, or start it manually.",
+        });
         es.close();
         eventSourceRef.current = null;
       } else {

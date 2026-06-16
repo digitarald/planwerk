@@ -156,12 +156,12 @@ export const mockCards: KanbanCard[] = [
   {
     id: "5",
     title: "Database migration v3",
-    phase: "verify",
+    phase: "review",
     runtime: "running",
     gateStatus: "evaluating",
     attention: "none",
     risk: "high",
-    activity: "Running test suite (42/89 passing)...",
+    activity: "Code review in progress...",
     additions: 89,
     deletions: 45,
     filesChanged: 6,
@@ -188,9 +188,9 @@ export const mockCards: KanbanCard[] = [
       },
     ],
     recentActivity: [
-      { timestamp: Date.now() - 60000, type: "gate", message: "Running verify gate: test suite" },
-      { timestamp: Date.now() - 90000, type: "tool", message: "runCommand npm run test:integration" },
-      { timestamp: Date.now() - 120000, type: "agent", message: "All migrations applied, starting verification" },
+      { timestamp: Date.now() - 60000, type: "gate", message: "Code review started by review-agent" },
+      { timestamp: Date.now() - 90000, type: "gate", message: "Lint + typecheck + tests: passed" },
+      { timestamp: Date.now() - 120000, type: "agent", message: "All migrations applied, submitted for review" },
     ],
   },
   {

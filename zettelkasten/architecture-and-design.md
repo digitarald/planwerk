@@ -20,7 +20,7 @@ AHP runtime status (`Idle`, `InProgress`, `InputNeeded`, `Error`) does NOT drive
 
 ```typescript
 interface CardState {
-  phase: 'define' | 'plan' | 'build' | 'verify' | 'review' | 'ship';  // Persisted by Planwerk
+  phase: 'define' | 'plan' | 'build' | 'review' | 'ship';  // Persisted by Planwerk
   runtime: 'idle' | 'running' | 'input-needed' | 'error';              // Live from AHP
   gateStatus: 'pending' | 'evaluating' | 'passed' | 'failed';          // Gate engine
   attention: 'none' | 'needs-human' | 'stale' | 'error' | 'conflict';  // Overlay
@@ -115,9 +115,8 @@ Dragging a card forward logs a "manual override" to the orchestrator feed and ma
 | --- | --- | --- |
 | **Define** | Idea captured, being refined | Scope sufficiently clear → PLAN |
 | **Plan** | Agent produces spec/plan | Adversarial review passes → BUILD |
-| **Build** | Agent writing code | Lint + typecheck pass → VERIFY |
-| **Verify** | Deterministic checks (tests, build) | All green → REVIEW |
-| **Review** | AI code review (qualitative) | Verdict: approved → SHIP |
+| **Build** | Agent writing code | Lint + typecheck + tests pass → REVIEW |
+| **Review** | AI code review + human review (qualitative) | Verdict: approved → SHIP |
 | **Ship** | All gates passed, ready to merge | Archive ✓ |
 
 ---
@@ -127,7 +126,7 @@ Dragging a card forward logs a "manual override" to the orchestrator feed and ma
 | # | Feature | Description |
 |---|---------|-------------|
 | F1 | App Shell | Fixed desktop layout, title bar, sidebar + main |
-| F2 | Kanban Board | 6 columns, DnD, WIP limits, compact cards |
+| F2 | Kanban Board | 5 columns, DnD, WIP limits, compact cards |
 | F3 | Card Expansion | Inline expand: gate pipeline, files, metadata, inject message |
 | F4 | Orchestrator Feed | Conversational sidebar — read decisions + give commands |
 | F5 | Real-Time Connection | SSE bridge, connection status, auto-reconnect |

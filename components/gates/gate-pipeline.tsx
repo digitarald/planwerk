@@ -9,7 +9,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Phase, RuntimeStatus } from "@/lib/types";
+import { Phase, RuntimeStatus, PHASE_ORDER } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type GateDisplayStatus =
@@ -36,13 +36,10 @@ interface GatePipelineProps {
   runtime: RuntimeStatus;
 }
 
-const PHASE_ORDER: Phase[] = ["define", "plan", "build", "verify", "review", "ship"];
-
 const PHASE_LABELS: Record<Phase, string> = {
   define: "DEF",
   plan: "PLN",
   build: "BLD",
-  verify: "VER",
   review: "REV",
   ship: "SHP",
 };

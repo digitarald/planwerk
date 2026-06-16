@@ -16,17 +16,17 @@ scripts:
 
   - name: Lint
     command: npm run lint
-    triggers: [gate.build-to-verify]
+    triggers: [gate.build-to-review]
     gate: true
 
   - name: Type Check
     command: npx tsc --noEmit
-    triggers: [gate.build-to-verify]
+    triggers: [gate.build-to-review]
     gate: true
 
   - name: Build
     command: npm run build
-    triggers: [gate.verify-to-review]
+    triggers: [gate.build-to-review]
     gate: true
 
   - name: Dev Server
@@ -51,16 +51,12 @@ gates:
         skill: architecture-review
         risk_threshold: high
 
-  build-to-verify:
+  build-to-review:
     required:
       - type: script
         name: Lint
       - type: script
         name: Type Check
-    optional: []
-
-  verify-to-review:
-    required:
       - type: script
         name: Build
     optional: []
@@ -74,6 +70,9 @@ gates:
       - type: review
         skill: security-review
         risk_threshold: medium
+      - type: review
+        skill: architecture-review
+        risk_threshold: high
 
 # Risk assessment hints for the orchestrator
 risk:
@@ -90,7 +89,7 @@ risk:
 # WIP limits per phase (orchestrator enforces these)
 wip_limits:
   build: 3
-  verify: 2
+  review: 2
 
 # Orchestrator behavior
 orchestrator:

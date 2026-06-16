@@ -4,6 +4,10 @@ import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
 import type { SessionSummary } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus } from "./types";
+import { classifyError, ConnectionError } from "./connection-error";
+
+// Re-export for consumers that imported from here
+export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
 
 // Offer both SDK-supported versions and newer server versions we're compatible with
 const OFFERED_PROTOCOL_VERSIONS = [...SUPPORTED_PROTOCOL_VERSIONS, "0.4.0"];
@@ -11,7 +15,7 @@ const OFFERED_PROTOCOL_VERSIONS = [...SUPPORTED_PROTOCOL_VERSIONS, "0.4.0"];
 export type BridgeEvent =
   | { type: "init"; sessions: AHPSessionSummary[] }
   | AHPEvent
-  | { type: "error"; message: string };
+  | ConnectionError;
 
 const LOG_PREFIX = "[ahp:bridge]";
 const debug = (...args: unknown[]) => {
@@ -90,7 +94,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to connect to AHP host";
     error("connect failed:", message);
-    onEvent({ type: "error", message });
+    onEvent(classifyError(message, "connect"));
     return dispose;
   }
 
@@ -113,7 +117,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   } catch (err) {
     const message = err instanceof Error ? err.message : "Protocol initialization failed";
     error("initialize failed:", message);
-    onEvent({ type: "error", message });
+    onEvent(classifyError(message, "protocol"));
     dispose();
     return dispose;
   }
@@ -135,7 +139,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to list sessions";
     error("listSessions failed:", message);
-    onEvent({ type: "error", message });
+    onEvent(classifyError(message, "protocol"));
     dispose();
     return dispose;
   }
@@ -190,7 +194,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       if (!disposed) {
         const message = err instanceof Error ? err.message : "Event stream error";
         warn("event loop error:", message);
-        onEvent({ type: "error", message });
+        onEvent(classifyError(message, "stream"));
       }
     }
   })();
@@ -204,7 +208,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           ? state.reason.error.message
           : "Connection closed";
         warn("disconnected:", reason);
-        onEvent({ type: "error", message: `Connection to AHP host lost: ${reason}` });
+        onEvent(classifyError(`Connection to AHP host lost: ${reason}`, "stream"));
         break;
       }
     }

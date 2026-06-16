@@ -1,15 +1,54 @@
 "use client";
 
-import { useState } from "react";
-import { Monitor, Play, Wifi } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AlertTriangle, Monitor, Play, ShieldAlert, Unplug, Wifi } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useConnectionStore } from "@/lib/store/connection-store";
+import { useConnectionStore, ConnectionErrorInfo } from "@/lib/store/connection-store";
+import type { ConnectionErrorCode } from "@/lib/ahp/connection-error";
+
+const errorIcons: Record<ConnectionErrorCode, typeof AlertTriangle> = {
+  connection_refused: Unplug,
+  auth_failed: ShieldAlert,
+  protocol_error: AlertTriangle,
+  disconnected: Unplug,
+  unknown: AlertTriangle,
+};
+
+function ConnectionError({ error }: { error: ConnectionErrorInfo }) {
+  const Icon = errorIcons[error.code] ?? AlertTriangle;
+  return (
+    <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs">
+      <div className="flex items-start gap-2">
+        <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+        <div className="min-w-0 space-y-1">
+          <p className="font-medium text-destructive">{error.message}</p>
+          {error.hint && (
+            <p className="text-muted-foreground">{error.hint}</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const CUSTOM_HOST_KEY = "planwerk-custom-host";
 
 export function Onboarding() {
   const [remoteUrl, setRemoteUrl] = useState("");
   const { connect, useMockMode, status, error } = useConnectionStore();
+
+  // Restore last custom host URL from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem(CUSTOM_HOST_KEY);
+    if (saved) setRemoteUrl(saved);
+  }, []);
+
+  const handleRemoteConnect = () => {
+    localStorage.setItem(CUSTOM_HOST_KEY, remoteUrl);
+    connect(remoteUrl);
+  };
   const isConnecting = status === "reconnecting";
 
   return (
@@ -27,11 +66,7 @@ export function Onboarding() {
             </div>
           )}
 
-          {error && (
-            <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
-              {error}
-            </div>
-          )}
+          {error && <ConnectionError error={error} />}
 
           <button
             onClick={() => connect("ws://localhost:8082")}
@@ -58,7 +93,7 @@ export function Onboarding() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => connect(remoteUrl)}
+              onClick={handleRemoteConnect}
               disabled={!remoteUrl || isConnecting}
             >
               <Wifi className="h-3.5 w-3.5" />

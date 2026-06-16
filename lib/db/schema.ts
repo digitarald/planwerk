@@ -29,6 +29,7 @@ export function getDb(): Database.Database {
         from_phase TEXT NOT NULL,
         to_phase TEXT NOT NULL,
         gate_type TEXT NOT NULL,
+        gate_name TEXT,
         status TEXT NOT NULL DEFAULT 'running',
         output TEXT,
         started_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -48,6 +49,24 @@ export function getDb(): Database.Database {
 
       CREATE INDEX IF NOT EXISTS idx_gate_runs_card ON gate_runs(card_id);
       CREATE INDEX IF NOT EXISTS idx_gate_runs_status ON gate_runs(status);
+    `);
+
+    const gateRunsColumns = db
+      .prepare("PRAGMA table_info(gate_runs)")
+      .all() as Array<{ name: string }>;
+
+    if (!gateRunsColumns.some((column) => column.name === "gate_name")) {
+      db.exec("ALTER TABLE gate_runs ADD COLUMN gate_name TEXT;");
+    }
+
+    db.exec(`
+      UPDATE card_phases SET phase = 'review' WHERE phase = 'verify';
+      UPDATE gate_runs
+      SET from_phase = 'build', to_phase = 'review'
+      WHERE from_phase = 'build' AND to_phase = 'verify';
+      UPDATE gate_runs
+      SET from_phase = 'build', to_phase = 'review'
+      WHERE from_phase = 'verify' AND to_phase = 'review';
     `);
   }
 

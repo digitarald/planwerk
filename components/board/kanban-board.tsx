@@ -5,9 +5,7 @@ import { DragDropContext, type DropResult } from "@hello-pangea/dnd";
 import { KanbanColumn } from "@/components/board/kanban-column";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import { useBoardStore } from "@/lib/store/board-store";
-import { COLUMNS, type Phase } from "@/lib/types";
-
-const PHASE_ORDER: Phase[] = ["define", "plan", "build", "verify", "review", "ship"];
+import { COLUMNS, PHASE_ORDER, type Phase } from "@/lib/types";
 
 export function KanbanBoard() {
   const getCard = useBoardStore((state) => state.getCard);

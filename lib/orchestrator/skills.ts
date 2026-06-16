@@ -46,7 +46,7 @@ export const SKILLS: Skill[] = [
     name: "Architecture Review",
     description:
       "Evaluates design decisions, coupling, scalability concerns, and alignment with system architecture.",
-    triggerPhases: ["plan->build"],
+    triggerPhases: ["plan->build", "review->ship"],
     riskThreshold: "high",
     estimatedDuration: "~90s",
   },

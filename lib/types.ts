@@ -1,4 +1,4 @@
-export type Phase = "define" | "plan" | "build" | "verify" | "review" | "ship";
+export type Phase = "define" | "plan" | "build" | "review" | "ship";
 export type RuntimeStatus = "idle" | "running" | "input-needed" | "error";
 export type GateStatus = "pending" | "evaluating" | "passed" | "failed";
 export type AttentionLevel =
@@ -60,7 +60,8 @@ export const COLUMNS: Column[] = [
   { id: "define", title: "Define", description: "Idea being refined" },
   { id: "plan", title: "Plan", description: "Spec & plan" },
   { id: "build", title: "Build", description: "Writing code", wipLimit: 3 },
-  { id: "verify", title: "Verify", description: "Running checks", wipLimit: 2 },
-  { id: "review", title: "Review", description: "AI review" },
+  { id: "review", title: "Review", description: "Code review & approval", wipLimit: 2 },
   { id: "ship", title: "Ship", description: "Ready to deliver" },
 ];
+
+export const PHASE_ORDER: Phase[] = COLUMNS.map((col) => col.id);

@@ -44,7 +44,7 @@ function generateResponse(
   if (lower.includes("pause") || lower.includes("stop")) {
     return {
       response:
-        "Pausing all active sessions. 3 sessions in BUILD and 1 in VERIFY will be suspended. They'll resume where they left off when you're ready.",
+        "Pausing all active sessions. 3 sessions in BUILD and 1 in REVIEW will be suspended. They'll resume where they left off when you're ready.",
       action: "pause",
     };
   }
@@ -56,7 +56,7 @@ function generateResponse(
   ) {
     return {
       response:
-        'Board health: 4 active, 2 idle, 0 errors, 1 needs input. "Database migration v3" is in VERIFY with tests running (42/89 passing). "Update API docs" needs your input on which endpoints to prioritize.',
+        'Board health: 4 active, 2 idle, 0 errors, 1 needs input. "Database migration v3" is in REVIEW with code review running. "Update API docs" needs your input on which endpoints to prioritize.',
       action: "status",
     };
   }

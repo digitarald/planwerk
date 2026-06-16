@@ -1,7 +1,7 @@
 import "server-only";
 
 import { getDb } from "@/lib/db/schema";
-import { Phase } from "@/lib/types";
+import { Phase, PHASE_ORDER } from "@/lib/types";
 
 export type GateType = "lint" | "typecheck" | "test" | "review" | "custom";
 
@@ -11,6 +11,7 @@ export interface GateRun {
   fromPhase: Phase;
   toPhase: Phase;
   gateType: GateType;
+  gateName?: string;
   status: "running" | "passed" | "failed";
   output?: string;
   startedAt: string;
@@ -22,48 +23,48 @@ export interface GateConfig {
   phaseTransition: string;
   gateType: GateType;
   command?: string;
+  gateName?: string;
   required: boolean;
 }
 
 const DEFAULT_GATES: Record<string, GateConfig[]> = {
   "plan->build": [
-    { phaseTransition: "plan->build", gateType: "review", required: true },
-  ],
-  "build->verify": [
     {
-      phaseTransition: "build->verify",
+      phaseTransition: "plan->build",
+      gateType: "review",
+      gateName: "plan-review",
+      required: true,
+    },
+  ],
+  "build->review": [
+    {
+      phaseTransition: "build->review",
       gateType: "lint",
       command: "npm run lint",
       required: true,
     },
     {
-      phaseTransition: "build->verify",
+      phaseTransition: "build->review",
       gateType: "typecheck",
       command: "npm run typecheck",
       required: true,
     },
-  ],
-  "verify->review": [
     {
-      phaseTransition: "verify->review",
+      phaseTransition: "build->review",
       gateType: "test",
       command: "npm test",
       required: true,
     },
   ],
   "review->ship": [
-    { phaseTransition: "review->ship", gateType: "review", required: true },
+    {
+      phaseTransition: "review->ship",
+      gateType: "review",
+      gateName: "code-review",
+      required: true,
+    },
   ],
 };
-
-const PHASE_ORDER: Phase[] = [
-  "define",
-  "plan",
-  "build",
-  "verify",
-  "review",
-  "ship",
-];
 
 type GateRunRow = {
   id: number;
@@ -71,6 +72,7 @@ type GateRunRow = {
   from_phase: string;
   to_phase: string;
   gate_type: string;
+  gate_name: string | null;
   status: string;
   output: string | null;
   started_at: string;
@@ -85,6 +87,7 @@ function mapGateRun(row: GateRunRow): GateRun {
     fromPhase: row.from_phase as Phase,
     toPhase: row.to_phase as Phase,
     gateType: row.gate_type as GateType,
+    gateName: row.gate_name || undefined,
     status: row.status as "running" | "passed" | "failed",
     output: row.output || undefined,
     startedAt: row.started_at,
@@ -110,6 +113,7 @@ export function getGatesForTransition(
       phase_transition: string;
       gate_type: string;
       command: string | null;
+      gate_name?: string | null;
       required: number;
     }>;
 
@@ -118,6 +122,7 @@ export function getGatesForTransition(
         phaseTransition: config.phase_transition,
         gateType: config.gate_type as GateType,
         command: config.command || undefined,
+        gateName: config.gate_name || undefined,
         required: Boolean(config.required),
       }));
     }
@@ -130,7 +135,8 @@ export function startGateRun(
   cardId: string,
   fromPhase: Phase,
   toPhase: Phase,
-  gateType: GateType
+  gateType: GateType,
+  gateName?: string
 ): number {
   const db = getDb();
   db.prepare(
@@ -139,9 +145,9 @@ export function startGateRun(
 
   const result = db
     .prepare(
-      "INSERT INTO gate_runs (card_id, from_phase, to_phase, gate_type) VALUES (?, ?, ?, ?)"
+      "INSERT INTO gate_runs (card_id, from_phase, to_phase, gate_type, gate_name) VALUES (?, ?, ?, ?, ?)"
     )
-    .run(cardId, fromPhase, toPhase, gateType);
+    .run(cardId, fromPhase, toPhase, gateType, gateName || null);
 
   return Number(result.lastInsertRowid);
 }
@@ -199,10 +205,15 @@ export function canAdvancePhase(
   }
 
   const passingRuns = getLatestPassingRuns(cardId, fromPhase, toPhase);
-  const passedTypes = new Set(passingRuns.map((run) => run.gateType));
-  const pendingGates = requiredGates.filter(
-    (gate) => !passedTypes.has(gate.gateType)
-  );
+  const pendingGates = requiredGates.filter((gate) => {
+    if (gate.gateName) {
+      return !passingRuns.some(
+        (run) => run.gateType === gate.gateType && run.gateName === gate.gateName
+      );
+    }
+
+    return !passingRuns.some((run) => run.gateType === gate.gateType);
+  });
 
   return {
     allowed: pendingGates.length === 0,
@@ -216,7 +227,9 @@ export function getCardPhase(cardId: string): Phase {
     .prepare("SELECT phase FROM card_phases WHERE card_id = ?")
     .get(cardId) as { phase: string } | undefined;
 
-  return (row?.phase as Phase) || "define";
+  const phase = row?.phase || "define";
+  if (phase === "verify") return "review";
+  return phase as Phase;
 }
 
 export function setCardPhase(cardId: string, phase: Phase): void {
