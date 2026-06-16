@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 
 import { CardExpansion } from "./card-expansion";
-import { useBoardStore } from "@/lib/store/board-store";
+import { useBoardStore, selectShowWorkspaceTags } from "@/lib/store/board-store";
 import {
   AttentionLevel,
   KanbanCard as KanbanCardType,
@@ -100,6 +100,7 @@ function formatRelativeTime(timestamp: number): string {
 export function KanbanCard({ card, index }: KanbanCardProps) {
   const setExpandedCard = useBoardStore((state) => state.setExpandedCard);
   const expandedCardId = useBoardStore((state) => state.expandedCardId);
+  const showWorkspaceTags = useBoardStore(selectShowWorkspaceTags);
   const isExpanded = expandedCardId === card.id;
 
   return (
@@ -170,6 +171,13 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
               )}
               <span className="ml-auto">{formatRelativeTime(card.modifiedAt)}</span>
             </div>
+
+            {/* Workspace tag — shown when multiple workspaces visible */}
+            {showWorkspaceTags && card.project && (
+              <div className="mt-1 pl-3 text-[10px] text-muted-foreground/50 truncate">
+                {card.project.name}
+              </div>
+            )}
 
             {/* Expanded view */}
             {isExpanded && (

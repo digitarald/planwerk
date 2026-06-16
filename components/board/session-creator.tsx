@@ -5,13 +5,24 @@ import { Plus, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useBoardStore } from "@/lib/store/board-store";
+import { useBoardStore, selectWorkspaces } from "@/lib/store/board-store";
+import { useShallow } from "zustand/react/shallow";
 import { type KanbanCard } from "@/lib/types";
 
 export function SessionCreator() {
   const [isOpen, setIsOpen] = useState(false);
   const [title, setTitle] = useState("");
   const addCard = useBoardStore((state) => state.addCard);
+  const workspaceFilters = useBoardStore((state) => state.workspaceFilters);
+  const workspaces = useBoardStore(useShallow(selectWorkspaces));
+
+  // Inherit workspace when exactly one non-sentinel filter is active
+  const inheritedProject = (() => {
+    if (workspaceFilters.size !== 1) return undefined;
+    const [filterPath] = workspaceFilters;
+    const ws = workspaces.find((w) => w.path === filterPath);
+    return ws ? { name: ws.name, path: ws.path } : undefined;
+  })();
 
   const handleCreate = (event: FormEvent) => {
     event.preventDefault();
@@ -31,6 +42,7 @@ export function SessionCreator() {
       filesChanged: 0,
       planSteps: { total: 0, done: 0 },
       modifiedAt: Date.now(),
+      project: inheritedProject,
     };
 
     addCard(newCard);

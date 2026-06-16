@@ -11,13 +11,14 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command"
+import { useShallow } from "zustand/react/shallow"
 import { Plus, Columns3, Zap, ArrowRight } from "lucide-react"
-import { useBoardStore } from "@/lib/store/board-store"
+import { useBoardStore, selectFilteredCards } from "@/lib/store/board-store"
 import { COLUMNS } from "@/lib/types"
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false)
-  const cards = useBoardStore((s) => s.cards)
+  const cards = useBoardStore(useShallow(selectFilteredCards))
   const setExpandedCard = useBoardStore((s) => s.setExpandedCard)
 
   useEffect(() => {

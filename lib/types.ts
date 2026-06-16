@@ -45,6 +45,7 @@ export interface KanbanCard {
   model?: string;
   branch?: string;
   workingDirectory?: string;
+  project?: { name: string; path: string };
   artifacts?: Artifact[];
   recentActivity?: ActivityEntry[];
 }

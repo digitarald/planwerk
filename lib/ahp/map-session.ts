@@ -132,6 +132,7 @@ export function mapSessionToCard(
     model: session.model,
     branch: undefined,
     workingDirectory: session.workingDirectory,
+    project: session.project,
     artifacts: artifacts.length > 0 ? artifacts : undefined,
   };
 }

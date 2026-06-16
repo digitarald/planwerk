@@ -82,7 +82,7 @@ Gate commands are "executed" via `setTimeout()` inside an API route handler. Thi
 **Where:** `lib/types.ts`
 
 Missing fields needed for real SDLC:
-- `provider`, `resource`, `project`, `repo`, `branch` (from AHP)
+- `provider`, `resource`, `repo`, `branch` (from AHP)
 - PR/issue/session URLs
 - Assignee/owner
 - Priority
@@ -91,6 +91,8 @@ Missing fields needed for real SDLC:
 - Real file list (not hardcoded names in expansion)
 - Dependency/blocker relationships between cards
 - Unread/archived/read state from AHP `IsRead` / `IsArchived` bits
+
+**Partially addressed:** `project: { name, path }` added to `KanbanCard` and threaded from AHP `SessionSummary.project`. Workspace filter in TitleBar uses `project.path` as filter key.
 
 ---
 
