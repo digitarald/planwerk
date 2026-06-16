@@ -1,25 +1,70 @@
 "use client";
 
 import { useState } from "react";
-import { Send, FileCode, GitBranch, Cpu, ChevronDown, ChevronRight, X } from "lucide-react";
+import {
+  Send,
+  FileCode,
+  GitBranch,
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  FlaskConical,
+  Lightbulb,
+  BookOpen,
+  ClipboardCheck,
+  Scale,
+  Wrench,
+  Bot,
+  Shield,
+} from "lucide-react";
 
-import { GatePipeline } from "@/components/gates/gate-pipeline";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { useBoardStore } from "@/lib/store/board-store";
+import { Textarea } from "@/components/ui/textarea";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
-import { KanbanCard as KanbanCardType } from "@/lib/types";
+import {
+  KanbanCard as KanbanCardType,
+  ArtifactType,
+  ArtifactStatus,
+  ActivityEntry,
+} from "@/lib/types";
 
 interface CardExpansionProps {
   card: KanbanCardType;
 }
 
+const artifactIcons: Record<ArtifactType, typeof FileText> = {
+  plan: FileText,
+  research: FlaskConical,
+  design: Lightbulb,
+  spec: BookOpen,
+  "test-plan": ClipboardCheck,
+  decision: Scale,
+};
+
+const artifactStatusColors: Record<ArtifactStatus, string> = {
+  draft: "text-muted-foreground",
+  approved: "text-emerald-600",
+  superseded: "text-muted-foreground/40 line-through",
+};
+
+const activityIcons: Record<ActivityEntry["type"], typeof Wrench> = {
+  tool: Wrench,
+  agent: Bot,
+  gate: Shield,
+};
+
+function formatTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export function CardExpansion({ card }: CardExpansionProps) {
   const [message, setMessage] = useState("");
   const [showFiles, setShowFiles] = useState(false);
-  const setExpandedCard = useBoardStore((s) => s.setExpandedCard);
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
 
   const handleInject = (e: React.FormEvent) => {
@@ -33,34 +78,84 @@ export function CardExpansion({ card }: CardExpansionProps) {
     setMessage("");
   };
 
-  return (
-    <div className="mt-2 space-y-2.5 border-t border-border pt-2 animate-in fade-in slide-in-from-top-1 duration-200">
-      <GatePipeline
-        cardId={card.id}
-        currentPhase={card.phase}
-        gateStatus={card.gateStatus}
-        runtime={card.runtime}
-      />
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleInject(e);
+    }
+  };
 
-      {card.planSteps.total > 0 && (
+  const artifacts = card.artifacts ?? [];
+  const recentActivity = card.recentActivity ?? [];
+
+  return (
+    <div
+      className="mt-2 space-y-2 border-t border-border pt-2 animate-in fade-in slide-in-from-top-1 duration-200"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {/* Artifacts */}
+      {artifacts.length > 0 ? (
         <div className="space-y-1">
           <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-            Plan Progress
+            Artifacts
           </div>
-          <div className="flex items-center gap-2">
-            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-              <div
-                className="h-full rounded-full bg-primary transition-all"
-                style={{ width: `${(card.planSteps.done / card.planSteps.total) * 100}%` }}
-              />
-            </div>
-            <span className="text-[11px] font-medium text-muted-foreground">
-              {card.planSteps.done}/{card.planSteps.total} steps
-            </span>
+          <div className="space-y-0.5">
+            {artifacts.map((artifact) => {
+              const Icon = artifactIcons[artifact.type];
+              return (
+                <div
+                  key={artifact.id}
+                  className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-[11px]"
+                >
+                  <Icon className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  <span
+                    className={`min-w-0 flex-1 truncate ${artifactStatusColors[artifact.status]}`}
+                  >
+                    {artifact.title}
+                  </span>
+                  <span className="shrink-0 text-[9px] capitalize text-muted-foreground/50">
+                    {artifact.status}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+        <div className="text-[10px] text-muted-foreground/50 italic">
+          No artifacts yet
+        </div>
+      )}
+
+      {/* Recent Activity */}
+      {recentActivity.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+            Recent
+          </div>
+          <div className="space-y-0.5">
+            {recentActivity.slice(0, 3).map((entry, idx) => {
+              const Icon = activityIcons[entry.type];
+              return (
+                <div
+                  key={idx}
+                  className="flex items-start gap-1.5 text-[10px] text-muted-foreground"
+                >
+                  <Icon className="mt-0.5 h-2.5 w-2.5 shrink-0" />
+                  <span className="min-w-0 flex-1 line-clamp-1">
+                    {entry.message}
+                  </span>
+                  <span className="shrink-0 tabular-nums text-muted-foreground/50">
+                    {formatTime(entry.timestamp)}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
 
+      {/* Files */}
       {card.filesChanged > 0 && (
         <div>
           <button
@@ -90,56 +185,38 @@ export function CardExpansion({ card }: CardExpansionProps) {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-1.5">
-        {card.model && (
-          <Badge variant="secondary" className="h-4 gap-1 px-1.5 text-[10px]">
-            <Cpu className="h-2.5 w-2.5" />
-            {card.model}
-          </Badge>
-        )}
-        {card.branch && (
-          <Badge variant="secondary" className="h-4 gap-1 px-1.5 text-[10px]">
-            <GitBranch className="h-2.5 w-2.5" />
-            {card.branch}
-          </Badge>
-        )}
-      </div>
+      {/* Branch */}
+      {card.branch && (
+        <Badge variant="secondary" className="h-4 gap-1 px-1.5 text-[10px]">
+          <GitBranch className="h-2.5 w-2.5" />
+          {card.branch}
+        </Badge>
+      )}
 
       <Separator />
 
-      <form onSubmit={handleInject} className="flex gap-1.5">
-        <Input
+      {/* Chat input — textarea with embedded send button */}
+      <form onSubmit={handleInject} className="relative">
+        <Textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
+          onKeyDown={handleKeyDown}
           onClick={(e) => e.stopPropagation()}
           placeholder="Send message to session..."
-          className="h-7 flex-1 text-[11px]"
+          className="min-h-[3.5rem] resize-none pr-8 text-[11px]"
+          rows={2}
         />
         <Button
           type="submit"
           size="sm"
           variant="ghost"
           disabled={!message.trim()}
-          className="h-7 w-7 p-0"
+          className="absolute bottom-1.5 right-1.5 h-6 w-6 p-0"
           onClick={(e) => e.stopPropagation()}
         >
           <Send className="h-3 w-3" />
         </Button>
       </form>
-
-      <div className="flex justify-end">
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-5 px-1.5 text-[10px] text-muted-foreground"
-          onClick={(e) => {
-            e.stopPropagation();
-            setExpandedCard(null);
-          }}
-        >
-          <X className="mr-0.5 h-3 w-3" /> Close
-        </Button>
-      </div>
     </div>
   );
 }

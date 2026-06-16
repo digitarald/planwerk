@@ -2,15 +2,25 @@
 
 import { Draggable } from "@hello-pangea/dnd";
 import type { CSSProperties } from "react";
-import { AlertTriangle } from "lucide-react";
+import {
+  AlertTriangle,
+  CirclePause,
+  Loader2,
+  MessageCircleWarning,
+  ShieldCheck,
+  ShieldX,
+  XCircle,
+  ChevronDown,
+} from "lucide-react";
 
 import { CardExpansion } from "./card-expansion";
-import { Badge } from "@/components/ui/badge";
 import { useBoardStore } from "@/lib/store/board-store";
 import {
   AttentionLevel,
   KanbanCard as KanbanCardType,
   RiskLevel,
+  RuntimeStatus,
+  GateStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -33,19 +43,46 @@ const attentionStyles: Record<AttentionLevel, string> = {
   conflict: "border-purple-400",
 };
 
-const runtimeLabels = {
-  idle: "Idle",
-  running: "Running",
-  "input-needed": "Needs input",
-  error: "Error",
-} as const;
+function RuntimeIndicator({ status }: { status: RuntimeStatus }) {
+  switch (status) {
+    case "running":
+      return <Loader2 className="h-3 w-3 animate-spin text-primary" />;
+    case "idle":
+      return <CirclePause className="h-3 w-3 text-muted-foreground/40" />;
+    case "input-needed":
+      return (
+        <span className="inline-flex items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+          <MessageCircleWarning className="h-2.5 w-2.5" />
+          Input
+        </span>
+      );
+    case "error":
+      return (
+        <span className="inline-flex items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">
+          <XCircle className="h-2.5 w-2.5" />
+          Error
+        </span>
+      );
+  }
+}
 
-const gateLabels = {
-  pending: "Gate pending",
-  evaluating: "Gate evaluating",
-  passed: "Gate passed",
-  failed: "Gate failed",
-} as const;
+function GateIndicator({ status }: { status: GateStatus }) {
+  switch (status) {
+    case "passed":
+      return <ShieldCheck className="h-3 w-3 text-emerald-500" />;
+    case "evaluating":
+      return <Loader2 className="h-3 w-3 animate-spin text-primary/70" />;
+    case "failed":
+      return (
+        <span className="inline-flex items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">
+          <ShieldX className="h-2.5 w-2.5" />
+          Gate
+        </span>
+      );
+    case "pending":
+      return null;
+  }
+}
 
 function formatRelativeTime(timestamp: number): string {
   const diff = Date.now() - timestamp;
@@ -88,77 +125,68 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
             }}
             style={style as CSSProperties | undefined}
             className={cn(
-              "cursor-pointer rounded-xl border border-border bg-card p-3 transition-all hover:border-primary/30 hover:shadow-sm focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1",
+              "cursor-pointer rounded-lg border border-border bg-card p-2 transition-all hover:border-primary/30 hover:shadow-sm focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1",
               snapshot.isDragging && "rotate-1 shadow-lg",
               attentionStyles[card.attention]
             )}
           >
-            <div className="mb-1.5 flex items-start gap-2">
+            {/* Header: risk dot + title */}
+            <div className="flex items-start gap-1.5">
               <div
                 className={cn(
-                  "mt-1 h-2 w-2 shrink-0 rounded-full",
+                  "mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full",
                   riskColors[card.risk]
                 )}
               />
-              <div className="min-w-0 flex-1">
-                <h3 className="line-clamp-2 text-sm leading-tight font-medium">
-                  {card.title}
-                </h3>
-              </div>
+              <h3 className="min-w-0 flex-1 line-clamp-2 text-xs font-medium leading-tight">
+                {card.title}
+              </h3>
             </div>
 
-            <p className="mb-2 line-clamp-2 pl-4 text-[11px] text-muted-foreground">
+            {/* Status indicators + activity */}
+            <div className="mt-1 flex items-center gap-1.5 pl-3">
+              <RuntimeIndicator status={card.runtime} />
+              <GateIndicator status={card.gateStatus} />
+              {card.manualOverride && (
+                <AlertTriangle className="h-3 w-3 text-amber-500" />
+              )}
+            </div>
+
+            <p className="mt-1 line-clamp-1 pl-3 text-[11px] text-muted-foreground">
               {card.activity}
             </p>
 
-            <div className="flex flex-wrap items-center gap-1.5 pl-4">
-              <Badge variant="secondary" className="h-5 text-[10px]">
-                {runtimeLabels[card.runtime]}
-              </Badge>
-              <Badge variant="outline" className="h-5 text-[10px]">
-                {gateLabels[card.gateStatus]}
-              </Badge>
-              {card.manualOverride && (
-                <Badge
-                  variant="outline"
-                  className="h-5 gap-1 border-amber-300 bg-amber-50 text-[10px] text-amber-700"
-                >
-                  <AlertTriangle className="h-3 w-3" />
-                  Manual override
-                </Badge>
-              )}
-            </div>
-
-            <div className="mt-2 flex items-center gap-1.5 pl-4 text-[10px] text-muted-foreground">
+            {/* Compact stats row */}
+            <div className="mt-1.5 flex items-center gap-2 pl-3 text-[10px] text-muted-foreground/70">
               {card.filesChanged > 0 && (
-                <>
-                  <span className="text-emerald-600">+{card.additions}</span>
-                  <span className="text-red-600">-{card.deletions}</span>
-                  <span>· {card.filesChanged} files</span>
-                  <span>·</span>
-                </>
-              )}
-              <span>{formatRelativeTime(card.modifiedAt)}</span>
-            </div>
-
-            {card.planSteps.total > 0 && (
-              <div className="mt-2 flex items-center gap-1.5 pl-4">
-                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-                  <div
-                    className="h-full rounded-full bg-primary/60 transition-all"
-                    style={{
-                      width: `${(card.planSteps.done / card.planSteps.total) * 100}%`,
-                    }}
-                  />
-                </div>
-                <span className="text-[10px] text-muted-foreground">
-                  {card.planSteps.done}/{card.planSteps.total}
+                <span>
+                  <span className="text-emerald-600">+{card.additions}</span>{" "}
+                  <span className="text-red-600">-{card.deletions}</span>{" "}
+                  · {card.filesChanged}f
                 </span>
-              </div>
-            )}
+              )}
+              {card.planSteps.total > 0 && (
+                <span>{card.planSteps.done}/{card.planSteps.total} steps</span>
+              )}
+              <span className="ml-auto">{formatRelativeTime(card.modifiedAt)}</span>
+            </div>
 
             {/* Expanded view */}
-            {isExpanded && <CardExpansion card={card} />}
+            {isExpanded && (
+              <>
+                <CardExpansion card={card} />
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setExpandedCard(null);
+                  }}
+                  className="mt-1.5 flex w-full items-center justify-center gap-0.5 rounded py-0.5 text-[10px] text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                >
+                  <ChevronDown className="h-3 w-3 rotate-180" />
+                  Collapse
+                </button>
+              </>
+            )}
           </div>
         );
       }}

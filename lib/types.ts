@@ -8,6 +8,24 @@ export type AttentionLevel =
   | "error"
   | "conflict";
 export type RiskLevel = "low" | "medium" | "high";
+export type ArtifactType = "plan" | "research" | "design" | "spec" | "test-plan" | "decision";
+export type ArtifactStatus = "draft" | "approved" | "superseded";
+
+export interface Artifact {
+  id: string;
+  type: ArtifactType;
+  title: string;
+  contentRef?: string;
+  createdAt: number;
+  createdBy: "human" | "agent";
+  status: ArtifactStatus;
+}
+
+export interface ActivityEntry {
+  timestamp: number;
+  type: "tool" | "agent" | "gate";
+  message: string;
+}
 
 export interface KanbanCard {
   id: string;
@@ -27,6 +45,8 @@ export interface KanbanCard {
   model?: string;
   branch?: string;
   workingDirectory?: string;
+  artifacts?: Artifact[];
+  recentActivity?: ActivityEntry[];
 }
 
 export interface Column {

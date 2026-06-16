@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { Loader2, Send } from "lucide-react";
-import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 
 export function ChatInput() {
@@ -17,27 +18,38 @@ export function ChatInput() {
     setValue("");
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e);
+    }
+  };
+
   return (
     <form onSubmit={handleSubmit} className="p-2">
       <div className="relative">
-        <Input
+        <Textarea
           value={value}
           onChange={(e) => setValue(e.target.value)}
+          onKeyDown={handleKeyDown}
           placeholder="Ask or instruct..."
-          className="pr-8 text-xs h-8 bg-background"
+          className="min-h-[3.5rem] resize-none pr-8 text-xs bg-background"
+          rows={2}
           disabled={isProcessing}
         />
-        <button
+        <Button
           type="submit"
+          size="sm"
+          variant="ghost"
           disabled={!value.trim() || isProcessing}
-          className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground disabled:opacity-30"
+          className="absolute bottom-1.5 right-1.5 h-6 w-6 p-0 text-muted-foreground hover:text-foreground disabled:opacity-30"
         >
           {isProcessing ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : (
             <Send className="h-3.5 w-3.5" />
           )}
-        </button>
+        </Button>
       </div>
     </form>
   );
