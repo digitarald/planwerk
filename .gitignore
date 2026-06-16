@@ -23,6 +23,7 @@
 # misc
 .DS_Store
 *.pem
+.planwerk/
 
 # debug
 npm-debug.log*
