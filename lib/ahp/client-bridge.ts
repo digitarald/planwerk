@@ -6,7 +6,7 @@ import type { SessionSummary } from "@microsoft/agent-host-protocol";
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
 import { enrichFromChangeset, ChangesetEnrichment } from "./changeset-enricher";
-import { upsertSessionCache, removeSessionCache } from "@/lib/db/session-cache";
+import { upsertSessionCache, removeSessionCache, reconcileSessionCache, CLEAR_ENRICHMENT } from "@/lib/db/session-cache";
 
 // Re-export for consumers that imported from here
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
@@ -111,6 +111,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     if (!session.changes?.files) {
       if (enrichments.has(sessionUri)) {
         enrichments.delete(sessionUri);
+        upsertSessionCache(hostUrl, sessionUri, session, CLEAR_ENRICHMENT);
         onEvent({ type: "sessionSummaryChanged", session, enrichment: null });
       }
       return;
@@ -207,10 +208,11 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     info(`loaded ${sessions.size} sessions (${result.items.length} total, archived without changes filtered)`);
     onEvent({ type: "init", sessions: Array.from(sessions.values()), enrichments });
 
-    // Cache all sessions for fast reload
+    // Cache all sessions and remove stale entries
     for (const [uri, session] of sessions) {
       upsertSessionCache(hostUrl, uri, session, enrichments.get(uri));
     }
+    reconcileSessionCache(hostUrl, new Set(sessions.keys()));
 
     // Trigger async changeset enrichment for all sessions with file changes
     for (const [uri] of sessions) {
@@ -248,7 +250,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         } else if (event.type === "sessionRemoved") {
           debug("sessionRemoved:", event.params.session);
           sessions.delete(event.params.session);
-          removeSessionCache(event.params.session);
+          removeSessionCache(hostUrl, event.params.session);
           onEvent({ type: "sessionRemoved", resource: event.params.session });
         } else if (event.type === "sessionSummaryChanged") {
           const { session: sessionUri, changes } = event.params;
@@ -286,7 +288,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
                 debug("sessionArchived: removing (no code changes)", sessionUri);
                 sessions.delete(sessionUri);
                 enrichments.delete(sessionUri);
-                removeSessionCache(sessionUri);
+                removeSessionCache(hostUrl, sessionUri);
                 onEvent({ type: "sessionRemoved", resource: sessionUri });
               }
               continue;

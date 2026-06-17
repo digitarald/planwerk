@@ -30,27 +30,57 @@ export function getCachedSessions(hostUrl: string): CachedSession[] {
   }));
 }
 
+// sentinel: pass CLEAR_ENRICHMENT to explicitly null out cached enrichment
+const CLEAR_ENRICHMENT = Symbol("clear");
+export { CLEAR_ENRICHMENT };
+
 export function upsertSessionCache(
   hostUrl: string,
   sessionUri: string,
   summary: AHPSessionSummary,
-  enrichment?: ChangesetEnrichment | null
+  enrichment?: ChangesetEnrichment | null | typeof CLEAR_ENRICHMENT
 ): void {
   const db = getDb();
-  db.prepare(
-    `INSERT INTO session_cache (session_uri, host_url, summary_json, enrichment_json, updated_at)
-     VALUES (?, ?, ?, ?, datetime('now'))
-     ON CONFLICT(session_uri) DO UPDATE SET
-       host_url = excluded.host_url,
-       summary_json = excluded.summary_json,
-       enrichment_json = COALESCE(excluded.enrichment_json, session_cache.enrichment_json),
-       updated_at = datetime('now')`
-  ).run(sessionUri, hostUrl, JSON.stringify(summary), enrichment ? JSON.stringify(enrichment) : null);
+  // undefined → preserve existing enrichment (COALESCE)
+  // CLEAR_ENRICHMENT or null with no data → explicitly clear
+  // ChangesetEnrichment → store new value
+  const clearExplicitly = enrichment === CLEAR_ENRICHMENT;
+  const enrichmentJson = clearExplicitly ? null : (enrichment ? JSON.stringify(enrichment) : null);
+  const sql = clearExplicitly || enrichment
+    ? `INSERT INTO session_cache (session_uri, host_url, summary_json, enrichment_json, updated_at)
+       VALUES (?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(session_uri) DO UPDATE SET
+         host_url = excluded.host_url,
+         summary_json = excluded.summary_json,
+         enrichment_json = excluded.enrichment_json,
+         updated_at = datetime('now')`
+    : `INSERT INTO session_cache (session_uri, host_url, summary_json, enrichment_json, updated_at)
+       VALUES (?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(session_uri) DO UPDATE SET
+         host_url = excluded.host_url,
+         summary_json = excluded.summary_json,
+         enrichment_json = COALESCE(excluded.enrichment_json, session_cache.enrichment_json),
+         updated_at = datetime('now')`;
+  db.prepare(sql).run(sessionUri, hostUrl, JSON.stringify(summary), enrichmentJson);
 }
 
-export function removeSessionCache(sessionUri: string): void {
+export function removeSessionCache(hostUrl: string, sessionUri: string): void {
   const db = getDb();
-  db.prepare("DELETE FROM session_cache WHERE session_uri = ?").run(sessionUri);
+  db.prepare("DELETE FROM session_cache WHERE host_url = ? AND session_uri = ?").run(hostUrl, sessionUri);
+}
+
+/** Remove cached sessions for a host that are not in the given set of live URIs. */
+export function reconcileSessionCache(hostUrl: string, liveSessionUris: Set<string>): void {
+  const db = getDb();
+  const cached = db
+    .prepare("SELECT session_uri FROM session_cache WHERE host_url = ?")
+    .all(hostUrl) as Array<{ session_uri: string }>;
+  const deleteStmt = db.prepare("DELETE FROM session_cache WHERE host_url = ? AND session_uri = ?");
+  for (const row of cached) {
+    if (!liveSessionUris.has(row.session_uri)) {
+      deleteStmt.run(hostUrl, row.session_uri);
+    }
+  }
 }
 
 export function clearSessionCache(hostUrl: string): void {
