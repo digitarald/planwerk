@@ -104,8 +104,9 @@ export async function enrichFromChangeset(
     // Subscribe to the session to get its changeset catalogue
     const { result: sessionResult, subscription: sessionSub } =
       await client.subscribe(sessionUri);
-    // Close the subscription — we only need the snapshot
+    // Close the local iterator and release server-side subscription
     sessionSub.close();
+    await client.unsubscribe(sessionUri).catch(() => {});
 
     const sessionState = sessionResult.snapshot?.state as SessionState | undefined;
     if (!sessionState?.changesets?.length) {
@@ -130,11 +131,18 @@ export async function enrichFromChangeset(
     const { result: csResult, subscription: csSub } =
       await client.subscribe(changesetUri);
     csSub.close();
+    await client.unsubscribe(changesetUri).catch(() => {});
 
     const csState = csResult.snapshot?.state as ChangesetState | undefined;
     if (!csState?.files) {
       debug("changeset has no files:", changesetUri);
       return { artifacts: [], codeFileCount: 0, totalFileCount: 0 };
+    }
+
+    // If changeset is still computing, return null to retry later
+    if (csState.status === "computing") {
+      debug("changeset still computing:", changesetUri);
+      return null;
     }
 
     // Classify files

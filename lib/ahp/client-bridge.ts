@@ -97,12 +97,29 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
    * Trigger async changeset enrichment for a session. On completion,
    * re-emits the card with enrichment data applied.
    */
+  // Track sessions that changed while enrichment was in-flight
+  const dirtyEnrichments = new Set<string>();
+
   function triggerEnrichment(sessionUri: string) {
-    if (disposed || !client || pendingEnrichments.has(sessionUri)) return;
+    if (disposed || !client) return;
+
     const session = sessions.get(sessionUri);
     if (!session) return;
-    // Only enrich sessions that report file changes
-    if (!session.changes?.files) return;
+
+    // Clear stale enrichment when session has no file changes
+    if (!session.changes?.files) {
+      if (enrichments.has(sessionUri)) {
+        enrichments.delete(sessionUri);
+        onEvent({ type: "sessionSummaryChanged", session, enrichment: null });
+      }
+      return;
+    }
+
+    // If already in-flight, mark dirty for re-enrichment after completion
+    if (pendingEnrichments.has(sessionUri)) {
+      dirtyEnrichments.add(sessionUri);
+      return;
+    }
 
     pendingEnrichments.add(sessionUri);
     enrichFromChangeset(client, sessionUri)
@@ -110,15 +127,24 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         if (disposed || !sessions.has(sessionUri)) return;
         if (result) {
           enrichments.set(sessionUri, result);
-          // Re-emit the session as changed so consumers get the enriched card
-          onEvent({ type: "sessionSummaryChanged", session: sessions.get(sessionUri)! });
         }
+        // Re-emit with enrichment data included
+        onEvent({
+          type: "sessionSummaryChanged",
+          session: sessions.get(sessionUri)!,
+          enrichment: result ?? enrichments.get(sessionUri) ?? null,
+        });
       })
       .catch(() => {
         // Enrichment is best-effort; failures are silently ignored
       })
       .finally(() => {
         pendingEnrichments.delete(sessionUri);
+        // Re-enrich if session changed while we were processing
+        if (dirtyEnrichments.has(sessionUri)) {
+          dirtyEnrichments.delete(sessionUri);
+          triggerEnrichment(sessionUri);
+        }
       });
   }
 
