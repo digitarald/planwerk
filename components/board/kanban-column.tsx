@@ -22,10 +22,10 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
   return (
     <section
       className={cn(
-        "flex flex-col transition-[min-width,max-width,flex] duration-200",
+        "flex flex-col rounded-xl transition-[min-width,max-width,flex] duration-200",
         isEmpty
           ? "min-w-[60px] max-w-[60px] flex-shrink-0"
-          : "min-w-[180px] max-w-[300px] flex-1"
+          : "min-w-[180px] max-w-[300px] flex-1 bg-[var(--pw-column-bg)]"
       )}
       data-column-id={column.id}
     >
@@ -68,8 +68,8 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
               ref={provided.innerRef}
               {...provided.droppableProps}
               className={cn(
-                "min-h-full rounded-xl border border-transparent px-2 pb-2 transition-colors",
-                snapshot.isDraggingOver && "border-primary/20 bg-primary/5"
+                "min-h-full rounded-xl border border-transparent px-2 pb-2 transition-all duration-200",
+                snapshot.isDraggingOver && "border-primary/20 bg-primary/5 shadow-[inset_0_2px_8px_oklch(0.57_0.17_251/0.06)]"
               )}
             >
               <div className="space-y-2">

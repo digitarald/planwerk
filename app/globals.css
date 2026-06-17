@@ -89,6 +89,26 @@
   --pw-success: oklch(0.55 0.15 160);
   --pw-warning: oklch(0.65 0.15 85);
   --pw-info: oklch(0.55 0.15 250);
+
+  /* Elevation shadows — oklch-tinted for warmth */
+  --shadow-xs: 0 1px 2px oklch(0.25 0.02 250 / 0.06);
+  --shadow-sm: 0 1px 3px oklch(0.25 0.02 250 / 0.08), 0 1px 2px oklch(0.25 0.02 250 / 0.04);
+  --shadow-md: 0 4px 6px -1px oklch(0.25 0.02 250 / 0.08), 0 2px 4px -2px oklch(0.25 0.02 250 / 0.04);
+  --shadow-lg: 0 10px 15px -3px oklch(0.25 0.02 250 / 0.1), 0 4px 6px -4px oklch(0.25 0.02 250 / 0.05);
+
+  /* Board surface */
+  --pw-board-bg: oklch(0.975 0.003 250);
+  --pw-column-bg: oklch(0.97 0.005 250 / 0.5);
+
+  /* Attention glows — combined with elevation so they don't override depth */
+  --shadow-glow-amber: var(--shadow-xs), 0 0 0 1px oklch(0.75 0.15 85 / 0.3), 0 2px 8px oklch(0.75 0.15 85 / 0.15);
+  --shadow-glow-red: var(--shadow-xs), 0 0 0 1px oklch(0.55 0.2 26 / 0.3), 0 2px 8px oklch(0.55 0.2 26 / 0.15);
+  --shadow-glow-purple: var(--shadow-xs), 0 0 0 1px oklch(0.6 0.18 306 / 0.3), 0 2px 8px oklch(0.6 0.18 306 / 0.15);
+}
+
+.dark {
+  --pw-board-bg: oklch(0.18 0.005 250);
+  --pw-column-bg: oklch(0.2 0.008 250 / 0.4);
 }
 
 @layer base {
@@ -121,6 +141,15 @@
     scrollbar-width: thin;
   }
 
+  /* Elevation utilities */
+  .shadow-elevation-xs { box-shadow: var(--shadow-xs); }
+  .shadow-elevation-sm { box-shadow: var(--shadow-sm); }
+  .shadow-elevation-md { box-shadow: var(--shadow-md); }
+  .shadow-elevation-lg { box-shadow: var(--shadow-lg); }
+  .shadow-glow-amber { box-shadow: var(--shadow-glow-amber); }
+  .shadow-glow-red { box-shadow: var(--shadow-glow-red); }
+  .shadow-glow-purple { box-shadow: var(--shadow-glow-purple); }
+
   @keyframes pulse-border {
     0%,
     100% {
@@ -133,5 +162,18 @@
 
   .animate-pulse-border {
     animation: pulse-border 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-glow-amber {
+    0%, 100% {
+      box-shadow: 0 1px 2px oklch(0.25 0.02 250 / 0.06), 0 0 0 1px oklch(0.75 0.15 85 / 0.3), 0 2px 8px oklch(0.75 0.15 85 / 0.12);
+    }
+    50% {
+      box-shadow: 0 1px 2px oklch(0.25 0.02 250 / 0.06), 0 0 0 1px oklch(0.75 0.15 85 / 0.45), 0 2px 12px oklch(0.75 0.15 85 / 0.2);
+    }
+  }
+
+  .animate-glow-amber {
+    animation: pulse-glow-amber 2s ease-in-out infinite;
   }
 }

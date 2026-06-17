@@ -32,7 +32,7 @@ export function AppShell({ children }: AppShellProps) {
       <div className="flex min-h-0 flex-1">
         <aside
           className={cn(
-            "flex min-h-0 flex-col border-r border-border bg-muted/50 transition-[width] duration-200",
+            "relative z-[5] flex min-h-0 flex-col bg-muted/50 shadow-elevation-md transition-[width] duration-200",
             collapsed ? "w-12" : "w-80"
           )}
         >
@@ -51,7 +51,7 @@ export function AppShell({ children }: AppShellProps) {
           </div>
           {!collapsed && <OrchestratorFeed />}
         </aside>
-        <main className="min-h-0 min-w-0 flex-1">{children}</main>
+        <main className="min-h-0 min-w-0 flex-1 bg-[var(--pw-board-bg)]">{children}</main>
       </div>
     </div>
   );

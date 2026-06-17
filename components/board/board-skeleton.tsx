@@ -4,7 +4,7 @@ import { COLUMNS } from "@/lib/types";
 
 function CardSkeleton() {
   return (
-    <div className="bg-card border border-border rounded-md p-2.5 space-y-2 animate-pulse">
+    <div className="bg-card border border-border/60 rounded-md p-2.5 space-y-2 animate-pulse shadow-elevation-xs">
       <div className="flex items-center gap-1.5">
         <div className="h-2 w-2 rounded-full bg-muted" />
         <div className="h-3 bg-muted rounded w-3/4" />
