@@ -66,6 +66,23 @@ function RuntimeIndicator({ status }: { status: RuntimeStatus }) {
   }
 }
 
+/** Shows the activity text as a question and the last tool call for context */
+function InputContext({ card }: { card: KanbanCardType }) {
+  const lastTool = card.recentActivity?.findLast((e) => e.type === "tool");
+  return (
+    <div className="mt-1 space-y-0.5 rounded border border-amber-200 bg-amber-50 px-1.5 py-1 dark:border-amber-800/40 dark:bg-amber-950/20">
+      <p className="line-clamp-2 text-[11px] font-medium text-amber-800 dark:text-amber-300">
+        {card.activity || "Waiting for input"}
+      </p>
+      {lastTool && (
+        <p className="line-clamp-1 text-[10px] text-amber-700/70 dark:text-amber-400/60">
+          ↳ {lastTool.message}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function GateIndicator({ status }: { status: GateStatus }) {
   switch (status) {
     case "passed":
@@ -153,9 +170,13 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
               )}
             </div>
 
-            <p className="mt-1 line-clamp-1 pl-3 text-[11px] text-muted-foreground">
-              {card.activity}
-            </p>
+            {card.runtime === "input-needed" ? (
+              <InputContext card={card} />
+            ) : (
+              <p className="mt-1 line-clamp-1 pl-3 text-[11px] text-muted-foreground">
+                {card.activity}
+              </p>
+            )}
 
             {/* Compact stats row */}
             <div className="mt-1.5 flex items-center gap-2 pl-3 text-[10px] text-muted-foreground/70">

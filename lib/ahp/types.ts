@@ -38,8 +38,9 @@ export function parseAHPStatus(status: number) {
   return {
     isIdle: (status & AHPStatus.Idle) !== 0,
     isError: (status & AHPStatus.Error) !== 0,
+    // InputNeeded (24) is composite and includes InProgress (8)
     isInProgress: (status & AHPStatus.InProgress) !== 0,
-    isInputNeeded: (status & AHPStatus.InputNeeded) !== 0,
+    isInputNeeded: (status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded,
     isRead: (status & AHPStatus.IsRead) !== 0,
     isArchived: (status & AHPStatus.IsArchived) !== 0,
   };
