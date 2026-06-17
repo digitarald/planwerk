@@ -7,6 +7,8 @@ import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./typ
 import { classifyError, ConnectionError } from "./connection-error";
 import { enrichFromChangeset, ChangesetEnrichment } from "./changeset-enricher";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, CLEAR_ENRICHMENT } from "@/lib/db/session-cache";
+import { TelemetryTapTransport } from "./telemetry-transport";
+import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
 
 // Re-export for consumers that imported from here
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
@@ -155,10 +157,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     signal.addEventListener("abort", dispose, { once: true });
   }
 
-  // Connect WebSocket transport
-  let transport: Awaited<ReturnType<typeof WebSocketTransport.connect>>;
+  // Connect WebSocket transport, wrapped with telemetry tap
+  let rawTransport: Awaited<ReturnType<typeof WebSocketTransport.connect>>;
   try {
-    transport = await WebSocketTransport.connect(hostUrl);
+    rawTransport = await WebSocketTransport.connect(hostUrl);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to connect to AHP host";
     error("connect failed:", message);
@@ -167,17 +169,27 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   }
 
   if (disposed) {
-    transport.close();
+    rawTransport.close();
     return dispose;
   }
+
+  // Rotate telemetry logs on startup (best-effort, non-blocking)
+  rotateLogs().catch(() => {});
+
+  const transport = new TelemetryTapTransport(rawTransport, (notification) => {
+    handleOtlpLogs(notification).catch((err) => {
+      debug("telemetry log write failed:", err instanceof Error ? err.message : err);
+    });
+  });
 
   client = new AhpClient(transport);
   client.connect();
 
   // Initialize the protocol
   const clientId = crypto.randomUUID();
+  let initResult;
   try {
-    await client.initialize({
+    initResult = await client.initialize({
       clientId,
       protocolVersions: OFFERED_PROTOCOL_VERSIONS,
       initialSubscriptions: ["ahp-root://"],
@@ -193,6 +205,15 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   if (disposed) return dispose;
 
   info("connected to", hostUrl);
+
+  // Subscribe to OTLP telemetry logs if the host advertises them
+  if (initResult.telemetry?.logs) {
+    const logsChannel = initResult.telemetry.logs.replace("{level}", "debug");
+    info("subscribing to telemetry logs:", logsChannel);
+    client.subscribe(logsChannel).catch((err) => {
+      debug("telemetry logs subscription failed:", err instanceof Error ? err.message : err);
+    });
+  }
 
   // Fetch initial session list
   try {
