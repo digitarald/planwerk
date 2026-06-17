@@ -123,11 +123,11 @@ export function ArtifactViewer({ artifact, open, onOpenChange }: ArtifactViewerP
         <ScrollArea className="flex-1 min-h-0">
           <div className="px-6 py-5">
             {artifact.contentRef ? (
-              <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:font-heading prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-table:text-xs prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-[13px]">
+              <article className="prose dark:prose-invert max-w-none prose-headings:font-heading prose-h1:text-xl prose-h1:mb-4 prose-h2:text-base prose-h2:mt-6 prose-h2:mb-2 prose-h3:text-sm prose-p:text-sm prose-p:leading-relaxed prose-li:text-sm prose-table:text-xs prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-[13px] prose-strong:font-semibold">
                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
                   {artifact.contentRef}
                 </ReactMarkdown>
-              </div>
+              </article>
             ) : (
               <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                 <Icon className="h-8 w-8 mb-2 opacity-30" />
