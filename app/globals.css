@@ -50,45 +50,46 @@
 }
 
 :root {
+  /* VS Code 2026 Light */
   --background: oklch(1 0 0);
-  --foreground: oklch(0.235 0 0);
+  --foreground: oklch(0.244 0 0);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.235 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.235 0 0);
-  --primary: oklch(0.568 0.167 251.313);
+  --card-foreground: oklch(0.244 0 0);
+  --popover: oklch(0.986 0.004 286.3);
+  --popover-foreground: oklch(0.244 0 0);
+  --primary: oklch(0.529 0.174 254.9);
   --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.976 0 0);
-  --secondary-foreground: oklch(0.235 0 0);
-  --muted: oklch(0.964 0 0);
-  --muted-foreground: oklch(0.507 0 0);
-  --accent: oklch(0.956 0.021 244.204);
-  --accent-foreground: oklch(0.235 0 0);
-  --destructive: oklch(0.559 0.193 26.075);
-  --border: oklch(0.91 0 0);
-  --input: oklch(0.91 0 0);
-  --ring: oklch(0.568 0.167 251.313);
-  --chart-1: oklch(0.568 0.167 251.313);
-  --chart-2: oklch(0.54 0.109 163.806);
-  --chart-3: oklch(0.66 0.137 78.573);
-  --chart-4: oklch(0.559 0.193 26.075);
-  --chart-5: oklch(0.625 0.179 306.146);
+  --secondary: oklch(0.937 0 0);
+  --secondary-foreground: oklch(0.244 0 0);
+  --muted: oklch(0.956 0.004 286.3);
+  --muted-foreground: oklch(0.489 0 0);
+  --accent: oklch(0.965 0.011 252.1);
+  --accent-foreground: oklch(0.244 0 0);
+  --destructive: oklch(0.472 0.19 28.8);
+  --border: oklch(0.914 0.004 286.3);
+  --input: oklch(0.882 0 0);
+  --ring: oklch(0.529 0.174 254.9);
+  --chart-1: oklch(0.548 0.25 263.5);
+  --chart-2: oklch(0.563 0.146 142.6);
+  --chart-3: oklch(0.682 0.143 69);
+  --chart-4: oklch(0.472 0.19 28.8);
+  --chart-5: oklch(0.424 0.158 306.8);
   --radius: 0.625rem;
-  --sidebar: oklch(0.964 0 0);
-  --sidebar-foreground: oklch(0.235 0 0);
-  --sidebar-primary: oklch(0.568 0.167 251.313);
+  --sidebar: oklch(0.986 0.004 286.3);
+  --sidebar-foreground: oklch(0.244 0 0);
+  --sidebar-primary: oklch(0.529 0.174 254.9);
   --sidebar-primary-foreground: oklch(1 0 0);
-  --sidebar-accent: oklch(0.956 0.021 244.204);
-  --sidebar-accent-foreground: oklch(0.235 0 0);
-  --sidebar-border: oklch(0.91 0 0);
-  --sidebar-ring: oklch(0.568 0.167 251.313);
+  --sidebar-accent: oklch(0.965 0.011 252.1);
+  --sidebar-accent-foreground: oklch(0.244 0 0);
+  --sidebar-border: oklch(0.958 0.002 247.8);
+  --sidebar-ring: oklch(0.529 0.174 254.9);
 }
 
 :root {
-  /* Planwerk-specific */
-  --pw-success: oklch(0.55 0.15 160);
-  --pw-warning: oklch(0.65 0.15 85);
-  --pw-info: oklch(0.55 0.15 250);
+  /* Planwerk-specific — VS Code 2026 Light */
+  --pw-success: oklch(0.539 0.136 127.5);
+  --pw-warning: oklch(0.68 0.139 93);
+  --pw-info: oklch(0.529 0.174 254.9);
 
   /* Elevation shadows — oklch-tinted for warmth */
   --shadow-xs: 0 1px 2px oklch(0.25 0.02 250 / 0.06);
@@ -97,8 +98,8 @@
   --shadow-lg: 0 10px 15px -3px oklch(0.25 0.02 250 / 0.1), 0 4px 6px -4px oklch(0.25 0.02 250 / 0.05);
 
   /* Board surface */
-  --pw-board-bg: oklch(0.975 0.003 250);
-  --pw-column-bg: oklch(0.97 0.005 250 / 0.5);
+  --pw-board-bg: oklch(0.986 0.004 286.3);
+  --pw-column-bg: oklch(0.956 0.004 286.3 / 0.5);
 
   /* Attention glows — combined with elevation so they don't override depth */
   --shadow-glow-amber: var(--shadow-xs), 0 0 0 1px oklch(0.75 0.15 85 / 0.3), 0 2px 8px oklch(0.75 0.15 85 / 0.15);
@@ -107,8 +108,45 @@
 }
 
 .dark {
-  --pw-board-bg: oklch(0.18 0.005 250);
-  --pw-column-bg: oklch(0.2 0.008 250 / 0.4);
+  /* VS Code 2026 Dark */
+  --background: oklch(0.186 0.003 248);
+  --foreground: oklch(0.799 0.004 219.5);
+  --card: oklch(0.186 0.003 248);
+  --card-foreground: oklch(0.799 0.004 219.5);
+  --popover: oklch(0.247 0.002 247.9);
+  --popover-foreground: oklch(0.799 0.004 219.5);
+  --primary: oklch(0.548 0.096 233);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.327 0.003 228.9);
+  --secondary-foreground: oklch(0.805 0 0);
+  --muted: oklch(0.247 0.002 247.9);
+  --muted-foreground: oklch(0.64 0 0);
+  --accent: oklch(0.264 0.002 247.9);
+  --accent-foreground: oklch(0.805 0 0);
+  --destructive: oklch(0.738 0.138 32.5);
+  --border: oklch(0.288 0.002 247.9);
+  --input: oklch(0.327 0.003 228.9);
+  --ring: oklch(0.63 0.104 230.7);
+  --chart-1: oklch(0.705 0.146 252.9);
+  --chart-2: oklch(0.788 0.125 144.3);
+  --chart-3: oklch(0.677 0.14 70.3);
+  --chart-4: oklch(0.732 0.131 31.9);
+  --chart-5: oklch(0.677 0.133 307);
+  --sidebar: oklch(0.217 0.002 247.9);
+  --sidebar-foreground: oklch(0.799 0.004 219.5);
+  --sidebar-primary: oklch(0.548 0.096 233);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.264 0.002 247.9);
+  --sidebar-accent-foreground: oklch(0.805 0 0);
+  --sidebar-border: oklch(0.288 0.002 247.9);
+  --sidebar-ring: oklch(0.63 0.104 230.7);
+
+  /* Planwerk-specific — VS Code 2026 Dark */
+  --pw-success: oklch(0.767 0.117 154.1);
+  --pw-warning: oklch(0.74 0.152 92.8);
+  --pw-info: oklch(0.63 0.103 230.9);
+  --pw-board-bg: oklch(0.186 0.003 248);
+  --pw-column-bg: oklch(0.217 0.002 247.9 / 0.4);
 }
 
 @layer base {
