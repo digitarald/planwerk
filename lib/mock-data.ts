@@ -23,6 +23,32 @@ export const mockCards: KanbanCard[] = [
         id: "a1",
         type: "plan",
         title: "Auth Refactor Plan",
+        contentRef: `# Auth Refactor Plan
+
+## Goal
+Replace the legacy session-based auth with stateless JWT tokens supporting refresh rotation.
+
+## Steps
+1. ~~Audit existing middleware~~ ✓
+2. ~~Design token schema (access + refresh)~~ ✓
+3. ~~Implement token generation & validation~~ ✓
+4. **Implement refresh token rotation** ← current
+5. Migrate existing sessions to JWT
+6. Update integration tests
+7. Deploy with feature flag
+
+## Token Schema
+| Field | Type | Notes |
+|-------|------|-------|
+| sub | string | User ID |
+| exp | number | 15min for access, 7d for refresh |
+| jti | string | Unique token ID for revocation |
+| scope | string[] | Permission scopes |
+
+## Risks
+- Refresh token theft window during rotation
+- Clock skew between services (mitigated with 30s grace)
+`,
         createdAt: Date.now() - 3600000,
         createdBy: "agent",
         status: "approved",
@@ -31,6 +57,32 @@ export const mockCards: KanbanCard[] = [
         id: "a2",
         type: "research",
         title: "JWT Best Practices Analysis",
+        contentRef: `# JWT Best Practices Analysis
+
+## Summary
+Surveyed OWASP, Auth0, and RFC 7519 recommendations for secure JWT usage in production.
+
+## Key Findings
+
+### Token Lifetime
+- Access tokens: **15 minutes max** (OWASP recommendation)
+- Refresh tokens: **7 days** with rotation on every use
+- Sliding window preferred over fixed expiry
+
+### Storage
+- Access token: in-memory only (never localStorage)
+- Refresh token: httpOnly secure cookie with SameSite=Strict
+
+### Rotation Strategy
+- Issue new refresh token on every refresh request
+- Invalidate old token immediately
+- Detect reuse → revoke entire family (theft indicator)
+
+## References
+- [OWASP JWT Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_for_Java_Cheat_Sheet.html)
+- [RFC 7519](https://datatracker.ietf.org/doc/html/rfc7519)
+- Auth0 blog: "Refresh Token Rotation"
+`,
         createdAt: Date.now() - 3200000,
         createdBy: "agent",
         status: "approved",
@@ -118,6 +170,27 @@ export const mockCards: KanbanCard[] = [
         id: "a5",
         type: "research",
         title: "Elasticsearch vs Meilisearch Comparison",
+        contentRef: `# Elasticsearch vs Meilisearch
+
+## Evaluation Criteria
+Compared on: full-text quality, vector search, scalability, operational cost.
+
+| Criteria | Elasticsearch | Meilisearch |
+|----------|--------------|-------------|
+| Full-text search | ★★★★★ | ★★★★☆ |
+| Vector/hybrid search | ★★★★☆ (8.x kNN) | ★★☆☆☆ |
+| Scalability | ★★★★★ | ★★★☆☆ |
+| Ops complexity | ★★☆☆☆ | ★★★★★ |
+| Latency (p99) | ~50ms | ~12ms |
+
+## Recommendation
+**Elasticsearch** — vector search is a hard requirement for semantic matching. Accept the operational overhead with managed service (Elastic Cloud).
+
+## Trade-offs
+- Higher ops cost (~$400/mo vs ~$50/mo for Meili Cloud)
+- Requires JVM tuning and index lifecycle management
+- But: single system for full-text + vector eliminates glue code
+`,
         createdAt: Date.now() - 7200000,
         createdBy: "agent",
         status: "approved",
@@ -126,6 +199,33 @@ export const mockCards: KanbanCard[] = [
         id: "a6",
         type: "plan",
         title: "Indexing Service Architecture",
+        contentRef: `# Indexing Service Architecture
+
+## Overview
+Event-driven indexing pipeline that reacts to data changes and maintains ES indices.
+
+## Components
+1. **Change Listener** — subscribes to DB change stream
+2. **Transform Worker** — enriches documents, generates embeddings
+3. **Bulk Writer** — batches and flushes to Elasticsearch
+4. **Health Monitor** — tracks lag, errors, index freshness
+
+## Data Flow
+\`\`\`
+DB Change Stream → Listener → Queue → Transform → Bulk Writer → ES
+                                         ↓
+                                    Embedding API
+\`\`\`
+
+## Index Schema
+- \`documents_v1\` — full-text + metadata
+- \`documents_vectors_v1\` — dense vector (768d) for kNN
+
+## Deployment
+- Workers run as separate processes (scalable independently)
+- Queue: Redis Streams for at-least-once delivery
+- Retry with exponential backoff (max 5 attempts)
+`,
         createdAt: Date.now() - 6000000,
         createdBy: "agent",
         status: "approved",

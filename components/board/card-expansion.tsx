@@ -18,6 +18,7 @@ import {
   Shield,
 } from "lucide-react";
 
+import { ArtifactViewer } from "./artifact-viewer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -25,6 +26,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import {
   KanbanCard as KanbanCardType,
+  Artifact,
   ArtifactType,
   ArtifactStatus,
   ActivityEntry,
@@ -64,7 +66,9 @@ function formatTime(timestamp: number): string {
 
 export function CardExpansion({ card }: CardExpansionProps) {
   const [message, setMessage] = useState("");
+  const [isMessageFocused, setIsMessageFocused] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
+  const [viewingArtifact, setViewingArtifact] = useState<Artifact | null>(null);
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
 
   const handleInject = (e: React.FormEvent) => {
@@ -94,7 +98,7 @@ export function CardExpansion({ card }: CardExpansionProps) {
       onClick={(e) => e.stopPropagation()}
     >
       {/* Artifacts */}
-      {artifacts.length > 0 ? (
+      {artifacts.length > 0 && (
         <div className="space-y-1">
           <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
             Artifacts
@@ -102,10 +106,24 @@ export function CardExpansion({ card }: CardExpansionProps) {
           <div className="space-y-0.5">
             {artifacts.map((artifact) => {
               const Icon = artifactIcons[artifact.type];
+              const hasContent = !!artifact.contentRef;
               return (
-                <div
+                <button
                   key={artifact.id}
-                  className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-[11px]"
+                  type="button"
+                  aria-disabled={!hasContent}
+                  tabIndex={hasContent ? 0 : -1}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (hasContent) setViewingArtifact(artifact);
+                  }}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  className={`flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-[11px] text-left transition-colors ${
+                    hasContent
+                      ? "hover:bg-muted/50 cursor-pointer"
+                      : "opacity-60 cursor-default"
+                  }`}
                 >
                   <Icon className="h-3 w-3 shrink-0 text-muted-foreground" />
                   <span
@@ -116,16 +134,20 @@ export function CardExpansion({ card }: CardExpansionProps) {
                   <span className="shrink-0 text-[9px] capitalize text-muted-foreground/50">
                     {artifact.status}
                   </span>
-                </div>
+                </button>
               );
             })}
           </div>
         </div>
-      ) : (
-        <div className="text-[10px] text-muted-foreground/50 italic">
-          No artifacts yet
-        </div>
       )}
+
+      <ArtifactViewer
+        artifact={viewingArtifact}
+        open={viewingArtifact !== null}
+        onOpenChange={(open) => {
+          if (!open) setViewingArtifact(null);
+        }}
+      />
 
       {/* Recent Activity */}
       {recentActivity.length > 0 && (
@@ -175,11 +197,6 @@ export function CardExpansion({ card }: CardExpansionProps) {
             <span className="text-emerald-600">+{card.additions}</span>
             <span className="text-red-600">-{card.deletions}</span>
           </button>
-          {showFiles && (
-            <div className="mt-1 pl-4 text-[10px] text-muted-foreground/50 italic">
-              File details require session subscription
-            </div>
-          )}
         </div>
       )}
 
@@ -199,10 +216,12 @@ export function CardExpansion({ card }: CardExpansionProps) {
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={handleKeyDown}
+          onFocus={() => setIsMessageFocused(true)}
+          onBlur={() => setIsMessageFocused(false)}
           onClick={(e) => e.stopPropagation()}
           placeholder="Send message to session..."
-          className="min-h-[3.5rem] resize-none pr-8 text-[11px]"
-          rows={2}
+          className="min-h-[2rem] resize-none pr-8 text-[11px] transition-all duration-200 focus:min-h-[3.5rem]"
+          rows={isMessageFocused ? 2 : 1}
         />
         <Button
           type="submit"
