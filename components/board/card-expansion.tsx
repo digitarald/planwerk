@@ -5,8 +5,6 @@ import {
   Send,
   FileCode,
   GitBranch,
-  ChevronDown,
-  ChevronRight,
   FileText,
   FlaskConical,
   Lightbulb,
@@ -67,7 +65,6 @@ function formatTime(timestamp: number): string {
 export function CardExpansion({ card }: CardExpansionProps) {
   const [message, setMessage] = useState("");
   const [isMessageFocused, setIsMessageFocused] = useState(false);
-  const [showFiles, setShowFiles] = useState(false);
   const [viewingArtifact, setViewingArtifact] = useState<Artifact | null>(null);
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
 
@@ -179,24 +176,11 @@ export function CardExpansion({ card }: CardExpansionProps) {
 
       {/* Files */}
       {card.filesChanged > 0 && (
-        <div>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setShowFiles(!showFiles);
-            }}
-            className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
-          >
-            {showFiles ? (
-              <ChevronDown className="h-3 w-3" />
-            ) : (
-              <ChevronRight className="h-3 w-3" />
-            )}
-            <FileCode className="h-3 w-3" />
-            <span>{card.filesChanged} files</span>
-            <span className="text-emerald-600">+{card.additions}</span>
-            <span className="text-red-600">-{card.deletions}</span>
-          </button>
+        <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+          <FileCode className="h-3 w-3" />
+          <span>{card.filesChanged} files</span>
+          <span className="text-emerald-600">+{card.additions}</span>
+          <span className="text-red-600">-{card.deletions}</span>
         </div>
       )}
 

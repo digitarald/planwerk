@@ -47,19 +47,19 @@ const attentionStyles: Record<AttentionLevel, string> = {
 function RuntimeIndicator({ status }: { status: RuntimeStatus }) {
   switch (status) {
     case "running":
-      return <Loader2 className="h-3 w-3 animate-spin text-primary" />;
+      return <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" />;
     case "idle":
-      return <CirclePause className="h-3 w-3 text-muted-foreground/40" />;
+      return <CirclePause className="h-3 w-3 shrink-0 text-muted-foreground/40" />;
     case "input-needed":
       return (
-        <span className="inline-flex items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
           <MessageCircleWarning className="h-2.5 w-2.5" />
           Input
         </span>
       );
     case "error":
       return (
-        <span className="inline-flex items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">
+        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">
           <XCircle className="h-2.5 w-2.5" />
           Error
         </span>
@@ -67,7 +67,6 @@ function RuntimeIndicator({ status }: { status: RuntimeStatus }) {
   }
 }
 
-/** Shows the activity text as a question and the last tool call for context */
 function InputContext({ card }: { card: KanbanCardType }) {
   const lastTool = card.recentActivity?.findLast((e) => e.type === "tool");
   return (
@@ -87,12 +86,12 @@ function InputContext({ card }: { card: KanbanCardType }) {
 function GateIndicator({ status }: { status: GateStatus }) {
   switch (status) {
     case "passed":
-      return <ShieldCheck className="h-3 w-3 text-emerald-500" />;
+      return <ShieldCheck className="h-3 w-3 shrink-0 text-emerald-500" />;
     case "evaluating":
-      return <Loader2 className="h-3 w-3 animate-spin text-primary/70" />;
+      return <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary/70" />;
     case "failed":
       return (
-        <span className="inline-flex items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">
+        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">
           <ShieldX className="h-2.5 w-2.5" />
           Gate
         </span>
@@ -103,23 +102,27 @@ function GateIndicator({ status }: { status: GateStatus }) {
 }
 
 function formatRelativeTime(timestamp: number): string {
-  const diff = Date.now() - timestamp;
+  const diff = Math.max(0, Date.now() - timestamp);
   const seconds = Math.floor(diff / 1000);
 
-  if (seconds < 60) return "just now";
+  if (seconds < 60) return "now";
 
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return `${minutes}m`;
 
   const hours = Math.floor(minutes / 60);
-  return `${hours}h ago`;
+  if (hours < 24) return `${hours}h`;
+
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
 }
 
 export function KanbanCard({ card, index }: KanbanCardProps) {
   const setExpandedCard = useBoardStore((state) => state.setExpandedCard);
-  const expandedCardId = useBoardStore((state) => state.expandedCardId);
+  const isExpanded = useBoardStore((state) => state.expandedCardId === card.id);
   const showWorkspaceTags = useBoardStore(selectShowWorkspaceTags);
-  const isExpanded = expandedCardId === card.id;
+  const showPlanSteps = card.planSteps.total > 0;
+  const showStats = card.filesChanged > 0;
 
   return (
     <Draggable draggableId={card.id} index={index} isDragDisabled={card.isArchived}>
@@ -150,7 +153,6 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
               card.isArchived && "opacity-60"
             )}
           >
-            {/* Header: risk dot + title */}
             <div className="flex items-start gap-1.5">
               {card.isArchived ? (
                 <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
@@ -162,51 +164,51 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                   )}
                 />
               )}
-              <h3 className="min-w-0 flex-1 line-clamp-2 text-xs font-medium leading-tight">
-                {card.title}
-              </h3>
-            </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="line-clamp-2 text-xs font-medium leading-tight">
+                  <span>{card.title}</span>
+                  {showWorkspaceTags && card.project && (
+                    <span className="ml-1 text-[10px] font-normal text-muted-foreground/45">
+                      · {card.project.name}
+                    </span>
+                  )}
+                </h3>
 
-            {/* Status indicators + activity */}
-            <div className="mt-1 flex items-center gap-1.5 pl-3">
-              <RuntimeIndicator status={card.runtime} />
-              <GateIndicator status={card.gateStatus} />
-              {card.manualOverride && (
-                <AlertTriangle className="h-3 w-3 text-amber-500" />
-              )}
-            </div>
+                {card.runtime === "input-needed" && (
+                  <InputContext card={card} />
+                )}
 
-            {card.runtime === "input-needed" ? (
-              <InputContext card={card} />
-            ) : (
-              <p className="mt-1 line-clamp-1 pl-3 text-[11px] text-muted-foreground">
-                {card.activity}
-              </p>
-            )}
+                <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <RuntimeIndicator status={card.runtime} />
+                  <GateIndicator status={card.gateStatus} />
+                  {card.manualOverride && (
+                    <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />
+                  )}
+                  {card.runtime !== "input-needed" && (
+                    <p className="min-w-0 flex-1 truncate">{card.activity}</p>
+                  )}
+                  {showPlanSteps && (
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/75">
+                      {card.planSteps.done}/{card.planSteps.total}
+                    </span>
+                  )}
+                </div>
 
-            {/* Compact stats row */}
-            <div className="mt-1.5 flex items-center gap-2 pl-3 text-[10px] text-muted-foreground/70">
-              {card.filesChanged > 0 && (
-                <span>
-                  <span className="text-emerald-600">+{card.additions}</span>{" "}
-                  <span className="text-red-600">-{card.deletions}</span>{" "}
-                  · {card.filesChanged}f
-                </span>
-              )}
-              {card.planSteps.total > 0 && (
-                <span>{card.planSteps.done}/{card.planSteps.total} steps</span>
-              )}
-              <span className="ml-auto">{formatRelativeTime(card.modifiedAt)}</span>
-            </div>
-
-            {/* Workspace tag — shown when multiple workspaces visible */}
-            {showWorkspaceTags && card.project && (
-              <div className="mt-1 pl-3 text-[10px] text-muted-foreground/50 truncate">
-                {card.project.name}
+                <div className="mt-1 text-[10px] text-muted-foreground/70">
+                  {showStats && (
+                    <>
+                      <span className="text-emerald-600">+{card.additions}</span>{" "}
+                      <span className="text-red-600">-{card.deletions}</span>
+                      <span className="text-muted-foreground/45"> · </span>
+                      <span>{card.filesChanged}f</span>
+                      <span className="text-muted-foreground/45"> · </span>
+                    </>
+                  )}
+                  <span>{formatRelativeTime(card.modifiedAt)}</span>
+                </div>
               </div>
-            )}
+            </div>
 
-            {/* Expanded view */}
             {isExpanded && (
               <>
                 <CardExpansion card={card} />
