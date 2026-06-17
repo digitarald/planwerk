@@ -16,6 +16,16 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Planwerk",
   description: "AI-first SDLC work management",
+  icons: {
+    icon: [
+      { url: "/logo-dark-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/logo-dark-64.png", sizes: "64x64", type: "image/png" },
+      { url: "/logo-dark-128.png", sizes: "128x128", type: "image/png" },
+    ],
+    apple: [
+      { url: "/logo-dark-256.png", sizes: "256x256", type: "image/png" },
+    ],
+  },
 };
 
 export default function RootLayout({

@@ -1,7 +1,8 @@
 "use client";
 
 import { useShallow } from "zustand/react/shallow";
-import { Activity, FolderOpen } from "lucide-react";
+import Image from "next/image";
+import { FolderOpen } from "lucide-react";
 
 import { ConnectionDot } from "@/components/connection/connection-dot";
 import {
@@ -27,7 +28,8 @@ export function TitleBar() {
   return (
     <header className="flex h-10 shrink-0 items-center border-b border-border bg-background px-4">
       <div className="flex items-center gap-2">
-        <Activity className="h-4 w-4 text-primary" />
+        <Image src="/logo-light-64.png" alt="Planwerk" width={28} height={28} className="dark:hidden" />
+        <Image src="/logo-dark-64.png" alt="Planwerk" width={28} height={28} className="hidden dark:block" />
         <span className="text-sm font-semibold">Planwerk</span>
         {attentionCount > 0 && (
           <span className="ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-bold text-white">
