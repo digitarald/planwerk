@@ -59,7 +59,7 @@ export function KanbanBoard() {
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <DragDropContext onDragEnd={handleDragEnd}>
-        <div className="flex min-h-0 flex-1 gap-0 overflow-x-auto p-4 pt-3">
+        <div className="flex min-h-0 flex-1 gap-0 p-4 pt-3">
           {COLUMNS.map((column) => (
             <KanbanColumn key={column.id} column={column} />
           ))}

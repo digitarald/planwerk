@@ -17,30 +17,43 @@ interface KanbanColumnProps {
 export function KanbanColumn({ column }: KanbanColumnProps) {
   const cards = useBoardStore(useShallow((state) => selectFilteredCards(state).filter((c) => c.phase === column.id)));
   const isOverWip = column.wipLimit ? cards.length > column.wipLimit : false;
+  const isEmpty = cards.length === 0;
 
   return (
     <section
-      className="flex w-[280px] min-w-[280px] flex-shrink-0 flex-col"
+      className={cn(
+        "flex flex-col transition-[min-width,max-width,flex] duration-200",
+        isEmpty
+          ? "min-w-[60px] max-w-[60px] flex-shrink-0"
+          : "min-w-[180px] max-w-[300px] flex-1"
+      )}
       data-column-id={column.id}
     >
-      <div className="flex items-start gap-3 px-3 py-2">
+      <div className={cn("flex items-start gap-3 px-3 py-2", isEmpty && "flex-col items-center gap-1 px-1")}>
         <div className="min-w-0 flex-1">
-          <h2 className="text-xs font-semibold tracking-[0.18em] text-muted-foreground uppercase">
+          <h2 className={cn(
+            "text-xs font-semibold tracking-[0.18em] text-muted-foreground uppercase",
+            isEmpty && "[writing-mode:vertical-lr] rotate-180 text-center"
+          )}>
             {column.title}
           </h2>
-          <p className="mt-0.5 text-[11px] text-muted-foreground/80">
-            {column.description}
-          </p>
-        </div>
-        <span
-          className={cn(
-            "rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-            isOverWip ? "bg-amber-100 text-amber-700" : "bg-muted text-muted-foreground"
+          {!isEmpty && (
+            <p className="mt-0.5 text-[11px] text-muted-foreground/80">
+              {column.description}
+            </p>
           )}
-        >
-          {cards.length}
-          {column.wipLimit && `/${column.wipLimit}`}
-        </span>
+        </div>
+        {!isEmpty && (
+          <span
+            className={cn(
+              "rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+              isOverWip ? "bg-amber-100 text-amber-700" : "bg-muted text-muted-foreground"
+            )}
+          >
+            {cards.length}
+            {column.wipLimit && `/${column.wipLimit}`}
+          </span>
+        )}
         {(() => {
           const attentionCount = cards.filter((c) => c.attention !== "none").length;
           if (attentionCount === 0) return null;
@@ -63,7 +76,7 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
                 {cards.map((card, index) => (
                   <KanbanCard key={card.id} card={card} index={index} />
                 ))}
-                {cards.length === 0 && !snapshot.isDraggingOver && (
+                {cards.length === 0 && !snapshot.isDraggingOver && !isEmpty && (
                   <div className="py-6 text-center text-[10px] text-muted-foreground/60">
                     No tasks
                   </div>
