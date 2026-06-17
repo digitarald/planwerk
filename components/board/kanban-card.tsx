@@ -12,10 +12,18 @@ import {
   ShieldX,
   XCircle,
   ChevronDown,
+  Bug,
 } from "lucide-react";
 
 import { CardExpansion } from "./card-expansion";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { useBoardStore, selectShowWorkspaceTags } from "@/lib/store/board-store";
+import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import {
   AttentionLevel,
   KanbanCard as KanbanCardType,
@@ -24,6 +32,7 @@ import {
   GateStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { copyDebugState } from "@/lib/utils/copy-debug-state";
 
 interface KanbanCardProps {
   card: KanbanCardType;
@@ -121,6 +130,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
   const setExpandedCard = useBoardStore((state) => state.setExpandedCard);
   const isExpanded = useBoardStore((state) => state.expandedCardId === card.id);
   const showWorkspaceTags = useBoardStore(selectShowWorkspaceTags);
+  const feedItems = useOrchestratorStore((s) => s.feedItems);
   const showPlanSteps = card.planSteps.total > 0;
   const showStats = card.filesChanged > 0;
 
@@ -130,29 +140,30 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
         const { style, ...draggableProps } = provided.draggableProps;
 
         return (
-          <div
-            ref={provided.innerRef}
-            {...draggableProps}
-            {...(card.isArchived ? {} : provided.dragHandleProps)}
-            tabIndex={0}
-            onClick={() => setExpandedCard(isExpanded ? null : card.id)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                setExpandedCard(isExpanded ? null : card.id);
-              }
-              if (e.key === "Escape" && isExpanded) {
-                setExpandedCard(null);
-              }
-            }}
-            style={style as CSSProperties | undefined}
-            className={cn(
-              "cursor-pointer rounded-lg border border-border bg-card p-2 transition-all hover:border-primary/30 hover:shadow-sm focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1",
-              snapshot.isDragging && "rotate-1 shadow-lg",
-              attentionStyles[card.attention],
-              card.isArchived && "opacity-60"
-            )}
-          >
+          <ContextMenu>
+            <ContextMenuTrigger
+              ref={provided.innerRef}
+              {...draggableProps}
+              {...(card.isArchived ? {} : provided.dragHandleProps)}
+              tabIndex={0}
+              onClick={() => setExpandedCard(isExpanded ? null : card.id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setExpandedCard(isExpanded ? null : card.id);
+                }
+                if (e.key === "Escape" && isExpanded) {
+                  setExpandedCard(null);
+                }
+              }}
+              style={style as CSSProperties | undefined}
+              className={cn(
+                "cursor-pointer rounded-lg border border-border bg-card p-2 transition-all hover:border-primary/30 hover:shadow-sm focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1",
+                snapshot.isDragging && "rotate-1 shadow-lg",
+                attentionStyles[card.attention],
+                card.isArchived && "opacity-60"
+              )}
+            >
             <div className="flex items-start gap-1.5">
               {card.isArchived ? (
                 <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
@@ -224,7 +235,16 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                 </button>
               </>
             )}
-          </div>
+            </ContextMenuTrigger>
+            <ContextMenuContent>
+              <ContextMenuItem
+                onClick={() => copyDebugState(card, feedItems)}
+              >
+                <Bug className="h-3.5 w-3.5" />
+                Copy debug state
+              </ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
         );
       }}
     </Draggable>
