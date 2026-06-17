@@ -1,7 +1,7 @@
 import { Artifact, KanbanCard, Phase, RuntimeStatus } from "@/lib/types";
 import { assessRisk } from "@/lib/orchestrator/risk-assessor";
 
-import { AHPSessionSummary, parseAHPStatus } from "./types";
+import { AHPSessionSummary, AHPStatus, parseAHPStatus } from "./types";
 
 export function mapAHPRuntimeStatus(statusBits: number): RuntimeStatus {
   const parsed = parseAHPStatus(statusBits);
@@ -81,10 +81,15 @@ function inferPhase(
   existingPhase: Phase | undefined,
   artifacts: Artifact[]
 ): Phase {
+  const isArchived = (session.status & AHPStatus.IsArchived) !== 0;
+  const hasChanges = (session.changes?.files ?? 0) > 0;
+
+  // Archived sessions with code changes are completed work → ship
+  if (isArchived && hasChanges) return "ship";
+
   if (existingPhase) return existingPhase;
 
   const activity = (session.activity ?? "").toLowerCase();
-  const hasChanges = (session.changes?.files ?? 0) > 0;
   const hasPlanArtifact = artifacts.some((a) => a.type === "plan");
 
   // Review keywords + idle with changes → review
@@ -106,6 +111,7 @@ export function mapSessionToCard(
   const runtime = mapAHPRuntimeStatus(session.status);
   const artifacts = inferArtifacts(session);
   const phase = inferPhase(session, existingPhase, artifacts);
+  const isArchived = (session.status & AHPStatus.IsArchived) !== 0;
   const additions = session.changes?.additions || 0;
   const deletions = session.changes?.deletions || 0;
   const filesChanged = session.changes?.files || 0;
@@ -121,10 +127,10 @@ export function mapSessionToCard(
     id: session.resource,
     title: session.title,
     phase,
-    runtime,
-    gateStatus: phase === "review" ? "evaluating" : phase === "ship" ? "passed" : "pending",
-    attention:
-      runtime === "input-needed"
+    runtime: isArchived ? "idle" : runtime,
+    gateStatus: isArchived ? "passed" : phase === "review" ? "evaluating" : phase === "ship" ? "passed" : "pending",
+    attention: isArchived ? "none"
+      : runtime === "input-needed"
         ? "needs-human"
         : runtime === "error"
           ? "error"
@@ -143,5 +149,6 @@ export function mapSessionToCard(
     workingDirectory: session.workingDirectory,
     project: session.project,
     artifacts: artifacts.length > 0 ? artifacts : undefined,
+    isArchived,
   };
 }

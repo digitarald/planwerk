@@ -46,6 +46,17 @@ export function parseAHPStatus(status: number) {
   };
 }
 
+/** Archived sessions are visible only when they produced code changes. */
+export function isArchivedWithChanges(status: number, changesFiles?: number): boolean {
+  return (status & AHPStatus.IsArchived) !== 0 && (changesFiles ?? 0) > 0;
+}
+
+/** Whether a session should be shown on the board (non-archived, or archived with code changes). */
+export function shouldShowSession(status: number, changesFiles?: number): boolean {
+  if (!(status & AHPStatus.IsArchived)) return true;
+  return (changesFiles ?? 0) > 0;
+}
+
 export type AHPEvent =
   | { type: "sessionAdded"; session: AHPSessionSummary }
   | { type: "sessionRemoved"; resource: string }

@@ -12,6 +12,7 @@ export const mockPhaseAssignments: Record<string, Phase> = {
   "ahp-session:/session-6": "plan",
   "ahp-session:/session-7": "review",
   "ahp-session:/session-8": "build",
+  "ahp-session:/session-9": "ship",
 };
 
 export const mockAHPSessions: AHPSessionSummary[] = [
@@ -107,5 +108,17 @@ export const mockAHPSessions: AHPSessionSummary[] = [
     modifiedAt: new Date(Date.now() - 90000).toISOString(),
     model: "gpt-5",
     changes: { additions: 22, deletions: 0, files: 2 },
+  },
+  {
+    resource: "ahp-session:/session-9",
+    provider: "copilot",
+    title: "Fix CSV export encoding",
+    status: AHPStatus.Idle | AHPStatus.IsRead | AHPStatus.IsArchived,
+    activity: "Completed. Fixed UTF-8 BOM handling for Excel compatibility.",
+    createdAt: new Date(Date.now() - 172800000).toISOString(),
+    modifiedAt: new Date(Date.now() - 86400000).toISOString(),
+    model: "claude-sonnet",
+    project: { name: "webapp", path: "file:///Users/dev/projects/webapp" },
+    changes: { additions: 15, deletions: 4, files: 2 },
   },
 ];

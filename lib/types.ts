@@ -48,6 +48,7 @@ export interface KanbanCard {
   project?: { name: string; path: string };
   artifacts?: Artifact[];
   recentActivity?: ActivityEntry[];
+  isArchived?: boolean;
 }
 
 export interface Column {

@@ -3,7 +3,7 @@ import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
 import type { SessionSummary } from "@microsoft/agent-host-protocol";
 
-import { AHPSessionSummary, AHPEvent, AHPStatus } from "./types";
+import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
 
 // Re-export for consumers that imported from here
@@ -76,6 +76,8 @@ export interface AHPBridgeOptions {
  */
 export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOptions): Promise<() => void> {
   const sessions = new Map<string, AHPSessionSummary>();
+  // Archived sessions skipped during init/add — re-evaluated if changes arrive later
+  const skippedArchived = new Map<string, AHPSessionSummary>();
 
   let disposed = false;
   let client: AhpClient | null = null;
@@ -133,11 +135,14 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   try {
     const result = await client.request("listSessions", { channel: "ahp-root://" });
     for (const summary of result.items) {
-      if (summary.status & AHPStatus.IsArchived) continue;
       const mapped = mapSdkSession(summary);
+      if (!shouldShowSession(summary.status, summary.changes?.files ?? 0)) {
+        if (summary.status & AHPStatus.IsArchived) skippedArchived.set(summary.resource, mapped);
+        continue;
+      }
       sessions.set(summary.resource, mapped);
     }
-    info(`loaded ${sessions.size} sessions (${result.items.length} total, archived filtered)`);
+    info(`loaded ${sessions.size} sessions (${result.items.length} total, archived without changes filtered)`);
     onEvent({ type: "init", sessions: Array.from(sessions.values()) });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to list sessions";
@@ -158,8 +163,9 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
         if (event.type === "sessionAdded") {
           const mapped = mapSdkSession(event.params.summary);
-          if (mapped.status & AHPStatus.IsArchived) {
-            debug("sessionAdded: skipping archived", mapped.resource);
+          if (!shouldShowSession(mapped.status, mapped.changes?.files)) {
+            debug("sessionAdded: skipping archived without changes", mapped.resource);
+            if (mapped.status & AHPStatus.IsArchived) skippedArchived.set(mapped.resource, mapped);
             continue;
           }
           sessions.set(event.params.summary.resource, mapped);
@@ -196,14 +202,40 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
             // Check if session became archived
             if (existing.status & AHPStatus.IsArchived) {
-              debug("sessionArchived:", sessionUri);
-              sessions.delete(sessionUri);
-              onEvent({ type: "sessionRemoved", resource: sessionUri });
+              if (shouldShowSession(existing.status, existing.changes?.files)) {
+                debug("sessionArchived: keeping (has code changes)", sessionUri);
+                sessions.set(sessionUri, existing);
+                onEvent({ type: "sessionSummaryChanged", session: existing });
+              } else {
+                debug("sessionArchived: removing (no code changes)", sessionUri);
+                sessions.delete(sessionUri);
+                onEvent({ type: "sessionRemoved", resource: sessionUri });
+              }
               continue;
             }
 
             sessions.set(sessionUri, existing);
             onEvent({ type: "sessionSummaryChanged", session: existing });
+          } else {
+            // Re-evaluate skipped archived sessions when changes arrive
+            const skipped = skippedArchived.get(sessionUri);
+            if (skipped) {
+              const { changes } = event.params;
+              if (changes.changes !== undefined) {
+                skipped.changes = {
+                  additions: changes.changes.additions ?? 0,
+                  deletions: changes.changes.deletions ?? 0,
+                  files: changes.changes.files ?? 0,
+                };
+              }
+              if (changes.status !== undefined) skipped.status = changes.status;
+              if (shouldShowSession(skipped.status, skipped.changes?.files)) {
+                debug("sessionChanged: promoting previously skipped archived session", sessionUri);
+                skippedArchived.delete(sessionUri);
+                sessions.set(sessionUri, skipped);
+                onEvent({ type: "sessionAdded", session: skipped });
+              }
+            }
           }
         }
       }

@@ -4,7 +4,7 @@ import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
 
 import { mockAHPSessions } from "@/lib/ahp/mock-sessions";
-import { AHPSessionSummary, AHPStatus } from "@/lib/ahp/types";
+import { AHPSessionSummary, shouldShowSession } from "@/lib/ahp/types";
 
 const OFFERED_PROTOCOL_VERSIONS = [...SUPPORTED_PROTOCOL_VERSIONS, "0.4.0"];
 
@@ -35,7 +35,7 @@ export async function GET(request: NextRequest) {
 
     const result = await client.request("listSessions", { channel: "ahp-root://" });
     const sessions: AHPSessionSummary[] = result.items
-      .filter((s) => !(s.status & AHPStatus.IsArchived))
+      .filter((s) => shouldShowSession(s.status, s.changes?.files ?? 0))
       .map((s) => {
         const mapped: AHPSessionSummary = {
           resource: s.resource,

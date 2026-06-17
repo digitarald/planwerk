@@ -4,6 +4,7 @@ import { Draggable } from "@hello-pangea/dnd";
 import type { CSSProperties } from "react";
 import {
   AlertTriangle,
+  CheckCircle2,
   CirclePause,
   Loader2,
   MessageCircleWarning,
@@ -121,7 +122,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
   const isExpanded = expandedCardId === card.id;
 
   return (
-    <Draggable draggableId={card.id} index={index}>
+    <Draggable draggableId={card.id} index={index} isDragDisabled={card.isArchived}>
       {(provided, snapshot) => {
         const { style, ...draggableProps } = provided.draggableProps;
 
@@ -129,7 +130,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
           <div
             ref={provided.innerRef}
             {...draggableProps}
-            {...provided.dragHandleProps}
+            {...(card.isArchived ? {} : provided.dragHandleProps)}
             tabIndex={0}
             onClick={() => setExpandedCard(isExpanded ? null : card.id)}
             onKeyDown={(e) => {
@@ -145,17 +146,22 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
             className={cn(
               "cursor-pointer rounded-lg border border-border bg-card p-2 transition-all hover:border-primary/30 hover:shadow-sm focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1",
               snapshot.isDragging && "rotate-1 shadow-lg",
-              attentionStyles[card.attention]
+              attentionStyles[card.attention],
+              card.isArchived && "opacity-60"
             )}
           >
             {/* Header: risk dot + title */}
             <div className="flex items-start gap-1.5">
-              <div
-                className={cn(
-                  "mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full",
-                  riskColors[card.risk]
-                )}
-              />
+              {card.isArchived ? (
+                <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+              ) : (
+                <div
+                  className={cn(
+                    "mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full",
+                    riskColors[card.risk]
+                  )}
+                />
+              )}
               <h3 className="min-w-0 flex-1 line-clamp-2 text-xs font-medium leading-tight">
                 {card.title}
               </h3>
