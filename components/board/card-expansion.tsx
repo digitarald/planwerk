@@ -91,7 +91,7 @@ export function CardExpansion({ card }: CardExpansionProps) {
 
   return (
     <div
-      className="mt-2 space-y-2 border-t border-border pt-2 animate-in fade-in slide-in-from-top-1 duration-200"
+      className="mt-2 space-y-2 border-t border-border/60 pt-2 animate-in fade-in slide-in-from-top-1 duration-200 ease-out"
       onClick={(e) => e.stopPropagation()}
     >
       {/* Artifacts */}

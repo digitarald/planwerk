@@ -47,10 +47,10 @@ const riskColors: Record<RiskLevel, string> = {
 
 const attentionStyles: Record<AttentionLevel, string> = {
   none: "",
-  "needs-human": "border-amber-400 animate-pulse-border",
+  "needs-human": "border-amber-400/60 animate-glow-amber",
   stale: "opacity-60",
-  error: "border-red-400",
-  conflict: "border-purple-400",
+  error: "shadow-glow-red border-red-400/60",
+  conflict: "shadow-glow-purple border-purple-400/60",
 };
 
 function RuntimeIndicator({ status }: { status: RuntimeStatus }) {
@@ -158,8 +158,9 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
               }}
               style={style as CSSProperties | undefined}
               className={cn(
-                "cursor-pointer rounded-lg border border-border bg-card p-2 transition-all hover:border-primary/30 hover:shadow-sm focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1",
-                snapshot.isDragging && "rotate-1 shadow-lg",
+                "cursor-pointer rounded-lg border border-border/60 bg-card p-2 shadow-elevation-xs transition-all duration-150 hover:-translate-y-0.5 hover:shadow-elevation-sm hover:border-primary/30 focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1",
+                snapshot.isDragging && "scale-[1.02] shadow-elevation-lg border-primary/30",
+                isExpanded && "shadow-elevation-sm",
                 attentionStyles[card.attention],
                 card.isArchived && "opacity-60"
               )}

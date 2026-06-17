@@ -9,7 +9,7 @@ interface HealthBarProps {
 
 export function HealthBar({ active, idle, errors, needsInput }: HealthBarProps) {
   return (
-    <div className="px-3 py-2">
+    <div className="px-3 py-2 bg-muted/30 rounded-md mx-2 my-1">
       <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
         Board Health
       </div>

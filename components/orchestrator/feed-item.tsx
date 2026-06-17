@@ -55,6 +55,15 @@ export function FeedItem({ type, message, timestamp }: FeedItemProps) {
         type === "user" && "bg-muted/50 -mx-3 px-3 py-1.5 rounded",
       )}
     >
+      <div className={cn(
+        "mt-1 w-0.5 shrink-0 rounded-full self-stretch",
+        type === "intervention" && "bg-primary/40",
+        type === "alert" && "bg-amber-500/40",
+        type === "transition" && "bg-emerald-500/40",
+        type === "suggestion" && "bg-violet-500/40",
+        type === "user" && "bg-foreground/20",
+        type === "response" && "bg-primary/40",
+      )} />
       <Icon className={cn("h-3.5 w-3.5 mt-0.5 shrink-0", config.color)} />
       <div className="flex-1 min-w-0">
         <span className="text-muted-foreground">{formatRelativeTime(timestamp)}</span>

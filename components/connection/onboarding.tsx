@@ -52,8 +52,8 @@ export function Onboarding() {
   const isConnecting = status === "reconnecting";
 
   return (
-    <div className="flex h-full items-center justify-center">
-      <div className="w-full max-w-sm rounded-lg border border-border bg-card p-6">
+    <div className="flex h-full items-center justify-center bg-gradient-to-b from-transparent via-transparent to-muted/20">
+      <div className="w-full max-w-sm rounded-xl border border-border/60 bg-card p-6 shadow-elevation-md">
         <h2 className="mb-1 text-lg font-semibold">Welcome to Planwerk</h2>
         <p className="mb-6 text-sm text-muted-foreground">
           Connect to an AHP host to manage your agent sessions.

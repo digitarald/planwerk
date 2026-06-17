@@ -26,7 +26,7 @@ export function TitleBar() {
   const isFiltered = workspaceFilters.size > 0;
 
   return (
-    <header className="flex h-10 shrink-0 items-center border-b border-border bg-background px-4">
+    <header className="flex h-10 shrink-0 items-center border-b border-border/60 bg-background px-4 shadow-elevation-xs relative z-10">
       <div className="flex items-center gap-2">
         <Image src="/logo-light-64.png" alt="Planwerk" width={28} height={28} className="dark:hidden" />
         <Image src="/logo-dark-64.png" alt="Planwerk" width={28} height={28} className="hidden dark:block" />
