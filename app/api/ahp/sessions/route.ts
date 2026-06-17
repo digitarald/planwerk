@@ -3,7 +3,6 @@ import { AhpClient } from "@microsoft/agent-host-protocol/client";
 import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
 
-import { mockAHPSessions } from "@/lib/ahp/mock-sessions";
 import { AHPSessionSummary, shouldShowSession } from "@/lib/ahp/types";
 
 const OFFERED_PROTOCOL_VERSIONS = [...SUPPORTED_PROTOCOL_VERSIONS, "0.4.0"];
@@ -12,7 +11,7 @@ export async function GET(request: NextRequest) {
   const hostUrl = request.nextUrl.searchParams.get("host");
 
   if (!hostUrl) {
-    return NextResponse.json({ sessions: mockAHPSessions });
+    return NextResponse.json({ sessions: [] });
   }
 
   let transport: Awaited<ReturnType<typeof WebSocketTransport.connect>>;

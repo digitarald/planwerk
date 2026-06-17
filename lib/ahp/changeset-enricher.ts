@@ -1,0 +1,201 @@
+import type { AhpClient } from "@microsoft/agent-host-protocol/client";
+import type {
+  ChangesetState,
+  ChangesetFile,
+  SessionState,
+  Changeset,
+} from "@microsoft/agent-host-protocol";
+
+import { Artifact, ArtifactType } from "@/lib/types";
+
+const LOG_PREFIX = "[ahp:changeset]";
+const debug = (...args: unknown[]) => {
+  if (process.env.AHP_DEBUG) console.debug(LOG_PREFIX, ...args);
+};
+
+/** Patterns that indicate non-code files (session artifacts, temp, etc.) */
+const NON_CODE_PATTERNS = [
+  /^\.copilot\//,
+  /\/\.copilot\//,
+  /\/session-state\//,
+  /\/plan\.md$/,
+  /\/research\.md$/,
+  /\/spec\.md$/,
+  /\/specification\.md$/,
+  /\/design\.md$/,
+  /\/decision\.md$/,
+  /\/test-plan\.md$/,
+  /\.tmp$/,
+  /^\/tmp\//,
+];
+
+/** File path patterns → artifact types */
+const ARTIFACT_FILE_PATTERNS: Array<{ pattern: RegExp; type: ArtifactType }> = [
+  { pattern: /\/plan\.md$/i, type: "plan" },
+  { pattern: /plan\.md$/i, type: "plan" },
+  { pattern: /\/research\.md$/i, type: "research" },
+  { pattern: /\/spec\.md$/i, type: "spec" },
+  { pattern: /\/specification\.md$/i, type: "spec" },
+  { pattern: /\/design\.md$/i, type: "design" },
+  { pattern: /\/decision\.md$/i, type: "decision" },
+  { pattern: /\/test-plan\.md$/i, type: "test-plan" },
+];
+
+export interface ChangesetEnrichment {
+  artifacts: Artifact[];
+  codeFileCount: number;
+  totalFileCount: number;
+}
+
+function isNonCodeFile(filePath: string): boolean {
+  return NON_CODE_PATTERNS.some((p) => p.test(filePath));
+}
+
+function classifyArtifactFile(filePath: string): ArtifactType | null {
+  for (const { pattern, type } of ARTIFACT_FILE_PATTERNS) {
+    if (pattern.test(filePath)) return type;
+  }
+  return null;
+}
+
+function extractFilePath(file: ChangesetFile): string {
+  // Use after.uri for creates/edits, before.uri for deletions
+  const uri = file.edit.after?.uri ?? file.edit.before?.uri ?? file.id;
+  // Strip scheme prefix (file://, ahp-session://<id>/content/, etc.)
+  try {
+    const url = new URL(uri);
+    return url.pathname;
+  } catch {
+    return uri;
+  }
+}
+
+function titleFromPath(filePath: string): string {
+  const basename = filePath.split("/").pop() ?? filePath;
+  // Capitalize and remove extension for display
+  const name = basename.replace(/\.md$/i, "");
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+/**
+ * Find the session-level changeset from a session's changeset catalogue.
+ * Prefers changeKind "session", falls back to first static URI (no template vars).
+ */
+function findSessionChangeset(changesets: Changeset[]): Changeset | undefined {
+  // Prefer explicit session-kind changeset
+  const sessionKind = changesets.find((c) => c.changeKind === "session");
+  if (sessionKind) return sessionKind;
+
+  // Fall back to first static URI (no {variables})
+  return changesets.find((c) => !c.uriTemplate.includes("{"));
+}
+
+/**
+ * Enrich a session card with changeset data — file classification and artifact content.
+ *
+ * Subscribes to the session, finds its changeset catalogue, subscribes to the
+ * session changeset, classifies files, and fetches artifact markdown content.
+ */
+export async function enrichFromChangeset(
+  client: AhpClient,
+  sessionUri: string
+): Promise<ChangesetEnrichment | null> {
+  try {
+    // Subscribe to the session to get its changeset catalogue
+    const { result: sessionResult, subscription: sessionSub } =
+      await client.subscribe(sessionUri);
+    // Close the subscription — we only need the snapshot
+    sessionSub.close();
+
+    const sessionState = sessionResult.snapshot?.state as SessionState | undefined;
+    if (!sessionState?.changesets?.length) {
+      debug("no changesets for", sessionUri);
+      return null;
+    }
+
+    const changeset = findSessionChangeset(sessionState.changesets);
+    if (!changeset) {
+      debug("no session-level changeset found for", sessionUri);
+      return null;
+    }
+
+    // The uriTemplate for static changesets IS the subscribable URI
+    const changesetUri = changeset.uriTemplate;
+    if (changesetUri.includes("{")) {
+      debug("skipping templated changeset URI:", changesetUri);
+      return null;
+    }
+
+    // Subscribe to the changeset to get file list
+    const { result: csResult, subscription: csSub } =
+      await client.subscribe(changesetUri);
+    csSub.close();
+
+    const csState = csResult.snapshot?.state as ChangesetState | undefined;
+    if (!csState?.files) {
+      debug("changeset has no files:", changesetUri);
+      return { artifacts: [], codeFileCount: 0, totalFileCount: 0 };
+    }
+
+    // Classify files
+    const artifacts: Artifact[] = [];
+    let codeFileCount = 0;
+    const artifactFiles: Array<{ file: ChangesetFile; path: string; type: ArtifactType }> = [];
+
+    for (const file of csState.files) {
+      const filePath = extractFilePath(file);
+      const artifactType = classifyArtifactFile(filePath);
+
+      if (artifactType && file.edit.after) {
+        artifactFiles.push({ file, path: filePath, type: artifactType });
+      } else if (!isNonCodeFile(filePath)) {
+        codeFileCount++;
+      }
+    }
+
+    // Fetch content for artifact files (parallel, with timeout protection)
+    const contentPromises = artifactFiles.map(async ({ file, path, type }) => {
+      let contentRef: string | undefined;
+
+      if (file.edit.after?.content?.uri) {
+        try {
+          const result = await client.request("resourceRead", {
+            channel: "ahp-root://" as const,
+            uri: file.edit.after.content.uri,
+          });
+          contentRef = result.data;
+        } catch (err) {
+          debug("failed to read content for", path, err);
+        }
+      }
+
+      const artifact: Artifact = {
+        id: `cs-${file.id}`,
+        type,
+        title: titleFromPath(path),
+        contentRef,
+        createdAt: Date.now(),
+        createdBy: "agent",
+        status: "draft",
+      };
+      return artifact;
+    });
+
+    const resolvedArtifacts = await Promise.all(contentPromises);
+    artifacts.push(...resolvedArtifacts);
+
+    debug(
+      sessionUri,
+      `→ ${artifacts.length} artifacts, ${codeFileCount} code files, ${csState.files.length} total`
+    );
+
+    return {
+      artifacts,
+      codeFileCount,
+      totalFileCount: csState.files.length,
+    };
+  } catch (err) {
+    debug("enrichment failed for", sessionUri, err);
+    return null;
+  }
+}

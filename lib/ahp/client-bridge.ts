@@ -5,6 +5,7 @@ import type { SessionSummary } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
+import { enrichFromChangeset, ChangesetEnrichment } from "./changeset-enricher";
 
 // Re-export for consumers that imported from here
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
@@ -13,8 +14,8 @@ export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
 const OFFERED_PROTOCOL_VERSIONS = [...SUPPORTED_PROTOCOL_VERSIONS, "0.4.0"];
 
 export type BridgeEvent =
-  | { type: "init"; sessions: AHPSessionSummary[] }
-  | AHPEvent
+  | { type: "init"; sessions: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment> }
+  | (AHPEvent & { enrichment?: ChangesetEnrichment | null })
   | ConnectionError;
 
 const LOG_PREFIX = "[ahp:bridge]";
@@ -78,6 +79,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   const sessions = new Map<string, AHPSessionSummary>();
   // Archived sessions skipped during init/add — re-evaluated if changes arrive later
   const skippedArchived = new Map<string, AHPSessionSummary>();
+  // Changeset enrichment cache per session
+  const enrichments = new Map<string, ChangesetEnrichment>();
+  // Track in-flight enrichment requests to avoid duplicates
+  const pendingEnrichments = new Set<string>();
 
   let disposed = false;
   let client: AhpClient | null = null;
@@ -86,6 +91,35 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     if (disposed) return;
     disposed = true;
     client?.shutdown().catch(() => {});
+  }
+
+  /**
+   * Trigger async changeset enrichment for a session. On completion,
+   * re-emits the card with enrichment data applied.
+   */
+  function triggerEnrichment(sessionUri: string) {
+    if (disposed || !client || pendingEnrichments.has(sessionUri)) return;
+    const session = sessions.get(sessionUri);
+    if (!session) return;
+    // Only enrich sessions that report file changes
+    if (!session.changes?.files) return;
+
+    pendingEnrichments.add(sessionUri);
+    enrichFromChangeset(client, sessionUri)
+      .then((result) => {
+        if (disposed || !sessions.has(sessionUri)) return;
+        if (result) {
+          enrichments.set(sessionUri, result);
+          // Re-emit the session as changed so consumers get the enriched card
+          onEvent({ type: "sessionSummaryChanged", session: sessions.get(sessionUri)! });
+        }
+      })
+      .catch(() => {
+        // Enrichment is best-effort; failures are silently ignored
+      })
+      .finally(() => {
+        pendingEnrichments.delete(sessionUri);
+      });
   }
 
   if (signal) {
@@ -143,7 +177,12 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       sessions.set(summary.resource, mapped);
     }
     info(`loaded ${sessions.size} sessions (${result.items.length} total, archived without changes filtered)`);
-    onEvent({ type: "init", sessions: Array.from(sessions.values()) });
+    onEvent({ type: "init", sessions: Array.from(sessions.values()), enrichments });
+
+    // Trigger async changeset enrichment for all sessions with file changes
+    for (const [uri] of sessions) {
+      triggerEnrichment(uri);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to list sessions";
     error("listSessions failed:", message);
@@ -170,7 +209,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           }
           sessions.set(event.params.summary.resource, mapped);
           debug("sessionAdded:", mapped.resource, mapped.title);
-          onEvent({ type: "sessionAdded", session: mapped });
+          onEvent({ type: "sessionAdded", session: mapped, enrichment: enrichments.get(mapped.resource) });
+          triggerEnrichment(mapped.resource);
         } else if (event.type === "sessionRemoved") {
           debug("sessionRemoved:", event.params.session);
           sessions.delete(event.params.session);
@@ -205,17 +245,22 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
               if (shouldShowSession(existing.status, existing.changes?.files)) {
                 debug("sessionArchived: keeping (has code changes)", sessionUri);
                 sessions.set(sessionUri, existing);
-                onEvent({ type: "sessionSummaryChanged", session: existing });
+                onEvent({ type: "sessionSummaryChanged", session: existing, enrichment: enrichments.get(sessionUri) });
               } else {
                 debug("sessionArchived: removing (no code changes)", sessionUri);
                 sessions.delete(sessionUri);
+                enrichments.delete(sessionUri);
                 onEvent({ type: "sessionRemoved", resource: sessionUri });
               }
               continue;
             }
 
             sessions.set(sessionUri, existing);
-            onEvent({ type: "sessionSummaryChanged", session: existing });
+            onEvent({ type: "sessionSummaryChanged", session: existing, enrichment: enrichments.get(sessionUri) });
+            // Re-trigger enrichment if file changes updated
+            if (changes.changes !== undefined) {
+              triggerEnrichment(sessionUri);
+            }
           } else {
             // Re-evaluate skipped archived sessions when changes arrive
             const skipped = skippedArchived.get(sessionUri);

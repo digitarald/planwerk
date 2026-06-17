@@ -2,6 +2,7 @@ import { Artifact, KanbanCard, Phase, RuntimeStatus } from "@/lib/types";
 import { assessRisk } from "@/lib/orchestrator/risk-assessor";
 
 import { AHPSessionSummary, AHPStatus, parseAHPStatus } from "./types";
+import type { ChangesetEnrichment } from "./changeset-enricher";
 
 export function mapAHPRuntimeStatus(statusBits: number): RuntimeStatus {
   const parsed = parseAHPStatus(statusBits);
@@ -79,13 +80,17 @@ function inferArtifacts(session: AHPSessionSummary): Artifact[] {
 function inferPhase(
   session: AHPSessionSummary,
   existingPhase: Phase | undefined,
-  artifacts: Artifact[]
+  artifacts: Artifact[],
+  codeFileCount?: number
 ): Phase {
   const isArchived = (session.status & AHPStatus.IsArchived) !== 0;
-  const hasChanges = (session.changes?.files ?? 0) > 0;
+  const totalFiles = session.changes?.files ?? 0;
+  // Use codeFileCount when available (from changeset enrichment),
+  // otherwise fall back to total file count
+  const hasCodeChanges = codeFileCount !== undefined ? codeFileCount > 0 : totalFiles > 0;
 
   // Archived sessions with code changes are completed work → ship
-  if (isArchived && hasChanges) return "ship";
+  if (isArchived && hasCodeChanges) return "ship";
 
   if (existingPhase) return existingPhase;
 
@@ -93,10 +98,10 @@ function inferPhase(
   const hasPlanArtifact = artifacts.some((a) => a.type === "plan");
 
   // Review keywords + idle with changes → review
-  if (REVIEW_KEYWORDS.test(activity) && hasChanges) return "review";
+  if (REVIEW_KEYWORDS.test(activity) && hasCodeChanges) return "review";
 
   // Code changes present → build
-  if (hasChanges) return "build";
+  if (hasCodeChanges) return "build";
 
   // Plan artifact or plan-related activity → plan
   if (hasPlanArtifact || PLAN_KEYWORDS.test(activity)) return "plan";
@@ -106,11 +111,14 @@ function inferPhase(
 
 export function mapSessionToCard(
   session: AHPSessionSummary,
-  existingPhase?: Phase
+  existingPhase?: Phase,
+  enrichment?: ChangesetEnrichment | null
 ): KanbanCard {
   const runtime = mapAHPRuntimeStatus(session.status);
-  const artifacts = inferArtifacts(session);
-  const phase = inferPhase(session, existingPhase, artifacts);
+  // Use changeset-derived artifacts when available, fall back to inference
+  const artifacts = enrichment?.artifacts ?? inferArtifacts(session);
+  const codeFileCount = enrichment?.codeFileCount;
+  const phase = inferPhase(session, existingPhase, artifacts, codeFileCount);
   const isArchived = (session.status & AHPStatus.IsArchived) !== 0;
   const additions = session.changes?.additions || 0;
   const deletions = session.changes?.deletions || 0;

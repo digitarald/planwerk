@@ -9,10 +9,14 @@ import {
 
 import { mapSessionToCard } from "./map-session";
 import { AHPSessionSummary } from "./types";
+import type { ChangesetEnrichment } from "./changeset-enricher";
 
-export function enrichSessionToCard(session: AHPSessionSummary): KanbanCard {
+export function enrichSessionToCard(
+  session: AHPSessionSummary,
+  changesetData?: ChangesetEnrichment | null
+): KanbanCard {
   const persistedPhase = getPersistedCardPhase(session.resource);
-  const card = mapSessionToCard(session, persistedPhase);
+  const card = mapSessionToCard(session, persistedPhase, changesetData);
 
   const nextPhase = getNextPhase(card.phase);
   if (nextPhase) {
