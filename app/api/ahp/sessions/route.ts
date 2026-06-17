@@ -100,7 +100,7 @@ export async function POST(request: NextRequest) {
         ...(workingDirectory ? { workingDirectory } : {}),
       });
     } finally {
-      releaseAHPClient();
+      releaseAHPClient(hostUrl);
     }
 
     return NextResponse.json({ resource: channel, title });

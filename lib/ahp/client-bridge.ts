@@ -158,6 +158,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
         if (event.type === "sessionAdded") {
           const mapped = mapSdkSession(event.params.summary);
+          if (mapped.status & AHPStatus.IsArchived) {
+            debug("sessionAdded: skipping archived", mapped.resource);
+            continue;
+          }
           sessions.set(event.params.summary.resource, mapped);
           debug("sessionAdded:", mapped.resource, mapped.title);
           onEvent({ type: "sessionAdded", session: mapped });
@@ -189,6 +193,15 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
                 files: changes.changes.files ?? 0,
               };
             }
+
+            // Check if session became archived
+            if (existing.status & AHPStatus.IsArchived) {
+              debug("sessionArchived:", sessionUri);
+              sessions.delete(sessionUri);
+              onEvent({ type: "sessionRemoved", resource: sessionUri });
+              continue;
+            }
+
             sessions.set(sessionUri, existing);
             onEvent({ type: "sessionSummaryChanged", session: existing });
           }

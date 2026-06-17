@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { exec } from "node:child_process";
 
 import { NextRequest, NextResponse } from "next/server";
 
@@ -93,6 +93,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "gateType required" }, { status: 400 });
     }
 
+    const gates = getGatesForTransition(currentPhase, nextPhase, body.projectPath);
+    const gate = gates.find(
+      (g) => g.gateType === gateType && (!gateName || g.gateName === gateName)
+    );
+
+    if (!gate) {
+      return NextResponse.json(
+        { error: `No configured gate matches type "${gateType}"${gateName ? ` name "${gateName}"` : ""}` },
+        { status: 400 }
+      );
+    }
+
     const runId = startGateRun(
       cardId,
       currentPhase,
@@ -101,20 +113,15 @@ export async function POST(request: NextRequest) {
       gateName
     );
 
-    const gates = getGatesForTransition(currentPhase, nextPhase, body.projectPath);
-    const gate = gates.find(
-      (g) => g.gateType === gateType && (!gateName || g.gateName === gateName)
-    );
-
-    if (!gate?.command) {
+    if (!gate.command) {
       completeGateRun(runId, "passed", "Manual review gate — no command to execute");
     } else {
+      // gate.command is trusted: sourced from DEFAULT_GATES or admin gate_configs table
       const cwd = body.workingDirectory || process.cwd();
       const maxOutput = 64 * 1024;
 
-      execFile(
-        "sh",
-        ["-c", gate.command],
+      exec(
+        gate.command,
         {
           cwd,
           timeout: 5 * 60 * 1000,

@@ -13,6 +13,8 @@ import { type KanbanCard } from "@/lib/types";
 export function SessionCreator() {
   const [isOpen, setIsOpen] = useState(false);
   const [title, setTitle] = useState("");
+  const [isCreating, setIsCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const addCard = useBoardStore((state) => state.addCard);
   const workspaceFilters = useBoardStore((state) => state.workspaceFilters);
   const workspaces = useBoardStore(useShallow(selectWorkspaces));
@@ -27,12 +29,14 @@ export function SessionCreator() {
 
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim() || isCreating) return;
 
     const trimmedTitle = title.trim();
     const { mode, hostUrl } = useConnectionStore.getState();
 
     if (mode === "remote" && hostUrl) {
+      setIsCreating(true);
+      setError(null);
       try {
         const response = await fetch("/api/ahp/sessions", {
           method: "POST",
@@ -42,11 +46,16 @@ export function SessionCreator() {
 
         if (!response.ok) {
           const data = await response.json();
-          console.error("Failed to create session:", data.error);
+          setError(data.error || "Failed to create session");
+          setIsCreating(false);
+          return;
         }
       } catch (err) {
-        console.error("Failed to create session:", err);
+        setError(err instanceof Error ? err.message : "Network error");
+        setIsCreating(false);
+        return;
       }
+      setIsCreating(false);
     } else {
       const newCard: KanbanCard = {
         id: `new-${Date.now()}`,
@@ -101,8 +110,8 @@ export function SessionCreator() {
         }}
       />
       <div className="flex gap-1">
-        <Button type="submit" size="sm" className="h-6 px-2 text-[10px]" disabled={!title.trim()}>
-          Create
+        <Button type="submit" size="sm" className="h-6 px-2 text-[10px]" disabled={!title.trim() || isCreating}>
+          {isCreating ? "Creating..." : "Create"}
         </Button>
         <Button
           type="button"
@@ -117,6 +126,9 @@ export function SessionCreator() {
           <X className="h-3 w-3" />
         </Button>
       </div>
+      {error && (
+        <p className="text-[10px] text-destructive">{error}</p>
+      )}
     </form>
   );
 }

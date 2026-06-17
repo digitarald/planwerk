@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { createAHPBridge, BridgeEvent } from "@/lib/ahp/client-bridge";
 import { enrichSessionToCard } from "@/lib/ahp/enrich-card";
+import { mapSessionToCard } from "@/lib/ahp/map-session";
 import { ConnectionError } from "@/lib/ahp/connection-error";
 import { mockAHPSessions } from "@/lib/ahp/mock-sessions";
 import { AHPEvent, AHPSessionSummary } from "@/lib/ahp/types";
@@ -15,6 +16,15 @@ type CardStreamEvent =
   | { type: "cardChanged"; card: KanbanCard }
   | { type: "cardRemoved"; cardId: string }
   | ConnectionError;
+
+function safeEnrich(session: AHPSessionSummary): KanbanCard {
+  try {
+    return enrichSessionToCard(session);
+  } catch (err) {
+    console.warn("[ahp:sse] enrichment failed, using base mapping:", err instanceof Error ? err.message : err);
+    return mapSessionToCard(session);
+  }
+}
 
 function generateRandomUpdate(sessions: AHPSessionSummary[]): AHPEvent {
   const session = sessions[Math.floor(Math.random() * sessions.length)];
@@ -51,7 +61,7 @@ function projectRemoteEvent(event: BridgeEvent): CardStreamEvent {
   if (event.type === "init") {
     return {
       type: "init",
-      cards: event.sessions.map(enrichSessionToCard),
+      cards: event.sessions.map(safeEnrich),
     };
   }
 
@@ -64,7 +74,7 @@ function projectRemoteEvent(event: BridgeEvent): CardStreamEvent {
 
   return {
     type: "cardChanged",
-    card: enrichSessionToCard(event.session),
+    card: safeEnrich(event.session),
   };
 }
 
@@ -74,7 +84,7 @@ function projectMockEvent(
   if (event.type === "init") {
     return {
       type: "init",
-      cards: event.sessions.map(enrichSessionToCard),
+      cards: event.sessions.map(safeEnrich),
     };
   }
 
@@ -87,7 +97,7 @@ function projectMockEvent(
 
   return {
     type: "cardChanged",
-    card: enrichSessionToCard(event.session),
+    card: safeEnrich(event.session),
   };
 }
 
