@@ -6,6 +6,7 @@ import { mapSessionToCard } from "@/lib/ahp/map-session";
 import type { ChangesetEnrichment } from "@/lib/ahp/changeset-enricher";
 import { ConnectionError } from "@/lib/ahp/connection-error";
 import { AHPSessionSummary } from "@/lib/ahp/types";
+import { getCachedSessions } from "@/lib/db/session-cache";
 import { KanbanCard } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -69,6 +70,18 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
+        // Serve cached data immediately for fast reload
+        try {
+          const cached = getCachedSessions(hostUrl);
+          if (cached.length > 0) {
+            const cards = cached.map((c) => safeEnrich(c.summary, c.enrichment));
+            const cacheEvent: CardStreamEvent = { type: "init", cards };
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(cacheEvent)}\n\n`));
+          }
+        } catch {
+          // Cache read failure is non-fatal
+        }
+
         await createAHPBridge({
           hostUrl,
           signal: abortController.signal,

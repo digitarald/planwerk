@@ -47,8 +47,17 @@ export function getDb(): Database.Database {
         PRIMARY KEY (project_path, phase_transition, gate_type)
       );
 
+      CREATE TABLE IF NOT EXISTS session_cache (
+        session_uri TEXT PRIMARY KEY,
+        host_url TEXT NOT NULL,
+        summary_json TEXT NOT NULL,
+        enrichment_json TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
       CREATE INDEX IF NOT EXISTS idx_gate_runs_card ON gate_runs(card_id);
       CREATE INDEX IF NOT EXISTS idx_gate_runs_status ON gate_runs(status);
+      CREATE INDEX IF NOT EXISTS idx_session_cache_host ON session_cache(host_url);
     `);
 
     const gateRunsColumns = db

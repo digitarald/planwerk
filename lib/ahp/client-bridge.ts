@@ -6,6 +6,7 @@ import type { SessionSummary } from "@microsoft/agent-host-protocol";
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
 import { enrichFromChangeset, ChangesetEnrichment } from "./changeset-enricher";
+import { upsertSessionCache, removeSessionCache } from "@/lib/db/session-cache";
 
 // Re-export for consumers that imported from here
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
@@ -127,6 +128,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         if (disposed || !sessions.has(sessionUri)) return;
         if (result) {
           enrichments.set(sessionUri, result);
+          upsertSessionCache(hostUrl, sessionUri, sessions.get(sessionUri)!, result);
         }
         // Re-emit with enrichment data included
         onEvent({
@@ -205,6 +207,11 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     info(`loaded ${sessions.size} sessions (${result.items.length} total, archived without changes filtered)`);
     onEvent({ type: "init", sessions: Array.from(sessions.values()), enrichments });
 
+    // Cache all sessions for fast reload
+    for (const [uri, session] of sessions) {
+      upsertSessionCache(hostUrl, uri, session, enrichments.get(uri));
+    }
+
     // Trigger async changeset enrichment for all sessions with file changes
     for (const [uri] of sessions) {
       triggerEnrichment(uri);
@@ -234,12 +241,14 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
             continue;
           }
           sessions.set(event.params.summary.resource, mapped);
+          upsertSessionCache(hostUrl, mapped.resource, mapped, enrichments.get(mapped.resource));
           debug("sessionAdded:", mapped.resource, mapped.title);
           onEvent({ type: "sessionAdded", session: mapped, enrichment: enrichments.get(mapped.resource) });
           triggerEnrichment(mapped.resource);
         } else if (event.type === "sessionRemoved") {
           debug("sessionRemoved:", event.params.session);
           sessions.delete(event.params.session);
+          removeSessionCache(event.params.session);
           onEvent({ type: "sessionRemoved", resource: event.params.session });
         } else if (event.type === "sessionSummaryChanged") {
           const { session: sessionUri, changes } = event.params;
@@ -271,17 +280,20 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
               if (shouldShowSession(existing.status, existing.changes?.files)) {
                 debug("sessionArchived: keeping (has code changes)", sessionUri);
                 sessions.set(sessionUri, existing);
+                upsertSessionCache(hostUrl, sessionUri, existing, enrichments.get(sessionUri));
                 onEvent({ type: "sessionSummaryChanged", session: existing, enrichment: enrichments.get(sessionUri) });
               } else {
                 debug("sessionArchived: removing (no code changes)", sessionUri);
                 sessions.delete(sessionUri);
                 enrichments.delete(sessionUri);
+                removeSessionCache(sessionUri);
                 onEvent({ type: "sessionRemoved", resource: sessionUri });
               }
               continue;
             }
 
             sessions.set(sessionUri, existing);
+            upsertSessionCache(hostUrl, sessionUri, existing, enrichments.get(sessionUri));
             onEvent({ type: "sessionSummaryChanged", session: existing, enrichment: enrichments.get(sessionUri) });
             // Re-trigger enrichment if file changes updated
             if (changes.changes !== undefined) {
@@ -304,6 +316,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
                 debug("sessionChanged: promoting previously skipped archived session", sessionUri);
                 skippedArchived.delete(sessionUri);
                 sessions.set(sessionUri, skipped);
+                upsertSessionCache(hostUrl, sessionUri, skipped, enrichments.get(sessionUri));
                 onEvent({ type: "sessionAdded", session: skipped });
               }
             }

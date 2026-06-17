@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { createJSONStorage, persist } from "zustand/middleware";
 
 import { KanbanCard, Phase } from "@/lib/types";
 
@@ -111,44 +112,65 @@ export function selectHasUnassigned(state: BoardState): boolean {
   return state.cards.some((c) => !c.project);
 }
 
-export const useBoardStore = create<BoardState>((set, get) => ({
-  cards: [],
-  expandedCardId: null,
-  workspaceFilters: new Set(),
-  setExpandedCard: (id) => set({ expandedCardId: id }),
-  setCards: (cards) =>
-    set((state) => ({
-      cards,
-      workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters),
-    })),
-  updateCard: (id, card) =>
-    set((state) => {
-      const cards = state.cards.map((c) => (c.id === id ? card : c));
-      return { cards, workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters) };
+export const useBoardStore = create<BoardState>()(
+  persist(
+    (set, get) => ({
+      cards: [],
+      expandedCardId: null,
+      workspaceFilters: new Set(),
+      setExpandedCard: (id) => set({ expandedCardId: id }),
+      setCards: (cards) =>
+        set((state) => ({
+          cards,
+          workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters),
+        })),
+      updateCard: (id, card) =>
+        set((state) => {
+          const cards = state.cards.map((c) => (c.id === id ? card : c));
+          return { cards, workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters) };
+        }),
+      addCard: (card) =>
+        set((state) => ({
+          cards: [...state.cards, card],
+        })),
+      removeCard: (id) =>
+        set((state) => {
+          const cards = state.cards.filter((c) => c.id !== id);
+          return { cards, workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters) };
+        }),
+      getCard: (id) => get().cards.find((c) => c.id === id),
+      getCardsByPhase: (phase) => get().cards.filter((card) => card.phase === phase),
+      moveCard: (cardId, toPhase) =>
+        set((state) => ({
+          cards: state.cards.map((card) =>
+            card.id === cardId ? { ...card, phase: toPhase } : card
+          ),
+        })),
+      toggleWorkspaceFilter: (path) =>
+        set((state) => {
+          const next = new Set(state.workspaceFilters);
+          if (next.has(path)) next.delete(path);
+          else next.add(path);
+          return { workspaceFilters: next };
+        }),
+      clearWorkspaceFilters: () => set({ workspaceFilters: new Set() }),
     }),
-  addCard: (card) =>
-    set((state) => ({
-      cards: [...state.cards, card],
-    })),
-  removeCard: (id) =>
-    set((state) => {
-      const cards = state.cards.filter((c) => c.id !== id);
-      return { cards, workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters) };
-    }),
-  getCard: (id) => get().cards.find((c) => c.id === id),
-  getCardsByPhase: (phase) => get().cards.filter((card) => card.phase === phase),
-  moveCard: (cardId, toPhase) =>
-    set((state) => ({
-      cards: state.cards.map((card) =>
-        card.id === cardId ? { ...card, phase: toPhase } : card
-      ),
-    })),
-  toggleWorkspaceFilter: (path) =>
-    set((state) => {
-      const next = new Set(state.workspaceFilters);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return { workspaceFilters: next };
-    }),
-  clearWorkspaceFilters: () => set({ workspaceFilters: new Set() }),
-}));
+    {
+      name: "planwerk-board",
+      storage: createJSONStorage(() => sessionStorage),
+      partialize: (state) => ({
+        workspaceFilters: Array.from(state.workspaceFilters),
+      }),
+      merge: (persisted, current) => ({
+        ...current,
+        ...(persisted && typeof persisted === "object" && "workspaceFilters" in persisted
+          ? {
+              workspaceFilters: new Set(
+                (persisted as { workspaceFilters?: string[] }).workspaceFilters ?? [],
+              ),
+            }
+          : {}),
+      }),
+    },
+  ),
+);
