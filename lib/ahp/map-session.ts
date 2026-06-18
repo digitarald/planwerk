@@ -1,5 +1,4 @@
-import { Artifact, KanbanCard, Phase, RuntimeStatus } from "@/lib/types";
-import { assessRisk } from "@/lib/orchestrator/risk-assessor";
+import { Artifact, KanbanCard, Phase, RiskLevel, RuntimeStatus } from "@/lib/types";
 
 import { AHPSessionSummary, AHPStatus, parseAHPStatus } from "./types";
 import type { ChangesetEnrichment } from "./changeset-enricher";
@@ -113,13 +112,13 @@ function inferPhase(
   return "define";
 }
 
-export async function mapSessionToCard(
+export function mapSessionToCard(
   session: AHPSessionSummary,
   existingPhase?: Phase,
-  enrichment?: ChangesetEnrichment | null
-): Promise<KanbanCard> {
+  enrichment?: ChangesetEnrichment | null,
+  persistedRisk?: RiskLevel
+): KanbanCard {
   const runtime = mapAHPRuntimeStatus(session.status);
-  // Use changeset-derived artifacts when available, fall back to inference
   const artifacts = enrichment?.artifacts ?? inferArtifacts(session);
   const codeFileCount = enrichment?.codeFileCount;
   const phase = inferPhase(session, existingPhase, artifacts, codeFileCount);
@@ -127,14 +126,6 @@ export async function mapSessionToCard(
   const additions = session.changes?.additions || 0;
   const deletions = session.changes?.deletions || 0;
   const filesChanged = session.changes?.files || 0;
-  const risk = await assessRisk({
-    title: session.title,
-    activity: session.activity,
-    filesChanged,
-    additions,
-    deletions,
-    filePaths: enrichment?.filePaths,
-  });
 
   return {
     id: session.resource,
@@ -148,16 +139,14 @@ export async function mapSessionToCard(
         : runtime === "error"
           ? "error"
           : "none",
-    risk: risk.level,
+    risk: persistedRisk ?? "low",
     activity: session.activity || "No activity",
     additions,
     deletions,
     filesChanged,
-    // TODO: Derive planSteps from session turns[] via session-level subscription
     planSteps: { total: 0, done: 0 },
     modifiedAt: new Date(session.modifiedAt).getTime(),
     model: session.model,
-    // TODO: Extract branch from SessionState._meta["git"] via session subscription
     branch: undefined,
     workingDirectory: session.workingDirectory,
     project: session.project,

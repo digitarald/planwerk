@@ -7,8 +7,9 @@ import type { ChangesetEnrichment } from "@/lib/ahp/changeset-enricher";
 import { ConnectionError } from "@/lib/ahp/connection-error";
 import { AHPSessionSummary } from "@/lib/ahp/types";
 import { getCachedSessions } from "@/lib/db/session-cache";
-import { triageCard, type TriageResult } from "@/lib/orchestrator/triage";
+import { triageCard } from "@/lib/orchestrator/triage";
 import { getPersistedCardPhase } from "@/lib/orchestrator/gate-engine";
+import { getCardRisk } from "@/lib/orchestrator/risk-store";
 import { KanbanCard, type Phase, type RiskLevel } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -27,15 +28,15 @@ interface TriageEvent {
   requiresHumanApproval: boolean;
 }
 
-async function safeEnrich(
+function safeEnrich(
   session: AHPSessionSummary,
   changesetData?: ChangesetEnrichment | null
-): Promise<KanbanCard> {
+): KanbanCard {
   try {
-    return await enrichSessionToCard(session, changesetData);
+    return enrichSessionToCard(session, changesetData);
   } catch (err) {
     console.warn("[ahp:sse] enrichment failed, using base mapping:", err instanceof Error ? err.message : err);
-    return await mapSessionToCard(session);
+    return mapSessionToCard(session);
   }
 }
 
@@ -48,9 +49,13 @@ async function tryTriage(
 ): Promise<TriageEvent | undefined> {
   if (!TRIAGE_PHASES.includes(card.phase)) return undefined;
 
-  // Only triage if the card just entered this phase (previous persisted phase differs)
-  const previousPhase = getPersistedCardPhase(card.id);
-  if (previousPhase === card.phase) return undefined;
+  // Triage when the card's inferred phase differs from what's persisted in DB.
+  // This catches both first-time phase inference and phase changes.
+  const persistedPhase = getPersistedCardPhase(card.id);
+  if (persistedPhase === card.phase) {
+    // Already triaged for this phase — skip unless no risk exists yet
+    if (getCardRisk(card.id)) return undefined;
+  }
 
   try {
     const result = await triageCard(
@@ -96,9 +101,7 @@ async function projectRemoteEvent(event: BridgeEvent): Promise<CardStreamEvent> 
   if (event.type === "init") {
     return {
       type: "init",
-      cards: await Promise.all(
-        event.sessions.map((s) => safeEnrich(s, event.enrichments.get(s.resource)))
-      ),
+      cards: event.sessions.map((s) => safeEnrich(s, event.enrichments.get(s.resource))),
     };
   }
 
@@ -109,7 +112,7 @@ async function projectRemoteEvent(event: BridgeEvent): Promise<CardStreamEvent> 
     };
   }
 
-  const card = await safeEnrich(event.session, event.enrichment);
+  const card = safeEnrich(event.session, event.enrichment);
   const triage = await tryTriage(card, event.session, event.enrichment);
 
   return {
@@ -143,7 +146,7 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
         try {
           const cached = getCachedSessions(hostUrl);
           if (cached.length > 0) {
-            const cards = await Promise.all(cached.map((c) => safeEnrich(c.summary, c.enrichment)));
+            const cards = cached.map((c) => safeEnrich(c.summary, c.enrichment));
             const cacheEvent: CardStreamEvent = { type: "init", cards };
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(cacheEvent)}\n\n`));
           }

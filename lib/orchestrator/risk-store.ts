@@ -45,7 +45,6 @@ export function setCardRisk(
   assessedBy: "copilot" | "human" = "copilot"
 ): void {
   const db = getDb();
-  db.prepare("INSERT OR IGNORE INTO card_phases (card_id) VALUES (?)").run(cardId);
   db.prepare(
     `INSERT INTO card_risk (card_id, risk_level, risk_factors, assessed_at, assessed_by)
      VALUES (?, ?, ?, datetime('now'), ?)

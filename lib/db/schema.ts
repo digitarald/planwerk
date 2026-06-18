@@ -60,8 +60,7 @@ export function getDb(): Database.Database {
         risk_level TEXT NOT NULL DEFAULT 'low',
         risk_factors TEXT NOT NULL DEFAULT '[]',
         assessed_at TEXT NOT NULL DEFAULT (datetime('now')),
-        assessed_by TEXT NOT NULL DEFAULT 'copilot',
-        FOREIGN KEY (card_id) REFERENCES card_phases(card_id)
+        assessed_by TEXT NOT NULL DEFAULT 'copilot'
       );
 
       CREATE INDEX IF NOT EXISTS idx_gate_runs_card ON gate_runs(card_id);

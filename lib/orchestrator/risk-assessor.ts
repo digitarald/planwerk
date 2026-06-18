@@ -143,6 +143,8 @@ export async function assessRisk(input: RiskInput): Promise<RiskAssessment> {
       await session.disconnect().catch(() => {});
     }
   } catch (err) {
+    // Reset client so the next call retries from scratch
+    clientInstance = null;
     console.warn(
       "[risk-assessor] Copilot SDK call failed, using fallback:",
       err instanceof Error ? err.message : err
