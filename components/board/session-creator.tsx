@@ -5,77 +5,47 @@ import { Plus, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useBoardStore, selectWorkspaces } from "@/lib/store/board-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
-import { useShallow } from "zustand/react/shallow";
-import { type KanbanCard } from "@/lib/types";
 
 export function SessionCreator() {
   const [isOpen, setIsOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const addCard = useBoardStore((state) => state.addCard);
-  const workspaceFilters = useBoardStore((state) => state.workspaceFilters);
-  const workspaces = useBoardStore(useShallow(selectWorkspaces));
-
-  // Inherit workspace when exactly one non-sentinel filter is active
-  const inheritedProject = (() => {
-    if (workspaceFilters.size !== 1) return undefined;
-    const [filterPath] = workspaceFilters;
-    const ws = workspaces.find((w) => w.path === filterPath);
-    return ws ? { name: ws.name, path: ws.path } : undefined;
-  })();
 
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault();
     if (!title.trim() || isCreating) return;
 
     const trimmedTitle = title.trim();
-    const { mode, hostUrl } = useConnectionStore.getState();
+    const { hostUrl, status: connStatus } = useConnectionStore.getState();
 
-    if (mode === "remote" && hostUrl) {
-      setIsCreating(true);
-      setError(null);
-      try {
-        const response = await fetch("/api/ahp/sessions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ hostUrl, title: trimmedTitle }),
-        });
+    if (connStatus !== "connected" || !hostUrl) {
+      setError("Not connected to an AHP host");
+      return;
+    }
 
-        if (!response.ok) {
-          const data = await response.json();
-          setError(data.error || "Failed to create session");
-          setIsCreating(false);
-          return;
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Network error");
+    setIsCreating(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/ahp/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hostUrl, title: trimmedTitle }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        setError(data.error || "Failed to create session");
         setIsCreating(false);
         return;
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Network error");
       setIsCreating(false);
-    } else {
-      const newCard: KanbanCard = {
-        id: `new-${Date.now()}`,
-        title: trimmedTitle,
-        phase: "define",
-        runtime: "idle",
-        gateStatus: "pending",
-        attention: "none",
-        risk: "low",
-        activity: "Awaiting scope definition",
-        additions: 0,
-        deletions: 0,
-        filesChanged: 0,
-        planSteps: { total: 0, done: 0 },
-        modifiedAt: Date.now(),
-        project: inheritedProject,
-      };
-
-      addCard(newCard);
+      return;
     }
+    setIsCreating(false);
 
     setTitle("");
     setIsOpen(false);

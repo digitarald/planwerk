@@ -8,7 +8,6 @@ import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 
 export function useLiveSessions() {
   const status = useConnectionStore((s) => s.status);
-  const mode = useConnectionStore((s) => s.mode);
   const hostUrl = useConnectionStore((s) => s.hostUrl);
   const setConnected = useConnectionStore((s) => s.setConnected);
   const setError = useConnectionStore((s) => s.setError);
@@ -30,13 +29,13 @@ export function useLiveSessions() {
       return;
     }
 
-    // Build the SSE URL — pass host for remote mode
+    // Build the SSE URL — pass host when available
     let sseUrl = "/api/ahp/events";
-    if (mode === "remote" && hostUrl && hostUrl !== "mock://localhost") {
+    if (hostUrl) {
       sseUrl += `?host=${encodeURIComponent(hostUrl)}`;
     }
 
-    console.info("[ahp:sse]", `opening ${mode} stream →`, sseUrl);
+    console.info("[ahp:sse]", `opening stream →`, sseUrl);
     const es = new EventSource(sseUrl);
     eventSourceRef.current = es;
 
@@ -112,5 +111,5 @@ export function useLiveSessions() {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [status, mode, hostUrl, setCards, updateCard, addCard, removeCard, addFeedItem, setConnected, setError]);
+  }, [status, hostUrl, setCards, updateCard, addCard, removeCard, addFeedItem, setConnected, setError]);
 }

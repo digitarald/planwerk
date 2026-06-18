@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, Monitor, Play, ShieldAlert, Unplug, Wifi } from "lucide-react";
+import { AlertTriangle, Monitor, ShieldAlert, Unplug, Wifi } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,7 +37,7 @@ const CUSTOM_HOST_KEY = "planwerk-custom-host";
 
 export function Onboarding() {
   const [remoteUrl, setRemoteUrl] = useState("");
-  const { connect, useMockMode, status, error } = useConnectionStore();
+  const { connect, status, error } = useConnectionStore();
 
   // Restore last custom host URL from localStorage
   useEffect(() => {
@@ -99,21 +99,6 @@ export function Onboarding() {
               <Wifi className="h-3.5 w-3.5" />
             </Button>
           </div>
-
-          <button
-            onClick={useMockMode}
-            disabled={isConnecting}
-            className="w-full rounded-md border border-dashed border-border p-3 text-left transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
-            type="button"
-          >
-            <div className="flex items-center gap-3">
-              <Play className="h-4 w-4 text-muted-foreground" />
-              <div>
-                <div className="text-sm font-medium">Demo mode</div>
-                <div className="text-xs text-muted-foreground">Explore with simulated data</div>
-              </div>
-            </div>
-          </button>
         </div>
       </div>
     </div>

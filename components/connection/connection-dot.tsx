@@ -1,7 +1,7 @@
 "use client";
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { ConnectionStatus, useConnectionStore } from "@/lib/store/connection-store";
+import { type ConnectionStatus, useConnectionStore } from "@/lib/store/connection-store";
 import { cn } from "@/lib/utils";
 
 const statusConfig: Record<ConnectionStatus, { color: string; label: string }> = {
@@ -12,7 +12,6 @@ const statusConfig: Record<ConnectionStatus, { color: string; label: string }> =
 
 export function ConnectionDot() {
   const status = useConnectionStore((state) => state.status);
-  const mode = useConnectionStore((state) => state.mode);
   const hostUrl = useConnectionStore((state) => state.hostUrl);
   const error = useConnectionStore((state) => state.error);
   const connect = useConnectionStore((state) => state.connect);
@@ -20,9 +19,7 @@ export function ConnectionDot() {
 
   const canRetry = status === "disconnected" && hostUrl;
 
-  const tooltip = mode === "mock"
-    ? (status === "connected" ? "Demo mode (simulated data)" : "No connection")
-    : (hostUrl || "No AHP host configured");
+  const tooltip = hostUrl || "No AHP host configured";
 
   return (
     <TooltipProvider>
