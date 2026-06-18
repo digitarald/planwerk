@@ -1,15 +1,17 @@
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
 import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
-import type { SessionSummary } from "@microsoft/agent-host-protocol";
+import type { SessionSummary, SessionState, SessionInputRequest } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
 import { enrichFromChangeset, ChangesetEnrichment } from "./changeset-enricher";
 import { fetchCopilotCliPlan, clearPlanCache } from "./plan-artifact";
+import { mapInputRequests } from "./map-session";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, CLEAR_ENRICHMENT } from "@/lib/db/session-cache";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
+import type { PendingInput } from "@/lib/types";
 
 // Re-export for consumers that imported from here
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
@@ -18,8 +20,8 @@ export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
 const OFFERED_PROTOCOL_VERSIONS = [...SUPPORTED_PROTOCOL_VERSIONS, "0.4.0"];
 
 export type BridgeEvent =
-  | { type: "init"; sessions: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment> }
-  | (AHPEvent & { enrichment?: ChangesetEnrichment | null })
+  | { type: "init"; sessions: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment>; pendingInputs: Map<string, PendingInput> }
+  | (AHPEvent & { enrichment?: ChangesetEnrichment | null; pendingInput?: PendingInput | null })
   | ConnectionError;
 
 const LOG_PREFIX = "[ahp:bridge]";
@@ -99,6 +101,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   const enrichments = new Map<string, ChangesetEnrichment>();
   // Track in-flight enrichment requests to avoid duplicates
   const pendingEnrichments = new Set<string>();
+  // Pending input data per session (from session-level subscriptions)
+  const pendingInputs = new Map<string, PendingInput>();
+  // Active session-level subscriptions for input fetching
+  const inputSubscriptions = new Set<string>();
 
   let disposed = false;
   let client: AhpClient | null = null;
@@ -107,6 +113,12 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     if (disposed) return;
     disposed = true;
     clearPlanCache();
+    // Unsubscribe from all session channels
+    for (const uri of inputSubscriptions) {
+      client?.unsubscribe(uri).catch(() => {});
+    }
+    inputSubscriptions.clear();
+    pendingInputs.clear();
     client?.shutdown().catch(() => {});
   }
 
@@ -194,6 +206,119 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       });
   }
 
+  /**
+   * Subscribe to a session channel to fetch inputRequests when InputNeeded.
+   * Extracts pending input from the snapshot and listens for live updates.
+   */
+  function triggerInputSubscription(sessionUri: string) {
+    if (disposed || !client || inputSubscriptions.has(sessionUri)) return;
+
+    inputSubscriptions.add(sessionUri);
+    debug("subscribing for input:", sessionUri);
+
+    client.subscribe(sessionUri)
+      .then(({ result, subscription }) => {
+        // Re-check: subscription may no longer be wanted if status changed while connecting
+        const currentSession = sessions.get(sessionUri);
+        const stillNeeded = !disposed
+          && inputSubscriptions.has(sessionUri)
+          && currentSession
+          && (currentSession.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
+
+        if (!stillNeeded) {
+          client?.unsubscribe(sessionUri).catch(() => {});
+          inputSubscriptions.delete(sessionUri);
+          return;
+        }
+
+        // Extract inputRequests from snapshot
+        const snapshot = result.snapshot;
+        if (snapshot) {
+          const sessionState = snapshot.state as SessionState;
+          const mapped = mapInputRequests(sessionState.inputRequests);
+          if (mapped) {
+            pendingInputs.set(sessionUri, mapped);
+            debug("got pending input from snapshot:", sessionUri, mapped.requestId);
+            // Re-emit so the card picks up pendingInput
+            const session = sessions.get(sessionUri)!;
+            onEvent({
+              type: "sessionSummaryChanged",
+              session,
+              enrichment: enrichments.get(sessionUri) ?? null,
+              pendingInput: mapped,
+            });
+          }
+        }
+
+        // Listen for live input actions on this session channel
+        (async () => {
+          try {
+            for await (const event of subscription) {
+              if (disposed) break;
+              // Session-level events arrive as action envelopes
+              if (event.type !== "action") continue;
+              const actionType = event.params.action.type;
+              if (actionType === "session/inputRequested") {
+                const req = (event.params.action as { type: string; request: SessionInputRequest }).request;
+                const mapped = mapInputRequests([req]);
+                if (mapped) {
+                  pendingInputs.set(sessionUri, mapped);
+                  debug("input requested:", sessionUri, mapped.requestId);
+                  const session = sessions.get(sessionUri);
+                  if (session) {
+                    onEvent({
+                      type: "sessionSummaryChanged",
+                      session,
+                      enrichment: enrichments.get(sessionUri) ?? null,
+                      pendingInput: mapped,
+                    });
+                  }
+                }
+              } else if (actionType === "session/inputCompleted") {
+                pendingInputs.delete(sessionUri);
+                debug("input completed:", sessionUri);
+                const session = sessions.get(sessionUri);
+                if (session) {
+                  onEvent({
+                    type: "sessionSummaryChanged",
+                    session,
+                    enrichment: enrichments.get(sessionUri) ?? null,
+                    pendingInput: null,
+                  });
+                }
+              }
+            }
+          } catch {
+            // Subscription ended (dispose or unsubscribe)
+          }
+        })();
+      })
+      .catch((err) => {
+        debug("input subscription failed:", sessionUri, err instanceof Error ? err.message : err);
+        inputSubscriptions.delete(sessionUri);
+      });
+  }
+
+  /** Unsubscribe from a session channel when no longer input-needed. */
+  function clearInputSubscription(sessionUri: string) {
+    if (!inputSubscriptions.has(sessionUri)) return;
+    debug("unsubscribing input:", sessionUri);
+    inputSubscriptions.delete(sessionUri);
+    pendingInputs.delete(sessionUri);
+    client?.unsubscribe(sessionUri).catch(() => {});
+  }
+
+  /** Check session status and manage input subscription lifecycle. */
+  function syncInputSubscription(sessionUri: string, status: number) {
+    const needsInput = (status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
+    const isArchived = (status & AHPStatus.IsArchived) !== 0;
+    if (needsInput && !isArchived) {
+      triggerInputSubscription(sessionUri);
+    } else {
+      clearInputSubscription(sessionUri);
+    }
+  }
+
   if (signal) {
     signal.addEventListener("abort", dispose, { once: true });
   }
@@ -266,7 +391,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       sessions.set(summary.resource, mapped);
     }
     info(`loaded ${sessions.size} sessions (${result.items.length} total, archived without changes filtered)`);
-    onEvent({ type: "init", sessions: Array.from(sessions.values()), enrichments });
+    onEvent({ type: "init", sessions: Array.from(sessions.values()), enrichments, pendingInputs });
 
     // Cache all sessions and remove stale entries
     for (const [uri, session] of sessions) {
@@ -275,8 +400,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     reconcileSessionCache(hostUrl, new Set(sessions.keys()));
 
     // Trigger async enrichment (changeset + plan artifact) for all sessions
-    for (const [uri] of sessions) {
+    for (const [uri, session] of sessions) {
       triggerEnrichment(uri);
+      // Subscribe to session channels for input-needed sessions
+      syncInputSubscription(uri, session.status);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to list sessions";
@@ -307,10 +434,12 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           debug("sessionAdded:", mapped.resource, mapped.title);
           onEvent({ type: "sessionAdded", session: mapped, enrichment: enrichments.get(mapped.resource) });
           triggerEnrichment(mapped.resource);
+          syncInputSubscription(mapped.resource, mapped.status);
         } else if (event.type === "sessionRemoved") {
           debug("sessionRemoved:", event.params.session);
           sessions.delete(event.params.session);
           removeSessionCache(hostUrl, event.params.session);
+          clearInputSubscription(event.params.session);
           onEvent({ type: "sessionRemoved", resource: event.params.session });
         } else if (event.type === "sessionSummaryChanged") {
           const { session: sessionUri, changes } = event.params;
@@ -339,6 +468,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
             // Check if session became archived
             if (existing.status & AHPStatus.IsArchived) {
+              clearInputSubscription(sessionUri);
               if (shouldShowSession(existing.status, existing.changes?.files)) {
                 debug("sessionArchived: keeping (has code changes)", sessionUri);
                 sessions.set(sessionUri, existing);
@@ -354,9 +484,19 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
               continue;
             }
 
+            // Sync input subscription when status changes
+            if (changes.status !== undefined) {
+              syncInputSubscription(sessionUri, existing.status);
+            }
+
             sessions.set(sessionUri, existing);
             upsertSessionCache(hostUrl, sessionUri, existing, enrichments.get(sessionUri));
-            onEvent({ type: "sessionSummaryChanged", session: existing, enrichment: enrichments.get(sessionUri) });
+            onEvent({
+              type: "sessionSummaryChanged",
+              session: existing,
+              enrichment: enrichments.get(sessionUri),
+              pendingInput: pendingInputs.get(sessionUri),
+            });
             // Re-trigger enrichment if file changes updated
             if (changes.changes !== undefined) {
               triggerEnrichment(sessionUri);

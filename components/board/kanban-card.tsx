@@ -11,11 +11,12 @@ import {
   ShieldCheck,
   ShieldX,
   XCircle,
-  ChevronDown,
+
   Bug,
 } from "lucide-react";
 
 import { CardExpansion } from "./card-expansion";
+import { PendingInputCard } from "./pending-input-card";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -77,6 +78,12 @@ function RuntimeIndicator({ status }: { status: RuntimeStatus }) {
 }
 
 function InputContext({ card }: { card: KanbanCardType }) {
+  // When we have structured pending input data, render the actionable UI
+  if (card.pendingInput) {
+    return <PendingInputCard cardId={card.id} input={card.pendingInput} />;
+  }
+
+  // Fallback: no input data yet (still subscribing), show activity text
   const lastTool = card.recentActivity?.findLast((e) => e.type === "tool");
   return (
     <div className="mt-1 space-y-0.5 rounded border border-amber-200 bg-amber-50 px-1.5 py-1 dark:border-amber-800/40 dark:bg-amber-950/20">
@@ -224,16 +231,6 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
             {isExpanded && (
               <>
                 <CardExpansion card={card} />
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setExpandedCard(null);
-                  }}
-                  className="mt-1.5 flex w-full items-center justify-center gap-0.5 rounded py-0.5 text-[10px] text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-                >
-                  <ChevronDown className="h-3 w-3 rotate-180" />
-                  Collapse
-                </button>
               </>
             )}
             </ContextMenuTrigger>
