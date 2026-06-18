@@ -6,6 +6,7 @@ import type { SessionSummary } from "@microsoft/agent-host-protocol";
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
 import { enrichFromChangeset, ChangesetEnrichment } from "./changeset-enricher";
+import { fetchCopilotCliPlan, clearPlanCache } from "./plan-artifact";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, CLEAR_ENRICHMENT } from "@/lib/db/session-cache";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
@@ -105,12 +106,16 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   function dispose() {
     if (disposed) return;
     disposed = true;
+    clearPlanCache();
     client?.shutdown().catch(() => {});
   }
 
   /**
    * Trigger async changeset enrichment for a session. On completion,
    * re-emits the card with enrichment data applied.
+   *
+   * Also fetches plan.md from Copilot CLI session-state as a fallback
+   * artifact source (plan.md lives outside the git working tree).
    */
   // Track sessions that changed while enrichment was in-flight
   const dirtyEnrichments = new Set<string>();
@@ -121,16 +126,6 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     const session = sessions.get(sessionUri);
     if (!session) return;
 
-    // Clear stale enrichment when session has no file changes
-    if (!session.changes?.files) {
-      if (enrichments.has(sessionUri)) {
-        enrichments.delete(sessionUri);
-        upsertSessionCache(hostUrl, sessionUri, session, CLEAR_ENRICHMENT);
-        onEvent({ type: "sessionSummaryChanged", session, enrichment: null });
-      }
-      return;
-    }
-
     // If already in-flight, mark dirty for re-enrichment after completion
     if (pendingEnrichments.has(sessionUri)) {
       dirtyEnrichments.add(sessionUri);
@@ -138,18 +133,52 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }
 
     pendingEnrichments.add(sessionUri);
-    enrichFromChangeset(client, sessionUri)
-      .then((result) => {
+
+    const hasFileChanges = (session.changes?.files ?? 0) > 0;
+
+    // Run changeset enrichment and plan fetch in parallel
+    const changesetPromise = hasFileChanges
+      ? enrichFromChangeset(client!, sessionUri)
+      : Promise.resolve(null);
+    const planPromise = fetchCopilotCliPlan(client!, sessionUri, session.modifiedAt);
+
+    Promise.all([changesetPromise, planPromise])
+      .then(([changesetResult, planArtifact]) => {
         if (disposed || !sessions.has(sessionUri)) return;
-        if (result) {
-          enrichments.set(sessionUri, result);
-          upsertSessionCache(hostUrl, sessionUri, sessions.get(sessionUri)!, result);
+
+        let enrichment = changesetResult ?? enrichments.get(sessionUri) ?? null;
+
+        // Merge plan artifact into enrichment if no plan was found in changeset
+        if (planArtifact) {
+          const hasPlan = enrichment?.artifacts.some((a) => a.type === "plan");
+          if (!hasPlan) {
+            if (enrichment) {
+              enrichment = { ...enrichment, artifacts: [...enrichment.artifacts, planArtifact] };
+            } else {
+              enrichment = { artifacts: [planArtifact], codeFileCount: 0, totalFileCount: 0 };
+            }
+          }
+        }
+
+        // Clear stale enrichment when session has no file changes and no plan
+        if (!hasFileChanges && !enrichment) {
+          if (enrichments.has(sessionUri)) {
+            enrichments.delete(sessionUri);
+            upsertSessionCache(hostUrl, sessionUri, session, CLEAR_ENRICHMENT);
+            onEvent({ type: "sessionSummaryChanged", session, enrichment: null });
+          }
+          return;
+        }
+
+        if (enrichment) {
+          enrichments.set(sessionUri, enrichment);
+          upsertSessionCache(hostUrl, sessionUri, sessions.get(sessionUri)!, enrichment);
         }
         // Re-emit with enrichment data included
         onEvent({
           type: "sessionSummaryChanged",
           session: sessions.get(sessionUri)!,
-          enrichment: result ?? enrichments.get(sessionUri) ?? null,
+          enrichment: enrichment ?? null,
         });
       })
       .catch(() => {
@@ -245,7 +274,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }
     reconcileSessionCache(hostUrl, new Set(sessions.keys()));
 
-    // Trigger async changeset enrichment for all sessions with file changes
+    // Trigger async enrichment (changeset + plan artifact) for all sessions
     for (const [uri] of sessions) {
       triggerEnrichment(uri);
     }
