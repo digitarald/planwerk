@@ -19,12 +19,18 @@ export interface ConnectionError {
 export function classifyError(rawMessage: string, context: "connect" | "protocol" | "stream"): ConnectionError {
   const lower = rawMessage.toLowerCase();
 
-  if (lower.includes("forbidden") || lower.includes("403") || lower.includes("unauthorized")) {
+  if (
+    lower.includes("forbidden") ||
+    lower.includes("403") ||
+    lower.includes("unauthorized") ||
+    lower.includes("authentication is required") ||
+    lower.includes("auth") && lower.includes("required")
+  ) {
     return {
       type: "error",
       code: "auth_failed",
-      message: "Connection rejected by the AHP host",
-      hint: "The server requires a connection token. Restart VS Code's agent host with --without-connection-token, or pass a token via the URL (ws://host:port?tkn=TOKEN).",
+      message: "Authentication required by the AHP host",
+      hint: "The server requires authentication. Make sure you're signed in to GitHub Copilot in VS Code, or restart the agent host with --without-connection-token.",
     };
   }
 
