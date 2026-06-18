@@ -1,7 +1,54 @@
-import { Artifact, KanbanCard, Phase, RiskLevel, RuntimeStatus } from "@/lib/types";
+import { Artifact, KanbanCard, PendingInput, PendingInputQuestion, PendingInputOptionKind, Phase, RiskLevel, RuntimeStatus } from "@/lib/types";
+import type { SessionInputRequest, SessionInputQuestion } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPStatus, parseAHPStatus } from "./types";
 import type { ChangesetEnrichment } from "./changeset-enricher";
+
+/**
+ * Convert SDK SessionInputRequest[] into the first actionable PendingInput.
+ * Only surfaces the first non-answered request to avoid overwhelming the card.
+ */
+export function mapInputRequests(requests: SessionInputRequest[] | undefined): PendingInput | undefined {
+  if (!requests || requests.length === 0) return undefined;
+
+  const req = requests[0];
+  const questions: PendingInputQuestion[] = (req.questions ?? []).map(mapQuestion);
+
+  return {
+    requestId: req.id,
+    message: req.message,
+    questions,
+  };
+}
+
+function mapQuestion(q: SessionInputQuestion): PendingInputQuestion {
+  const base: PendingInputQuestion = {
+    id: q.id,
+    kind: q.kind as PendingInputOptionKind,
+    message: q.message,
+    title: q.title,
+    required: q.required,
+  };
+
+  if ("options" in q && q.options) {
+    base.options = q.options.map((o) => ({
+      id: o.id,
+      label: o.label,
+      description: o.description,
+      recommended: o.recommended,
+    }));
+  }
+
+  if ("allowFreeformInput" in q) {
+    base.allowFreeform = q.allowFreeformInput;
+  }
+
+  if ("defaultValue" in q && q.defaultValue !== undefined) {
+    base.defaultValue = q.defaultValue;
+  }
+
+  return base;
+}
 
 export function mapAHPRuntimeStatus(statusBits: number): RuntimeStatus {
   const parsed = parseAHPStatus(statusBits);
@@ -151,6 +198,7 @@ export function mapSessionToCard(
     workingDirectory: session.workingDirectory,
     project: session.project,
     artifacts: artifacts.length > 0 ? artifacts : undefined,
+    lastAgentMessage: enrichment?.lastAgentMessage,
     isArchived,
   };
 }

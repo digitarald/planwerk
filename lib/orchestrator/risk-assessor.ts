@@ -11,6 +11,8 @@ export interface RiskInput {
   additions: number;
   deletions: number;
   filePaths?: string[];
+  lastAgentMessage?: string;
+  planContent?: string;
 }
 
 interface RiskAssessment {
@@ -42,12 +44,17 @@ async function getClient(): Promise<CopilotClient> {
 
 const SYSTEM_PROMPT = `You are a risk triage agent for a software development lifecycle system.
 
-Given context about a task (title, activity description, file metrics, and optionally file paths), assess the risk level as one of: "low", "medium", or "high".
+Given context about a task (title, activity, file metrics, plan content, and the agent's last response), assess the risk level as one of: "low", "medium", or "high".
 
 Risk criteria:
 - **Low**: Typo fixes, config changes, documentation, small isolated changes (<5 files, <50 lines)
 - **Medium**: Feature work, refactors, dependency updates, moderate scope (5-10 files or 50-200 lines)
 - **High**: Security-sensitive changes (auth, encryption, credentials), database migrations, core infrastructure, payment/billing logic, large blast radius (>10 files or >200 lines), breaking API changes
+
+Pay special attention to:
+- The plan content (if provided) — it describes the intended scope and approach
+- The agent's last message — it summarizes the most recent work done
+- File paths — security/auth/migration/payment paths indicate higher risk
 
 Respond with ONLY a JSON object (no markdown fences, no extra text):
 {"level": "low|medium|high", "factors": ["reason 1", "reason 2"]}
@@ -63,8 +70,14 @@ function buildPrompt(input: RiskInput): string {
     input.filePaths?.length
       ? `File paths:\n${input.filePaths.slice(0, 50).map((f) => `  - ${f}`).join("\n")}`
       : null,
+    input.planContent
+      ? `Plan:\n${input.planContent.slice(0, 3000)}`
+      : null,
+    input.lastAgentMessage
+      ? `Agent's last response:\n${input.lastAgentMessage.slice(0, 2000)}`
+      : null,
   ];
-  return lines.filter(Boolean).join("\n");
+  return lines.filter(Boolean).join("\n\n");
 }
 
 function parseResponse(content: string): RiskAssessment | null {

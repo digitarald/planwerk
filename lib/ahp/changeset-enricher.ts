@@ -4,6 +4,8 @@ import type {
   ChangesetFile,
   SessionState,
   Changeset,
+  Turn,
+  ResponsePart,
 } from "@microsoft/agent-host-protocol";
 
 import { Artifact, ArtifactType } from "@/lib/types";
@@ -46,6 +48,35 @@ export interface ChangesetEnrichment {
   codeFileCount: number;
   totalFileCount: number;
   filePaths: string[];
+  lastAgentMessage?: string;
+  planContent?: string;
+}
+
+const MAX_AGENT_MESSAGE_LENGTH = 2000;
+
+/**
+ * Extract the last agent response from completed turns.
+ * Concatenates markdown parts from the final turn's responseParts.
+ */
+function extractLastAgentMessage(turns: Turn[]): string | undefined {
+  if (!turns.length) return undefined;
+
+  // Walk backwards to find the last turn with markdown content
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const turn = turns[i];
+    const markdownParts = turn.responseParts?.filter(
+      (p: ResponsePart) => p.kind === "markdown"
+    );
+    if (markdownParts?.length) {
+      const text = markdownParts
+        .map((p) => ("content" in p ? (p.content as string) : ""))
+        .join("")
+        .trim();
+      if (text) return text.slice(0, MAX_AGENT_MESSAGE_LENGTH);
+    }
+  }
+
+  return undefined;
 }
 
 function isNonCodeFile(filePath: string): boolean {
@@ -110,9 +141,16 @@ export async function enrichFromChangeset(
     await client.unsubscribe(sessionUri).catch(() => {});
 
     const sessionState = sessionResult.snapshot?.state as SessionState | undefined;
+
+    // Extract last agent message from turns regardless of changeset availability
+    const lastAgentMessage = sessionState?.turns
+      ? extractLastAgentMessage(sessionState.turns)
+      : undefined;
+
     if (!sessionState?.changesets?.length) {
       debug("no changesets for", sessionUri);
-      return null;
+      // Return agent message even without changeset data
+      return lastAgentMessage ? { artifacts: [], codeFileCount: 0, totalFileCount: 0, filePaths: [], lastAgentMessage } : null;
     }
 
     const changeset = findSessionChangeset(sessionState.changesets);
@@ -137,7 +175,7 @@ export async function enrichFromChangeset(
     const csState = csResult.snapshot?.state as ChangesetState | undefined;
     if (!csState?.files) {
       debug("changeset has no files:", changesetUri);
-      return { artifacts: [], codeFileCount: 0, totalFileCount: 0, filePaths: [] };
+      return { artifacts: [], codeFileCount: 0, totalFileCount: 0, filePaths: [], lastAgentMessage };
     }
 
     // If changeset is still computing, return null to retry later
@@ -200,11 +238,16 @@ export async function enrichFromChangeset(
       `→ ${artifacts.length} artifacts, ${codeFileCount} code files, ${csState.files.length} total`
     );
 
+    // Extract plan content from the first plan artifact that has it
+    const planContent = artifacts.find((a) => a.type === "plan" && a.contentRef)?.contentRef;
+
     return {
       artifacts,
       codeFileCount,
       totalFileCount: csState.files.length,
       filePaths,
+      lastAgentMessage,
+      planContent,
     };
   } catch (err) {
     debug("enrichment failed for", sessionUri, err);

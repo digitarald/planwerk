@@ -49,11 +49,12 @@ async function tryTriage(
 ): Promise<TriageEvent | undefined> {
   if (!TRIAGE_PHASES.includes(card.phase)) return undefined;
 
+  // Only triage when the agent is done or waiting on input — not while running
+  if (card.runtime === "running") return undefined;
+
   // Triage when the card's inferred phase differs from what's persisted in DB.
-  // This catches both first-time phase inference and phase changes.
   const persistedPhase = getPersistedCardPhase(card.id);
   if (persistedPhase === card.phase) {
-    // Already triaged for this phase — skip unless no risk exists yet
     if (getCardRisk(card.id)) return undefined;
   }
 
@@ -67,6 +68,8 @@ async function tryTriage(
         additions: session.changes?.additions ?? 0,
         deletions: session.changes?.deletions ?? 0,
         filePaths: enrichment?.filePaths,
+        lastAgentMessage: enrichment?.lastAgentMessage,
+        planContent: enrichment?.planContent,
       },
       card.phase
     );
@@ -99,10 +102,13 @@ async function projectRemoteEvent(event: BridgeEvent): Promise<CardStreamEvent> 
   }
 
   if (event.type === "init") {
-    return {
-      type: "init",
-      cards: event.sessions.map((s) => safeEnrich(s, event.enrichments.get(s.resource))),
-    };
+    const cards = event.sessions.map((s) => {
+      const card = safeEnrich(s, event.enrichments.get(s.resource));
+      const pi = event.pendingInputs.get(s.resource);
+      if (pi) card.pendingInput = pi;
+      return card;
+    });
+    return { type: "init", cards };
   }
 
   if (event.type === "sessionRemoved") {
@@ -113,6 +119,10 @@ async function projectRemoteEvent(event: BridgeEvent): Promise<CardStreamEvent> 
   }
 
   const card = safeEnrich(event.session, event.enrichment);
+  // Attach pending input if available (null means explicitly cleared)
+  if (event.pendingInput !== undefined) {
+    card.pendingInput = event.pendingInput ?? undefined;
+  }
   const triage = await tryTriage(card, event.session, event.enrichment);
 
   return {

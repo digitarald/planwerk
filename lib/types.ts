@@ -27,6 +27,33 @@ export interface ActivityEntry {
   message: string;
 }
 
+export type PendingInputOptionKind = "text" | "number" | "boolean" | "single-select" | "multi-select";
+
+export interface PendingInputOption {
+  id: string;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+}
+
+export interface PendingInputQuestion {
+  id: string;
+  kind: PendingInputOptionKind;
+  title?: string;
+  message: string;
+  required?: boolean;
+  options?: PendingInputOption[];
+  allowFreeform?: boolean;
+  defaultValue?: string | number | boolean;
+}
+
+export interface PendingInput {
+  requestId: string;
+  /** Top-level message for the input request (e.g. plan summary or question context) */
+  message?: string;
+  questions: PendingInputQuestion[];
+}
+
 export interface KanbanCard {
   id: string;
   title: string;
@@ -48,6 +75,8 @@ export interface KanbanCard {
   project?: { name: string; path: string };
   artifacts?: Artifact[];
   recentActivity?: ActivityEntry[];
+  pendingInput?: PendingInput;
+  lastAgentMessage?: string;
   isArchived?: boolean;
 }
 
