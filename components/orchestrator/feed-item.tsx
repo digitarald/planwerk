@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Lightbulb,
   RefreshCw,
+  Shield,
   User,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -15,6 +16,7 @@ type FeedItemType =
   | "alert"
   | "transition"
   | "suggestion"
+  | "triage"
   | "user"
   | "response";
 
@@ -30,6 +32,7 @@ const typeConfig: Record<FeedItemType, { icon: typeof RefreshCw; color: string }
   alert: { icon: AlertTriangle, color: "text-amber-600" },
   transition: { icon: CheckCircle2, color: "text-emerald-600" },
   suggestion: { icon: Lightbulb, color: "text-violet-600" },
+  triage: { icon: Shield, color: "text-blue-600" },
   user: { icon: User, color: "text-foreground" },
   response: { icon: Bot, color: "text-primary" },
 };
@@ -61,6 +64,7 @@ export function FeedItem({ type, message, timestamp }: FeedItemProps) {
         type === "alert" && "bg-amber-500/40",
         type === "transition" && "bg-emerald-500/40",
         type === "suggestion" && "bg-violet-500/40",
+        type === "triage" && "bg-blue-500/40",
         type === "user" && "bg-foreground/20",
         type === "response" && "bg-primary/40",
       )} />

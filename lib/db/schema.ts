@@ -55,6 +55,15 @@ export function getDb(): Database.Database {
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
 
+      CREATE TABLE IF NOT EXISTS card_risk (
+        card_id TEXT PRIMARY KEY,
+        risk_level TEXT NOT NULL DEFAULT 'low',
+        risk_factors TEXT NOT NULL DEFAULT '[]',
+        assessed_at TEXT NOT NULL DEFAULT (datetime('now')),
+        assessed_by TEXT NOT NULL DEFAULT 'copilot',
+        FOREIGN KEY (card_id) REFERENCES card_phases(card_id)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_gate_runs_card ON gate_runs(card_id);
       CREATE INDEX IF NOT EXISTS idx_gate_runs_status ON gate_runs(status);
       CREATE INDEX IF NOT EXISTS idx_session_cache_host ON session_cache(host_url);

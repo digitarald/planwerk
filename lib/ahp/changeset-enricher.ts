@@ -45,6 +45,7 @@ export interface ChangesetEnrichment {
   artifacts: Artifact[];
   codeFileCount: number;
   totalFileCount: number;
+  filePaths: string[];
 }
 
 function isNonCodeFile(filePath: string): boolean {
@@ -136,7 +137,7 @@ export async function enrichFromChangeset(
     const csState = csResult.snapshot?.state as ChangesetState | undefined;
     if (!csState?.files) {
       debug("changeset has no files:", changesetUri);
-      return { artifacts: [], codeFileCount: 0, totalFileCount: 0 };
+      return { artifacts: [], codeFileCount: 0, totalFileCount: 0, filePaths: [] };
     }
 
     // If changeset is still computing, return null to retry later
@@ -147,11 +148,13 @@ export async function enrichFromChangeset(
 
     // Classify files
     const artifacts: Artifact[] = [];
+    const filePaths: string[] = [];
     let codeFileCount = 0;
     const artifactFiles: Array<{ file: ChangesetFile; path: string; type: ArtifactType }> = [];
 
     for (const file of csState.files) {
       const filePath = extractFilePath(file);
+      filePaths.push(filePath);
       const artifactType = classifyArtifactFile(filePath);
 
       if (artifactType && file.edit.after) {
@@ -201,6 +204,7 @@ export async function enrichFromChangeset(
       artifacts,
       codeFileCount,
       totalFileCount: csState.files.length,
+      filePaths,
     };
   } catch (err) {
     debug("enrichment failed for", sessionUri, err);

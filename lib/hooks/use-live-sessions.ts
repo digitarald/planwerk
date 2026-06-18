@@ -80,6 +80,19 @@ export function useLiveSessions() {
                 cardId: card.id,
               });
             }
+            // Surface triage results when a card enters plan/build
+            if (data.triage) {
+              const t = data.triage;
+              const riskLabel = t.riskLevel.toUpperCase();
+              const factorList = t.factors.length > 0 ? ` — ${t.factors.join(", ")}` : "";
+              const gateList = t.requiredGates.length > 0 ? ` Gates: ${t.requiredGates.join(", ")}.` : "";
+              const approval = t.requiresHumanApproval ? " ⚠️ Human approval required." : "";
+              addFeedItem({
+                type: "triage",
+                message: `Triaged "${card.title}" as ${riskLabel} risk${factorList}.${gateList}${approval}`,
+                cardId: card.id,
+              });
+            }
           } else {
             addCard(card);
           }

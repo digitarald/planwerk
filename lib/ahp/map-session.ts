@@ -85,19 +85,23 @@ function inferPhase(
 ): Phase {
   const isArchived = (session.status & AHPStatus.IsArchived) !== 0;
   const totalFiles = session.changes?.files ?? 0;
-  // Use codeFileCount when available (from changeset enrichment),
-  // otherwise fall back to total file count
-  const hasCodeChanges = codeFileCount !== undefined ? codeFileCount > 0 : totalFiles > 0;
+  const activity = (session.activity ?? "").toLowerCase();
+  const hasPlanArtifact = artifacts.some((a) => a.type === "plan");
+  const hasPlanSignal = hasPlanArtifact || PLAN_KEYWORDS.test(activity);
+
+  // Split "code changes" into definite (enrichment-backed) vs ambiguous (raw count).
+  // Without enrichment, raw file counts include plan/spec artifacts so we can't
+  // assume they represent code changes.
+  const hasDefiniteCodeChanges = codeFileCount !== undefined ? codeFileCount > 0 : false;
+  const hasAmbiguousFileChanges = codeFileCount === undefined && totalFiles > 0;
+  const hasCodeChanges = hasDefiniteCodeChanges || (hasAmbiguousFileChanges && !hasPlanSignal);
 
   // Archived sessions with code changes are completed work → ship
   if (isArchived && hasCodeChanges) return "ship";
 
   if (existingPhase) return existingPhase;
 
-  const activity = (session.activity ?? "").toLowerCase();
-  const hasPlanArtifact = artifacts.some((a) => a.type === "plan");
-
-  // Review keywords + idle with changes → review
+  // Review keywords + code changes → review
   if (REVIEW_KEYWORDS.test(activity) && hasCodeChanges) return "review";
 
   // Code changes present → build
@@ -109,11 +113,11 @@ function inferPhase(
   return "define";
 }
 
-export function mapSessionToCard(
+export async function mapSessionToCard(
   session: AHPSessionSummary,
   existingPhase?: Phase,
   enrichment?: ChangesetEnrichment | null
-): KanbanCard {
+): Promise<KanbanCard> {
   const runtime = mapAHPRuntimeStatus(session.status);
   // Use changeset-derived artifacts when available, fall back to inference
   const artifacts = enrichment?.artifacts ?? inferArtifacts(session);
@@ -123,12 +127,13 @@ export function mapSessionToCard(
   const additions = session.changes?.additions || 0;
   const deletions = session.changes?.deletions || 0;
   const filesChanged = session.changes?.files || 0;
-  const risk = assessRisk({
+  const risk = await assessRisk({
     title: session.title,
     activity: session.activity,
     filesChanged,
     additions,
     deletions,
+    filePaths: enrichment?.filePaths,
   });
 
   return {

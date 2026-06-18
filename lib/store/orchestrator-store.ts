@@ -6,6 +6,7 @@ export type FeedItemType =
   | "alert"
   | "transition"
   | "suggestion"
+  | "triage"
   | "user"
   | "response";
 

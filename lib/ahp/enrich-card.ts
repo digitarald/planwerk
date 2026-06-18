@@ -11,12 +11,12 @@ import { mapSessionToCard } from "./map-session";
 import { AHPSessionSummary } from "./types";
 import type { ChangesetEnrichment } from "./changeset-enricher";
 
-export function enrichSessionToCard(
+export async function enrichSessionToCard(
   session: AHPSessionSummary,
   changesetData?: ChangesetEnrichment | null
-): KanbanCard {
+): Promise<KanbanCard> {
   const persistedPhase = getPersistedCardPhase(session.resource);
-  const card = mapSessionToCard(session, persistedPhase, changesetData);
+  const card = await mapSessionToCard(session, persistedPhase, changesetData);
 
   const nextPhase = getNextPhase(card.phase);
   if (nextPhase) {

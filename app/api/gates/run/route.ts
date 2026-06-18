@@ -13,6 +13,8 @@ import {
   startGateRun,
   type GateType,
 } from "@/lib/orchestrator/gate-engine";
+import { getCardRisk } from "@/lib/orchestrator/risk-store";
+import type { RiskLevel } from "@/lib/types";
 
 try {
   const db = getDb();
@@ -25,6 +27,11 @@ try {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+function getCardRiskLevel(cardId: string): RiskLevel | undefined {
+  const risk = getCardRisk(cardId);
+  return risk?.level;
+}
 
 export async function POST(request: NextRequest) {
   const body = (await request.json()) as {
@@ -49,7 +56,14 @@ export async function POST(request: NextRequest) {
   }
 
   if (action === "check") {
-    const result = canAdvancePhase(cardId, currentPhase, nextPhase, body.projectPath);
+    const riskLevel = getCardRiskLevel(cardId);
+    const result = canAdvancePhase(
+      cardId,
+      currentPhase,
+      nextPhase,
+      body.projectPath,
+      riskLevel
+    );
 
     return NextResponse.json({
       cardId,
@@ -60,11 +74,13 @@ export async function POST(request: NextRequest) {
   }
 
   if (action === "advance") {
+    const riskLevel = getCardRiskLevel(cardId);
     const { allowed, pendingGates } = canAdvancePhase(
       cardId,
       currentPhase,
       nextPhase,
-      body.projectPath
+      body.projectPath,
+      riskLevel
     );
 
     if (!allowed) {
@@ -93,7 +109,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "gateType required" }, { status: 400 });
     }
 
-    const gates = getGatesForTransition(currentPhase, nextPhase, body.projectPath);
+    const riskLevel = getCardRiskLevel(cardId);
+    const gates = getGatesForTransition(
+      currentPhase,
+      nextPhase,
+      body.projectPath,
+      riskLevel
+    );
     const gate = gates.find(
       (g) => g.gateType === gateType && (!gateName || g.gateName === gateName)
     );
@@ -142,6 +164,50 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ runId, status: "running" });
   }
 
+  if (action === "approve") {
+    const { gateType, gateName } = body;
+
+    if (gateType !== "human-approval") {
+      return NextResponse.json(
+        { error: "approve action only valid for human-approval gates" },
+        { status: 400 }
+      );
+    }
+
+    const riskLevel = getCardRiskLevel(cardId);
+    const gates = getGatesForTransition(
+      currentPhase,
+      nextPhase,
+      body.projectPath,
+      riskLevel
+    );
+    const gate = gates.find(
+      (g) => g.gateType === "human-approval" && (!gateName || g.gateName === gateName)
+    );
+
+    if (!gate) {
+      return NextResponse.json(
+        { error: "No human-approval gate found for this transition" },
+        { status: 400 }
+      );
+    }
+
+    const runId = startGateRun(
+      cardId,
+      currentPhase,
+      nextPhase,
+      "human-approval",
+      gate.gateName ?? gateName
+    );
+    completeGateRun(runId, "passed", "Approved by human");
+
+    return NextResponse.json({
+      runId,
+      status: "passed",
+      approvedAt: new Date().toISOString(),
+    });
+  }
+
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });
 }
 
@@ -166,12 +232,14 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const gates = getGatesForTransition(currentPhase, nextPhase, projectPath);
+  const riskLevel = getCardRiskLevel(cardId);
+  const gates = getGatesForTransition(currentPhase, nextPhase, projectPath, riskLevel);
   const { allowed, pendingGates } = canAdvancePhase(
     cardId,
     currentPhase,
     nextPhase,
-    projectPath
+    projectPath,
+    riskLevel
   );
 
   return NextResponse.json({
