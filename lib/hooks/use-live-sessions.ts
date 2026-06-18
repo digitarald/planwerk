@@ -18,6 +18,7 @@ export function useLiveSessions() {
   const addCard = useBoardStore((s) => s.addCard);
   const removeCard = useBoardStore((s) => s.removeCard);
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
+  const upsertTransition = useOrchestratorStore((s) => s.upsertTransition);
 
   useEffect(() => {
     // Only connect when status indicates we should be connected/connecting
@@ -64,10 +65,12 @@ export function useLiveSessions() {
           console.info("[ahp:sse]", `init: ${data.cards.length} cards`);
           setCards(data.cards);
           setConnected();
-          addFeedItem({
-            type: "transition",
-            message: `Connected. Monitoring ${data.cards.length} sessions across the board.`,
-          });
+          const { hasConnectedOnce } = useOrchestratorStore.getState();
+          if (hasConnectedOnce) {
+            upsertTransition(`Reconnected. Monitoring ${data.cards.length} sessions.`);
+          } else {
+            upsertTransition(`Monitoring ${data.cards.length} sessions.`);
+          }
         } else if (data.type === "cardChanged") {
           const card = data.card;
           const existing = useBoardStore.getState().getCard(card.id);
@@ -76,8 +79,9 @@ export function useLiveSessions() {
             if (card.attention === "needs-human" && existing.attention !== "needs-human") {
               addFeedItem({
                 type: "alert",
-                message: `"${card.title}" needs your input: ${card.activity}`,
+                message: card.activity,
                 cardId: card.id,
+                cardTitle: card.title,
               });
             }
             // Surface triage results when a card enters plan/build
@@ -89,8 +93,9 @@ export function useLiveSessions() {
               const approval = t.requiresHumanApproval ? " ⚠️ Human approval required." : "";
               addFeedItem({
                 type: "triage",
-                message: `Triaged "${card.title}" as ${riskLabel} risk${factorList}.${gateList}${approval}`,
+                message: `${riskLabel} risk${factorList}.${gateList}${approval}`,
                 cardId: card.id,
+                cardTitle: card.title,
               });
             }
           } else {
@@ -124,5 +129,5 @@ export function useLiveSessions() {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [status, hostUrl, setCards, updateCard, addCard, removeCard, addFeedItem, setConnected, setError]);
+  }, [status, hostUrl, setCards, updateCard, addCard, removeCard, addFeedItem, upsertTransition, setConnected, setError]);
 }

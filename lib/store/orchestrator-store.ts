@@ -16,12 +16,16 @@ export interface FeedItem {
   message: string;
   timestamp: number;
   cardId?: string;
+  cardTitle?: string;
 }
 
 interface OrchestratorState {
   feedItems: FeedItem[];
   isProcessing: boolean;
+  hasConnectedOnce: boolean;
   addFeedItem: (item: Omit<FeedItem, "id" | "timestamp">) => void;
+  /** Coalesce repeated transition messages (e.g. "Connected") into one item */
+  upsertTransition: (message: string) => void;
   sendMessage: (message: string) => Promise<void>;
   clearFeed: () => void;
 }
@@ -33,6 +37,7 @@ export const useOrchestratorStore = create<OrchestratorState>()(
     (set, get) => ({
       feedItems: [],
       isProcessing: false,
+      hasConnectedOnce: false,
 
       addFeedItem: (item) => {
         feedCounter++;
@@ -42,6 +47,27 @@ export const useOrchestratorStore = create<OrchestratorState>()(
             ...state.feedItems,
           ],
         }));
+      },
+
+      upsertTransition: (message: string) => {
+        set((state) => {
+          // Find the most recent transition item to coalesce into
+          const idx = state.feedItems.findIndex((f) => f.type === "transition");
+          if (idx !== -1) {
+            const updated = [...state.feedItems];
+            updated[idx] = { ...updated[idx], message, timestamp: Date.now() };
+            return { feedItems: updated, hasConnectedOnce: true };
+          }
+          // First transition ever — create a new one
+          feedCounter++;
+          return {
+            hasConnectedOnce: true,
+            feedItems: [
+              { id: `feed-${feedCounter}`, type: "transition" as const, message, timestamp: Date.now() },
+              ...state.feedItems,
+            ],
+          };
+        });
       },
 
       sendMessage: async (message: string) => {

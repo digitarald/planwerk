@@ -1,5 +1,7 @@
 "use client";
 
+import { useBoardStore } from "@/lib/store/board-store";
+
 interface HealthBarProps {
   active: number;
   idle: number;
@@ -8,17 +10,39 @@ interface HealthBarProps {
 }
 
 export function HealthBar({ active, idle, errors, needsInput }: HealthBarProps) {
+  const setExpandedCard = useBoardStore((s) => s.setExpandedCard);
+  const cards = useBoardStore((s) => s.cards);
+
+  const handleInputClick = () => {
+    const first = cards.find((c) => c.runtime === "input-needed");
+    if (first) setExpandedCard(first.id);
+  };
+
+  const handleErrorClick = () => {
+    const first = cards.find((c) => c.runtime === "error");
+    if (first) setExpandedCard(first.id);
+  };
+
   return (
     <div className="px-3 py-2 bg-muted/30 rounded-md mx-2 my-1">
-      <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-        Board Health
-      </div>
       <div className="flex items-center gap-3 text-xs">
         <span className="text-emerald-600">{active} active</span>
         <span className="text-muted-foreground">{idle} idle</span>
-        {errors > 0 && <span className="text-red-600">{errors} errors</span>}
+        {errors > 0 && (
+          <button
+            onClick={handleErrorClick}
+            className="text-red-600 hover:underline underline-offset-2"
+          >
+            {errors} error{errors !== 1 && "s"}
+          </button>
+        )}
         {needsInput > 0 && (
-          <span className="text-amber-600">{needsInput} needs input</span>
+          <button
+            onClick={handleInputClick}
+            className="text-amber-600 hover:underline underline-offset-2 font-medium"
+          >
+            {needsInput} need{needsInput === 1 ? "s" : ""} input
+          </button>
         )}
       </div>
     </div>
