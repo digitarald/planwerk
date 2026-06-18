@@ -39,9 +39,21 @@ async function ensureDir(): Promise<void> {
   dirEnsured = true;
 }
 
+// Serialized write queue to prevent concurrent file writes and ordering issues
+let writeChain: Promise<void> = Promise.resolve();
+
+function enqueueWrite(data: string): void {
+  writeChain = writeChain.then(async () => {
+    await ensureDir();
+    await appendFile(LOGS_FILE, data);
+  }).catch(() => {
+    // Write failures are non-fatal; keep the chain alive
+  });
+}
+
 /**
  * Truncate the log file to the last MAX_LINES lines.
- * Called once on startup to prevent unbounded growth.
+ * Must be awaited before starting the telemetry tap to avoid data loss.
  */
 export async function rotateLogs(): Promise<void> {
   await ensureDir();
@@ -102,9 +114,9 @@ function extractSessionResource(
 
 /**
  * Handle an inbound `otlp/exportLogs` notification.
- * Parses the OTLP/JSON payload and appends NDJSON records to the log file.
+ * Parses the OTLP/JSON payload and enqueues NDJSON records for file write.
  */
-export async function handleOtlpLogs(notification: OtlpNotification): Promise<void> {
+export function handleOtlpLogs(notification: OtlpNotification): void {
   if (notification.method !== "otlp/exportLogs") return;
 
   const { payload } = notification.params;
@@ -152,6 +164,5 @@ export async function handleOtlpLogs(notification: OtlpNotification): Promise<vo
 
   if (lines.length === 0) return;
 
-  await ensureDir();
-  await appendFile(LOGS_FILE, lines.join("\n") + "\n");
+  enqueueWrite(lines.join("\n") + "\n");
 }

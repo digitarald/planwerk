@@ -30,6 +30,18 @@ const warn = (...args: unknown[]) => console.warn(LOG_PREFIX, ...args);
 const error = (...args: unknown[]) => console.error(LOG_PREFIX, ...args);
 
 /**
+ * Expand RFC 6570 level template variable in a telemetry channel URI.
+ * Handles: `{level}` (simple), `{?level}` (query), `{&level}` (continuation).
+ * If no template variable is present, returns the URI as-is.
+ */
+function expandLevelTemplate(uri: string, level: string): string {
+  return uri
+    .replace("{level}", level)
+    .replace("{?level}", `?level=${level}`)
+    .replace("{&level}", `&level=${level}`);
+}
+
+/**
  * Maps an AHP SDK SessionSummary to Planwerk's AHPSessionSummary format.
  */
 function mapSdkSession(summary: SessionSummary): AHPSessionSummary {
@@ -173,13 +185,11 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     return dispose;
   }
 
-  // Rotate telemetry logs on startup (best-effort, non-blocking)
-  rotateLogs().catch(() => {});
+  // Rotate telemetry logs before the tap starts receiving to avoid data loss
+  await rotateLogs().catch(() => {});
 
   const transport = new TelemetryTapTransport(rawTransport, (notification) => {
-    handleOtlpLogs(notification).catch((err) => {
-      debug("telemetry log write failed:", err instanceof Error ? err.message : err);
-    });
+    handleOtlpLogs(notification);
   });
 
   client = new AhpClient(transport);
@@ -208,7 +218,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
   // Subscribe to OTLP telemetry logs if the host advertises them
   if (initResult.telemetry?.logs) {
-    const logsChannel = initResult.telemetry.logs.replace("{level}", "debug");
+    const logsChannel = expandLevelTemplate(initResult.telemetry.logs, "debug");
     info("subscribing to telemetry logs:", logsChannel);
     client.subscribe(logsChannel).catch((err) => {
       debug("telemetry logs subscription failed:", err instanceof Error ? err.message : err);
