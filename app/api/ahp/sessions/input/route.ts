@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { StateAction } from "@microsoft/agent-host-protocol";
+import type { StateAction, SessionState } from "@microsoft/agent-host-protocol";
+
+const debug = (...args: unknown[]) => {
+  if (process.env.AHP_DEBUG) console.info("[ahp:input]", ...args);
+};
 
 export async function POST(request: NextRequest) {
   const body = (await request.json()) as {
@@ -19,26 +23,89 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  debug("POST:", sessionUri, "requestId:", requestId, "response:", response);
+
   try {
     const { getAHPClient, releaseAHPClient } = await import("@/lib/ahp/client-manager");
     const client = await getAHPClient(hostUrl);
 
     try {
-      // Cast the action since const enum values match the string literals
-      const action = {
+      // Subscribe to session to discover chat channel
+      const { result: sessionResult, subscription: sessionSub } = await client.subscribe(sessionUri);
+      void sessionSub.close();
+
+      const sessionState = sessionResult.snapshot?.state as SessionState | undefined;
+      const stateAny = sessionState as unknown as Record<string, unknown> | undefined;
+      const defaultChatUri = stateAny?.defaultChat as string | undefined;
+      const hasActiveClient = !!sessionState?.activeClient;
+
+      debug("chatUri:", defaultChatUri ? "found" : "none", "activeClient:", hasActiveClient);
+
+      if (!defaultChatUri) {
+        await client.unsubscribe(sessionUri).catch(() => {});
+        return NextResponse.json({ error: "No chat channel found" }, { status: 400 });
+      }
+
+      // Subscribe to chat channel and verify inputRequest exists
+      const { result: chatResult, subscription: chatSub } = await client.subscribe(defaultChatUri);
+      void chatSub.close();
+
+      const chatState = chatResult.snapshot?.state as Record<string, unknown> | undefined;
+      const chatInputRequests = chatState?.inputRequests as { id: string }[] | undefined;
+
+      if (!chatInputRequests?.some(r => r.id === requestId)) {
+        debug("inputRequest not found — already consumed or stale");
+        await client.unsubscribe(defaultChatUri).catch(() => {});
+        await client.unsubscribe(sessionUri).catch(() => {});
+        return NextResponse.json({ error: "Input request not found", stale: true }, { status: 409 });
+      }
+
+      // Dispatch inputAnswerChanged for each answer
+      if (body.answers) {
+        for (const [questionId, answer] of Object.entries(body.answers)) {
+          client.dispatch(defaultChatUri, {
+            type: "session/inputAnswerChanged",
+            requestId,
+            questionId,
+            answer,
+          } as unknown as StateAction);
+        }
+      }
+
+      // Dispatch inputCompleted
+      client.dispatch(defaultChatUri, {
         type: "session/inputCompleted",
         requestId,
         response,
         ...(body.answers ? { answers: body.answers } : {}),
-      } as unknown as StateAction;
+      } as unknown as StateAction);
 
-      client.dispatch(sessionUri, action);
+      // Brief wait for state to propagate, then verify
+      await new Promise(resolve => setTimeout(resolve, 300));
+
+      // Re-read chat state to check if inputRequest was removed
+      const { result: verifyResult, subscription: verifySub } = await client.subscribe(defaultChatUri);
+      void verifySub.close();
+      const verifyState = verifyResult.snapshot?.state as Record<string, unknown> | undefined;
+      const remaining = verifyState?.inputRequests as { id: string }[] | undefined;
+      const inputRemoved = !remaining?.some(r => r.id === requestId);
+
+      debug("inputRemoved:", inputRemoved, "activeClient:", hasActiveClient);
+
+      // Cleanup
+      await client.unsubscribe(defaultChatUri).catch(() => {});
+      await client.unsubscribe(sessionUri).catch(() => {});
+
+      return NextResponse.json({
+        ok: true,
+        inputRemoved,
+        activeClient: hasActiveClient,
+      });
     } finally {
       releaseAHPClient(hostUrl);
     }
-
-    return NextResponse.json({ ok: true });
   } catch (err) {
+    console.error("[ahp:input] error:", err instanceof Error ? err.message : err);
     const message = err instanceof Error ? err.message : "Failed to submit input";
     return NextResponse.json({ error: message }, { status: 502 });
   }

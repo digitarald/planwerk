@@ -199,7 +199,9 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                 )}
 
                 <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
-                  <RuntimeIndicator status={card.runtime} />
+                  {card.runtime !== "input-needed" && (
+                    <RuntimeIndicator status={card.runtime} />
+                  )}
                   <GateIndicator status={card.gateStatus} />
                   {card.manualOverride && (
                     <span title="Manual override active"><AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" /></span>

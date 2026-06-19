@@ -1,8 +1,7 @@
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
 import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
-import { SUPPORTED_PROTOCOL_VERSIONS, ActionType } from "@microsoft/agent-host-protocol";
-import type { SessionSummary, SessionState, SessionAction } from "@microsoft/agent-host-protocol";
-import { sessionReducer } from "@microsoft/agent-host-protocol";
+import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
+import type { SessionSummary, SessionState, SessionInputRequest } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
@@ -219,15 +218,15 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }
 
     pendingInputFetches.add(sessionUri);
-    info("fetchInput: subscribing", sessionUri);
+    debug("fetchInput: subscribing", sessionUri);
 
     client.subscribe(sessionUri)
       .then(async ({ result, subscription }) => {
-        if (disposed) {
-          void subscription.close();
-          client?.unsubscribe(sessionUri).catch(() => {});
-          return;
-        }
+        // Close session subscription immediately — we only need the snapshot
+        void subscription.close();
+        client?.unsubscribe(sessionUri).catch(() => {});
+
+        if (disposed) return;
 
         // Re-check: status may have changed while the request was in-flight
         const currentSession = sessions.get(sessionUri);
@@ -235,82 +234,35 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           && (currentSession.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
 
         if (!stillNeeded) {
-          info("fetchInput: no longer needed (status changed while in-flight)", sessionUri);
-          void subscription.close();
-          client?.unsubscribe(sessionUri).catch(() => {});
+          debug("fetchInput: no longer needed (status changed)", sessionUri);
           return;
         }
 
-        let sessionState = result.snapshot
-          ? result.snapshot.state as SessionState
-          : undefined;
-
-        // If the snapshot has no inputRequests, the host may deliver them
-        // as a subsequent SessionInputRequested action on the stream.
-        // Wait briefly for it before giving up.
-        if (sessionState && !sessionState.inputRequests?.length) {
-          info("fetchInput: snapshot has no inputRequests, waiting for action…", sessionUri);
-          const timeout = 3_000;
-          const deadline = Date.now() + timeout;
-
-          try {
-            for await (const action of subscription) {
-              if (disposed || Date.now() > deadline) break;
-              // Only process session actions through the reducer
-              const type = (action as { type?: string }).type;
-              if (!type?.startsWith("session/")) continue;
-              sessionState = sessionReducer(sessionState, action as unknown as SessionAction);
-              if (sessionState.inputRequests?.length) {
-                info("fetchInput: got inputRequests via action", sessionUri, `type=${type}`);
-                break;
-              }
-            }
-          } catch {
-            // subscription closed or errored — continue with what we have
-          }
-        }
-
-        // Clean up subscription
-        void subscription.close();
-        client?.unsubscribe(sessionUri).catch(() => {});
-
-        if (disposed) return;
-
+        const sessionState = result.snapshot?.state as SessionState | undefined;
         if (!sessionState) {
           warn("fetchInput: subscribe returned no snapshot", sessionUri);
           return;
         }
 
-        const requests = sessionState.inputRequests;
-        info("fetchInput: final state, inputRequests:", sessionUri,
-          requests ? `${requests.length} request(s)` : "none",
-          requests?.[0] ? `first: id=${requests[0].id} questions=${requests[0].questions?.length ?? 0}` : "");
-
-        const mapped = mapInputRequests(requests);
-        if (mapped) {
-          pendingInputs.set(sessionUri, mapped);
-          info("fetchInput: mapped pending input", sessionUri, `requestId=${mapped.requestId} questions=${mapped.questions.length}`);
-          const session = sessions.get(sessionUri)!;
-          onEvent({
-            type: "sessionSummaryChanged",
-            session,
-            enrichment: enrichments.get(sessionUri) ?? null,
-            pendingInput: mapped,
-          });
-        } else if (pendingInputs.has(sessionUri)) {
-          warn("fetchInput: no actionable inputRequests, clearing stale pendingInput", sessionUri);
-          pendingInputs.delete(sessionUri);
-          const session = sessions.get(sessionUri)!;
-          onEvent({
-            type: "sessionSummaryChanged",
-            session,
-            enrichment: enrichments.get(sessionUri) ?? null,
-            pendingInput: null,
-          });
-        } else {
-          warn("fetchInput: no actionable inputRequests and no stale state", sessionUri,
-            "raw requests:", JSON.stringify(requests?.map(r => ({ id: r.id, questions: r.questions?.length })) ?? null));
+        // Check if the session state directly has inputRequests (legacy model)
+        if (sessionState.inputRequests?.length) {
+          const mapped = mapInputRequests(sessionState.inputRequests);
+          if (mapped) {
+            emitPendingInput(sessionUri, mapped);
+          }
+          return;
         }
+
+        // Chat-based model: subscribe to the chat channel to get inputRequests
+        const stateAny = sessionState as unknown as Record<string, unknown>;
+        const defaultChatUri = stateAny.defaultChat as string | undefined;
+        if (!defaultChatUri) {
+          warn("fetchInput: no inputRequests and no defaultChat URI", sessionUri);
+          emitNoPendingInput(sessionUri);
+          return;
+        }
+
+        await fetchInputFromChat(sessionUri, defaultChatUri);
       })
       .catch((err) => {
         warn("fetchInput: subscribe failed", sessionUri, err instanceof Error ? err.message : err);
@@ -326,6 +278,98 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           }
         }
       });
+  }
+
+  /** Subscribe to a chat channel to extract inputRequests. */
+  async function fetchInputFromChat(sessionUri: string, chatUri: string) {
+    if (disposed || !client) return;
+
+    let chatSub: Awaited<ReturnType<typeof client.subscribe>> | undefined;
+    try {
+      chatSub = await client.subscribe(chatUri);
+    } catch (err) {
+      warn("fetchInput: chat subscribe failed", sessionUri, err instanceof Error ? err.message : err);
+      emitNoPendingInput(sessionUri);
+      return;
+    }
+
+    const { result, subscription } = chatSub;
+
+    const chatState = result.snapshot?.state as Record<string, unknown> | undefined;
+    if (chatState) {
+      // Check for inputRequests directly in chat state
+      if (chatState.inputRequests && Array.isArray(chatState.inputRequests) && chatState.inputRequests.length > 0) {
+        void subscription.close();
+        client?.unsubscribe(chatUri).catch(() => {});
+        const mapped = mapInputRequests(chatState.inputRequests as SessionInputRequest[]);
+        if (mapped) {
+          emitPendingInput(sessionUri, mapped);
+        } else {
+          emitNoPendingInput(sessionUri);
+        }
+        return;
+      }
+    }
+
+    // inputRequests not yet in snapshot — wait for the action to arrive
+    debug("fetchInput: chat has no inputRequests yet, waiting…", sessionUri);
+    const timer = setTimeout(() => {
+      debug("fetchInput: timed out waiting for chat inputRequested", sessionUri);
+      void subscription.close();
+    }, 5_000);
+
+    try {
+      for await (const action of subscription) {
+        if (disposed) break;
+        const type = (action as { type?: string }).type;
+        if (type === "session/inputRequested") {
+          const request = (action as { request?: SessionInputRequest }).request;
+          if (request) {
+            debug("fetchInput: got inputRequested from chat stream", sessionUri);
+            const mapped = mapInputRequests([request]);
+            if (mapped) {
+              emitPendingInput(sessionUri, mapped);
+            }
+            break;
+          }
+        }
+      }
+    } catch {
+      // subscription closed or errored
+    } finally {
+      clearTimeout(timer);
+      void subscription.close();
+      client?.unsubscribe(chatUri).catch(() => {});
+    }
+  }
+
+  function emitPendingInput(sessionUri: string, mapped: PendingInput) {
+    pendingInputs.set(sessionUri, mapped);
+    debug("pending input:", sessionUri, mapped.requestId);
+    const session = sessions.get(sessionUri)!;
+    if (session) {
+      onEvent({
+        type: "sessionSummaryChanged",
+        session,
+        enrichment: enrichments.get(sessionUri) ?? null,
+        pendingInput: mapped,
+      });
+    }
+  }
+
+  function emitNoPendingInput(sessionUri: string) {
+    if (!pendingInputs.has(sessionUri)) return;
+    debug("clearing pending input:", sessionUri);
+    pendingInputs.delete(sessionUri);
+    const session = sessions.get(sessionUri);
+    if (session) {
+      onEvent({
+        type: "sessionSummaryChanged",
+        session,
+        enrichment: enrichments.get(sessionUri) ?? null,
+        pendingInput: null,
+      });
+    }
   }
 
   /** Clear pending input when session is no longer input-needed. Emits null to downstream. */

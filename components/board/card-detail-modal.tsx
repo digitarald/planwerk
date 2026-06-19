@@ -372,8 +372,8 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 </section>
               )}
 
-              {/* Last Agent Message */}
-              {card.lastAgentMessage && (
+              {/* Last Agent Message (only when not awaiting input — input section shows it inline) */}
+              {card.lastAgentMessage && !card.pendingInput && (
                 <section>
                   <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
                     Last Response
@@ -394,9 +394,27 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               {/* Pending Input */}
               {card.pendingInput && (
                 <section>
-                  <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                  <h3 className="mb-2.5 text-[10px] font-semibold uppercase tracking-widest text-amber-600 dark:text-amber-400">
                     Awaiting Input
                   </h3>
+                  {/* Show last agent message as context when available */}
+                  {card.lastAgentMessage && (
+                    <div className="mb-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5">
+                      <p className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+                        Agent
+                      </p>
+                      <article className="prose prose-sm dark:prose-invert max-w-none prose-p:text-[12px] prose-p:leading-relaxed prose-p:my-1 prose-code:text-[11px] prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={markdownComponents}
+                        >
+                          {card.lastAgentMessage.length > 500
+                            ? card.lastAgentMessage.slice(0, 500) + "…"
+                            : card.lastAgentMessage}
+                        </ReactMarkdown>
+                      </article>
+                    </div>
+                  )}
                   <PendingInputCard cardId={card.id} input={card.pendingInput} />
                 </section>
               )}

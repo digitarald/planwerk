@@ -80,9 +80,9 @@ function InlinePendingInput({ card }: { card: KanbanCard }) {
 
   if (isQuickActionable && question.kind === "single-select" && question.options) {
     return (
-      <div className="mt-1.5 space-y-1">
+      <div className="mt-1.5 space-y-1.5">
         {question.message && (
-          <p className="text-[10px] text-muted-foreground line-clamp-2">{question.message}</p>
+          <p className="text-[10px] text-muted-foreground leading-snug">{question.message}</p>
         )}
         <div className="flex flex-wrap gap-1">
           {question.options.slice(0, 4).map((opt) => (
@@ -90,10 +90,10 @@ function InlinePendingInput({ card }: { card: KanbanCard }) {
               key={opt.id}
               onClick={() => setDetailCard(card.id)}
               className={cn(
-                "rounded px-1.5 py-0.5 text-[10px] border transition-colors",
+                "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium border shadow-sm transition-all duration-150",
                 opt.recommended
-                  ? "bg-primary/10 border-primary/30 text-primary hover:bg-primary/20"
-                  : "bg-muted/50 border-border hover:bg-muted"
+                  ? "border-primary/40 bg-primary text-primary-foreground hover:bg-primary/90"
+                  : "border-border bg-background text-foreground hover:border-primary/30 hover:bg-primary/5"
               )}
             >
               {opt.label}
@@ -108,13 +108,13 @@ function InlinePendingInput({ card }: { card: KanbanCard }) {
   return (
     <div className="mt-1.5">
       {(input.message || question?.message) && (
-        <p className="text-[10px] text-muted-foreground line-clamp-2 mb-1">
+        <p className="text-[10px] text-muted-foreground leading-snug mb-1">
           {input.message || question?.message}
         </p>
       )}
       <button
         onClick={() => setDetailCard(card.id)}
-        className="inline-flex items-center gap-1 text-[10px] text-primary hover:underline underline-offset-2"
+        className="inline-flex items-center gap-1 text-[10px] font-medium text-primary hover:underline underline-offset-2"
       >
         Open on board
         <ExternalLink className="h-2.5 w-2.5" />

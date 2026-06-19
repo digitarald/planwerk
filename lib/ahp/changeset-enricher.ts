@@ -165,10 +165,28 @@ export async function enrichFromChangeset(
 
     const sessionState = sessionResult.snapshot?.state as SessionState | undefined;
 
-    // Extract last agent message: prefer snapshot turns, fall back to fetchTurns
+    // Extract last agent message: prefer snapshot turns, fall back to chat channel, then fetchTurns
     let lastAgentMessage: string | undefined;
     if (sessionState?.turns?.length) {
       lastAgentMessage = extractLastAgentMessage(sessionState.turns);
+    }
+    // Chat-based model: try extracting from the default chat's turns
+    if (!lastAgentMessage && sessionState) {
+      const stateAny = sessionState as unknown as Record<string, unknown>;
+      const defaultChatUri = stateAny.defaultChat as string | undefined;
+      if (defaultChatUri) {
+        try {
+          const { result: chatResult, subscription: chatSub } = await client.subscribe(defaultChatUri);
+          chatSub.close();
+          await client.unsubscribe(defaultChatUri).catch(() => {});
+          const chatState = chatResult.snapshot?.state as Record<string, unknown> | undefined;
+          if (chatState?.turns && Array.isArray(chatState.turns)) {
+            lastAgentMessage = extractLastAgentMessage(chatState.turns as Turn[]);
+          }
+        } catch {
+          debug("chat subscribe failed for agent message extraction:", sessionUri);
+        }
+      }
     }
     if (!lastAgentMessage) {
       try {
