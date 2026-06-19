@@ -53,11 +53,11 @@ function formatRelativeTime(timestamp: number): string {
 }
 
 function CardLink({ cardId, title }: { cardId: string; title: string }) {
-  const setExpandedCard = useBoardStore((s) => s.setExpandedCard);
+  const setDetailCard = useBoardStore((s) => s.setDetailCard);
 
   return (
     <button
-      onClick={() => setExpandedCard(cardId)}
+      onClick={() => setDetailCard(cardId)}
       className="inline-flex items-center gap-0.5 font-medium text-foreground hover:text-primary hover:underline underline-offset-2 transition-colors text-left"
     >
       {title}
@@ -67,7 +67,7 @@ function CardLink({ cardId, title }: { cardId: string; title: string }) {
 }
 
 function InlinePendingInput({ card }: { card: KanbanCard }) {
-  const setExpandedCard = useBoardStore((s) => s.setExpandedCard);
+  const setDetailCard = useBoardStore((s) => s.setDetailCard);
   const input = card.pendingInput;
   if (!input) return null;
 
@@ -88,7 +88,7 @@ function InlinePendingInput({ card }: { card: KanbanCard }) {
           {question.options.slice(0, 4).map((opt) => (
             <button
               key={opt.id}
-              onClick={() => setExpandedCard(card.id)}
+              onClick={() => setDetailCard(card.id)}
               className={cn(
                 "rounded px-1.5 py-0.5 text-[10px] border transition-colors",
                 opt.recommended
@@ -113,7 +113,7 @@ function InlinePendingInput({ card }: { card: KanbanCard }) {
         </p>
       )}
       <button
-        onClick={() => setExpandedCard(card.id)}
+        onClick={() => setDetailCard(card.id)}
         className="inline-flex items-center gap-1 text-[10px] text-primary hover:underline underline-offset-2"
       >
         Open on board

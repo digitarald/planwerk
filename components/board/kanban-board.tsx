@@ -2,6 +2,7 @@
 
 import { DragDropContext, type DropResult } from "@hello-pangea/dnd";
 
+import { CardDetailModal } from "@/components/board/card-detail-modal";
 import { KanbanColumn } from "@/components/board/kanban-column";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import { useBoardStore } from "@/lib/store/board-store";
@@ -10,7 +11,10 @@ import { COLUMNS, PHASE_ORDER, type Phase } from "@/lib/types";
 export function KanbanBoard() {
   const getCard = useBoardStore((state) => state.getCard);
   const updateCard = useBoardStore((state) => state.updateCard);
+  const detailCardId = useBoardStore((state) => state.detailCardId);
   const addFeedItem = useOrchestratorStore((state) => state.addFeedItem);
+
+  const detailCard = detailCardId ? getCard(detailCardId) : undefined;
 
   const handleDragEnd = (result: DropResult) => {
     if (!result.destination) return;
@@ -65,6 +69,8 @@ export function KanbanBoard() {
           ))}
         </div>
       </DragDropContext>
+
+      {detailCard && <CardDetailModal card={detailCard} />}
     </div>
   );
 }

@@ -8,9 +8,9 @@ export const UNASSIGNED_WORKSPACE = "__unassigned__";
 
 interface BoardState {
   cards: KanbanCard[];
-  expandedCardId: string | null;
+  detailCardId: string | null;
   workspaceFilters: Set<string>;
-  setExpandedCard: (id: string | null) => void;
+  setDetailCard: (id: string | null) => void;
   setCards: (cards: KanbanCard[]) => void;
   updateCard: (id: string, card: KanbanCard) => void;
   addCard: (card: KanbanCard) => void;
@@ -116,9 +116,9 @@ export const useBoardStore = create<BoardState>()(
   persist(
     (set, get) => ({
       cards: [],
-      expandedCardId: null,
+      detailCardId: null,
       workspaceFilters: new Set(),
-      setExpandedCard: (id) => set({ expandedCardId: id }),
+      setDetailCard: (id) => set({ detailCardId: id }),
       setCards: (cards) =>
         set((state) => ({
           cards,

@@ -56,7 +56,8 @@ const MAX_AGENT_MESSAGE_LENGTH = 2000;
 
 /**
  * Extract the last agent response from completed turns.
- * Concatenates markdown parts from the final turn's responseParts.
+ * Takes only the trailing markdown parts after the final tool call,
+ * which represents the agent's concluding response to the user.
  */
 function extractLastAgentMessage(turns: Turn[]): string | undefined {
   if (!turns.length) return undefined;
@@ -64,14 +65,36 @@ function extractLastAgentMessage(turns: Turn[]): string | undefined {
   // Walk backwards to find the last turn with markdown content
   for (let i = turns.length - 1; i >= 0; i--) {
     const turn = turns[i];
-    const markdownParts = turn.responseParts?.filter(
-      (p: ResponsePart) => p.kind === "markdown"
-    );
-    if (markdownParts?.length) {
-      const text = markdownParts
-        .map((p) => ("content" in p ? (p.content as string) : ""))
-        .join("")
-        .trim();
+    const parts = turn.responseParts;
+    if (!parts?.length) continue;
+
+    // Find the index of the last tool call part
+    let lastToolIdx = -1;
+    for (let j = parts.length - 1; j >= 0; j--) {
+      if (parts[j].kind === "toolCall") {
+        lastToolIdx = j;
+        break;
+      }
+    }
+
+    // Collect markdown parts after the last tool call (the final response)
+    const trailingMarkdown = parts
+      .slice(lastToolIdx + 1)
+      .filter((p: ResponsePart) => p.kind === "markdown")
+      .map((p) => ("content" in p ? (p.content as string) : ""))
+      .join("")
+      .trim();
+
+    if (trailingMarkdown) {
+      return trailingMarkdown.slice(0, MAX_AGENT_MESSAGE_LENGTH);
+    }
+
+    // Fallback: if no tool calls at all, use the last markdown part
+    const allMarkdown = parts
+      .filter((p: ResponsePart) => p.kind === "markdown");
+    if (allMarkdown.length) {
+      const last = allMarkdown[allMarkdown.length - 1];
+      const text = "content" in last ? (last.content as string).trim() : "";
       if (text) return text.slice(0, MAX_AGENT_MESSAGE_LENGTH);
     }
   }
@@ -142,10 +165,24 @@ export async function enrichFromChangeset(
 
     const sessionState = sessionResult.snapshot?.state as SessionState | undefined;
 
-    // Extract last agent message from turns regardless of changeset availability
-    const lastAgentMessage = sessionState?.turns
-      ? extractLastAgentMessage(sessionState.turns)
-      : undefined;
+    // Extract last agent message: prefer snapshot turns, fall back to fetchTurns
+    let lastAgentMessage: string | undefined;
+    if (sessionState?.turns?.length) {
+      lastAgentMessage = extractLastAgentMessage(sessionState.turns);
+    }
+    if (!lastAgentMessage) {
+      try {
+        const fetchResult = await client.request("fetchTurns", {
+          channel: sessionUri,
+          limit: 1,
+        });
+        if (fetchResult.turns?.length) {
+          lastAgentMessage = extractLastAgentMessage(fetchResult.turns);
+        }
+      } catch {
+        debug("fetchTurns failed for", sessionUri);
+      }
+    }
 
     if (!sessionState?.changesets?.length) {
       debug("no changesets for", sessionUri);

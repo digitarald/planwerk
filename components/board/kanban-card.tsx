@@ -8,6 +8,8 @@ import {
   CirclePause,
   Loader2,
   MessageCircleWarning,
+  Shield,
+  ShieldAlert,
   ShieldCheck,
   ShieldX,
   XCircle,
@@ -15,7 +17,6 @@ import {
   Bug,
 } from "lucide-react";
 
-import { CardExpansion } from "./card-expansion";
 import { PendingInputCard } from "./pending-input-card";
 import {
   ContextMenu,
@@ -40,11 +41,21 @@ interface KanbanCardProps {
   index: number;
 }
 
-const riskColors: Record<RiskLevel, string> = {
-  low: "bg-emerald-500",
-  medium: "bg-amber-500",
-  high: "bg-red-500",
+const riskConfig: Record<RiskLevel, { color: string; label: string }> = {
+  low: { color: "text-emerald-500", label: "Low risk" },
+  medium: { color: "text-amber-500", label: "Medium risk" },
+  high: { color: "text-red-500", label: "High risk" },
 };
+
+function RiskIndicator({ level }: { level: RiskLevel }) {
+  const { color, label } = riskConfig[level];
+  const Icon = level === "high" ? ShieldAlert : Shield;
+  return (
+    <span title={label}>
+      <Icon className={cn("mt-0.5 h-3.5 w-3.5 shrink-0", color)} />
+    </span>
+  );
+}
 
 const attentionStyles: Record<AttentionLevel, string> = {
   none: "",
@@ -57,19 +68,19 @@ const attentionStyles: Record<AttentionLevel, string> = {
 function RuntimeIndicator({ status }: { status: RuntimeStatus }) {
   switch (status) {
     case "running":
-      return <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" />;
+      return <span title="Running"><Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" /></span>;
     case "idle":
-      return <CirclePause className="h-3 w-3 shrink-0 text-muted-foreground/40" />;
+      return <span title="Idle"><CirclePause className="h-3 w-3 shrink-0 text-muted-foreground/40" /></span>;
     case "input-needed":
       return (
-        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" title="Waiting for input">
           <MessageCircleWarning className="h-2.5 w-2.5" />
           Input
         </span>
       );
     case "error":
       return (
-        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">
+        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400" title="Error occurred">
           <XCircle className="h-2.5 w-2.5" />
           Error
         </span>
@@ -102,12 +113,12 @@ function InputContext({ card }: { card: KanbanCardType }) {
 function GateIndicator({ status }: { status: GateStatus }) {
   switch (status) {
     case "passed":
-      return <ShieldCheck className="h-3 w-3 shrink-0 text-emerald-500" />;
+      return <span title="Gates passed"><ShieldCheck className="h-3 w-3 shrink-0 text-emerald-500" /></span>;
     case "evaluating":
-      return <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary/70" />;
+      return <span title="Evaluating gates"><Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary/70" /></span>;
     case "failed":
       return (
-        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">
+        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400" title="Gate check failed">
           <ShieldX className="h-2.5 w-2.5" />
           Gate
         </span>
@@ -134,8 +145,7 @@ function formatRelativeTime(timestamp: number): string {
 }
 
 export function KanbanCard({ card, index }: KanbanCardProps) {
-  const setExpandedCard = useBoardStore((state) => state.setExpandedCard);
-  const isExpanded = useBoardStore((state) => state.expandedCardId === card.id);
+  const setDetailCard = useBoardStore((state) => state.setDetailCard);
   const showWorkspaceTags = useBoardStore(selectShowWorkspaceTags);
   const feedItems = useOrchestratorStore((s) => s.feedItems);
   const showPlanSteps = card.planSteps.total > 0;
@@ -153,35 +163,26 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
               {...draggableProps}
               {...(card.isArchived ? {} : provided.dragHandleProps)}
               tabIndex={0}
-              onClick={() => setExpandedCard(isExpanded ? null : card.id)}
+              onClick={() => setDetailCard(card.id)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  setExpandedCard(isExpanded ? null : card.id);
-                }
-                if (e.key === "Escape" && isExpanded) {
-                  setExpandedCard(null);
+                  setDetailCard(card.id);
                 }
               }}
               style={style as CSSProperties | undefined}
               className={cn(
                 "cursor-pointer rounded-lg border border-border/60 bg-card p-2 shadow-elevation-xs transition-all duration-150 hover:-translate-y-0.5 hover:shadow-elevation-sm hover:border-primary/30 focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1",
                 snapshot.isDragging && "scale-[1.02] shadow-elevation-lg border-primary/30",
-                isExpanded && "shadow-elevation-sm",
                 attentionStyles[card.attention],
                 card.isArchived && "opacity-60"
               )}
             >
             <div className="flex items-start gap-1.5">
               {card.isArchived ? (
-                <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                <span title="Completed"><CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" /></span>
               ) : (
-                <div
-                  className={cn(
-                    "mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full",
-                    riskColors[card.risk]
-                  )}
-                />
+                <RiskIndicator level={card.risk} />
               )}
               <div className="min-w-0 flex-1">
                 <h3 className="line-clamp-2 text-xs font-medium leading-tight">
@@ -201,7 +202,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                   <RuntimeIndicator status={card.runtime} />
                   <GateIndicator status={card.gateStatus} />
                   {card.manualOverride && (
-                    <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />
+                    <span title="Manual override active"><AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" /></span>
                   )}
                   {card.runtime !== "input-needed" && card.activity && (
                     <p className="min-w-0 flex-1 truncate">{card.activity}</p>
@@ -228,11 +229,6 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
               </div>
             </div>
 
-            {isExpanded && (
-              <>
-                <CardExpansion card={card} />
-              </>
-            )}
             </ContextMenuTrigger>
             <ContextMenuContent>
               <ContextMenuItem

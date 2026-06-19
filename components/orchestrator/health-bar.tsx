@@ -10,17 +10,17 @@ interface HealthBarProps {
 }
 
 export function HealthBar({ active, idle, errors, needsInput }: HealthBarProps) {
-  const setExpandedCard = useBoardStore((s) => s.setExpandedCard);
+  const setDetailCard = useBoardStore((s) => s.setDetailCard);
   const cards = useBoardStore((s) => s.cards);
 
   const handleInputClick = () => {
     const first = cards.find((c) => c.runtime === "input-needed");
-    if (first) setExpandedCard(first.id);
+    if (first) setDetailCard(first.id);
   };
 
   const handleErrorClick = () => {
     const first = cards.find((c) => c.runtime === "error");
-    if (first) setExpandedCard(first.id);
+    if (first) setDetailCard(first.id);
   };
 
   return (

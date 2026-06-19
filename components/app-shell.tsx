@@ -51,7 +51,7 @@ export function AppShell({ children }: AppShellProps) {
           </div>
           {!collapsed && <OrchestratorFeed />}
         </aside>
-        <main className="min-h-0 min-w-0 flex-1 bg-[var(--pw-board-bg)]">{children}</main>
+        <main className="relative min-h-0 min-w-0 flex-1 bg-[var(--pw-board-bg)]">{children}</main>
       </div>
     </div>
   );

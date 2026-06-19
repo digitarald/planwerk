@@ -19,7 +19,7 @@ import { COLUMNS } from "@/lib/types"
 export function CommandPalette() {
   const [open, setOpen] = useState(false)
   const cards = useBoardStore(useShallow(selectFilteredCards))
-  const setExpandedCard = useBoardStore((s) => s.setExpandedCard)
+  const setDetailCard = useBoardStore((s) => s.setDetailCard)
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -45,9 +45,9 @@ export function CommandPalette() {
   const expandCard = useCallback(
     (cardId: string) => {
       setOpen(false)
-      setExpandedCard(cardId)
+      setDetailCard(cardId)
     },
-    [setExpandedCard]
+    [setDetailCard]
   )
 
   const scrollToColumn = useCallback((columnId: string) => {
