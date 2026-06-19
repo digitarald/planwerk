@@ -1,14 +1,14 @@
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
 import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
-import type { SessionSummary, SessionState, SessionInputRequest } from "@microsoft/agent-host-protocol";
+import type { SessionSummary, SessionState } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
 import { enrichFromChangeset, ChangesetEnrichment } from "./changeset-enricher";
 import { fetchCopilotCliPlan, clearPlanCache } from "./plan-artifact";
 import { mapInputRequests } from "./map-session";
-import { upsertSessionCache, removeSessionCache, reconcileSessionCache, CLEAR_ENRICHMENT } from "@/lib/db/session-cache";
+import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT } from "@/lib/db/session-cache";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
 import type { PendingInput } from "@/lib/types";
@@ -101,10 +101,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   const enrichments = new Map<string, ChangesetEnrichment>();
   // Track in-flight enrichment requests to avoid duplicates
   const pendingEnrichments = new Set<string>();
-  // Pending input data per session (from session-level subscriptions)
+  // Pending input data per session (fetched on-demand when InputNeeded)
   const pendingInputs = new Map<string, PendingInput>();
-  // Active session-level subscriptions for input fetching
-  const inputSubscriptions = new Set<string>();
+  // Track in-flight input fetches to avoid duplicates
+  const pendingInputFetches = new Set<string>();
 
   let disposed = false;
   let client: AhpClient | null = null;
@@ -113,11 +113,6 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     if (disposed) return;
     disposed = true;
     clearPlanCache();
-    // Unsubscribe from all session channels
-    for (const uri of inputSubscriptions) {
-      client?.unsubscribe(uri).catch(() => {});
-    }
-    inputSubscriptions.clear();
     pendingInputs.clear();
     client?.shutdown().catch(() => {});
   }
@@ -207,29 +202,38 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   }
 
   /**
-   * Subscribe to a session channel to fetch inputRequests when InputNeeded.
-   * Extracts pending input from the snapshot and listens for live updates.
+   * One-shot fetch of inputRequests for a session in InputNeeded state.
+   * Subscribes to get the snapshot, extracts input data, then immediately unsubscribes.
+   * Uses a dirty flag to refetch if the session changes while a fetch is in-flight.
    */
-  function triggerInputSubscription(sessionUri: string) {
-    if (disposed || !client || inputSubscriptions.has(sessionUri)) return;
+  const dirtyInputFetches = new Set<string>();
 
-    inputSubscriptions.add(sessionUri);
-    debug("subscribing for input:", sessionUri);
+  function fetchInputOnce(sessionUri: string) {
+    if (disposed || !client) return;
+
+    // If already in-flight, mark dirty for re-fetch after completion
+    if (pendingInputFetches.has(sessionUri)) {
+      dirtyInputFetches.add(sessionUri);
+      return;
+    }
+
+    pendingInputFetches.add(sessionUri);
+    debug("fetching input (one-shot):", sessionUri);
 
     client.subscribe(sessionUri)
       .then(({ result, subscription }) => {
-        // Re-check: subscription may no longer be wanted if status changed while connecting
+        // Immediately close the subscription iterator and unsubscribe
+        void subscription.close();
+        client?.unsubscribe(sessionUri).catch(() => {});
+
+        if (disposed) return;
+
+        // Re-check: status may have changed while the request was in-flight
         const currentSession = sessions.get(sessionUri);
-        const stillNeeded = !disposed
-          && inputSubscriptions.has(sessionUri)
-          && currentSession
+        const stillNeeded = currentSession
           && (currentSession.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
 
-        if (!stillNeeded) {
-          client?.unsubscribe(sessionUri).catch(() => {});
-          inputSubscriptions.delete(sessionUri);
-          return;
-        }
+        if (!stillNeeded) return;
 
         // Extract inputRequests from snapshot
         const snapshot = result.snapshot;
@@ -238,8 +242,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           const mapped = mapInputRequests(sessionState.inputRequests);
           if (mapped) {
             pendingInputs.set(sessionUri, mapped);
-            debug("got pending input from snapshot:", sessionUri, mapped.requestId);
-            // Re-emit so the card picks up pendingInput
+            debug("got pending input:", sessionUri, mapped.requestId);
             const session = sessions.get(sessionUri)!;
             onEvent({
               type: "sessionSummaryChanged",
@@ -247,75 +250,60 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
               enrichment: enrichments.get(sessionUri) ?? null,
               pendingInput: mapped,
             });
+          } else if (pendingInputs.has(sessionUri)) {
+            // Snapshot has no actionable request — clear stale local state
+            pendingInputs.delete(sessionUri);
+            const session = sessions.get(sessionUri)!;
+            onEvent({
+              type: "sessionSummaryChanged",
+              session,
+              enrichment: enrichments.get(sessionUri) ?? null,
+              pendingInput: null,
+            });
           }
         }
-
-        // Listen for live input actions on this session channel
-        (async () => {
-          try {
-            for await (const event of subscription) {
-              if (disposed) break;
-              // Session-level events arrive as action envelopes
-              if (event.type !== "action") continue;
-              const actionType = event.params.action.type;
-              if (actionType === "session/inputRequested") {
-                const req = (event.params.action as { type: string; request: SessionInputRequest }).request;
-                const mapped = mapInputRequests([req]);
-                if (mapped) {
-                  pendingInputs.set(sessionUri, mapped);
-                  debug("input requested:", sessionUri, mapped.requestId);
-                  const session = sessions.get(sessionUri);
-                  if (session) {
-                    onEvent({
-                      type: "sessionSummaryChanged",
-                      session,
-                      enrichment: enrichments.get(sessionUri) ?? null,
-                      pendingInput: mapped,
-                    });
-                  }
-                }
-              } else if (actionType === "session/inputCompleted") {
-                pendingInputs.delete(sessionUri);
-                debug("input completed:", sessionUri);
-                const session = sessions.get(sessionUri);
-                if (session) {
-                  onEvent({
-                    type: "sessionSummaryChanged",
-                    session,
-                    enrichment: enrichments.get(sessionUri) ?? null,
-                    pendingInput: null,
-                  });
-                }
-              }
-            }
-          } catch {
-            // Subscription ended (dispose or unsubscribe)
-          }
-        })();
       })
       .catch((err) => {
-        debug("input subscription failed:", sessionUri, err instanceof Error ? err.message : err);
-        inputSubscriptions.delete(sessionUri);
+        debug("input fetch failed:", sessionUri, err instanceof Error ? err.message : err);
+      })
+      .finally(() => {
+        pendingInputFetches.delete(sessionUri);
+        // Re-fetch if session changed while we were in-flight
+        if (dirtyInputFetches.has(sessionUri)) {
+          dirtyInputFetches.delete(sessionUri);
+          const currentSession = sessions.get(sessionUri);
+          if (currentSession && (currentSession.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded) {
+            fetchInputOnce(sessionUri);
+          }
+        }
       });
   }
 
-  /** Unsubscribe from a session channel when no longer input-needed. */
-  function clearInputSubscription(sessionUri: string) {
-    if (!inputSubscriptions.has(sessionUri)) return;
-    debug("unsubscribing input:", sessionUri);
-    inputSubscriptions.delete(sessionUri);
+  /** Clear pending input when session is no longer input-needed. Emits null to downstream. */
+  function clearPendingInput(sessionUri: string) {
+    dirtyInputFetches.delete(sessionUri);
+    if (!pendingInputs.has(sessionUri)) return;
+    debug("clearing pending input:", sessionUri);
     pendingInputs.delete(sessionUri);
-    client?.unsubscribe(sessionUri).catch(() => {});
+    const session = sessions.get(sessionUri);
+    if (session) {
+      onEvent({
+        type: "sessionSummaryChanged",
+        session,
+        enrichment: enrichments.get(sessionUri) ?? null,
+        pendingInput: null,
+      });
+    }
   }
 
-  /** Check session status and manage input subscription lifecycle. */
-  function syncInputSubscription(sessionUri: string, status: number) {
+  /** Check session status and fetch input data or clear it. */
+  function syncInputState(sessionUri: string, status: number) {
     const needsInput = (status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
     const isArchived = (status & AHPStatus.IsArchived) !== 0;
     if (needsInput && !isArchived) {
-      triggerInputSubscription(sessionUri);
+      fetchInputOnce(sessionUri);
     } else {
-      clearInputSubscription(sessionUri);
+      clearPendingInput(sessionUri);
     }
   }
 
@@ -381,12 +369,29 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
   // Fetch initial session list
   try {
+    // Build a lookup of cached modifiedAt values so we can preserve stable
+    // timestamps for archived sessions (AHP host may refresh modifiedAt on restart)
+    const cachedModifiedAt = new Map<string, string>();
+    try {
+      for (const cached of getCachedSessions(hostUrl)) {
+        cachedModifiedAt.set(cached.sessionUri, cached.summary.modifiedAt);
+      }
+    } catch { /* cache read failure is non-fatal */ }
+
     const result = await client.request("listSessions", { channel: "ahp-root://" });
     for (const summary of result.items) {
       const mapped = mapSdkSession(summary);
       if (!shouldShowSession(summary.status, summary.changes?.files ?? 0)) {
         if (summary.status & AHPStatus.IsArchived) skippedArchived.set(summary.resource, mapped);
         continue;
+      }
+      // For archived sessions, preserve the original modifiedAt from cache
+      // to prevent timestamp thrashing when AHP host restarts
+      if ((mapped.status & AHPStatus.IsArchived) !== 0) {
+        const cachedTs = cachedModifiedAt.get(mapped.resource);
+        if (cachedTs && new Date(cachedTs).getTime() < new Date(mapped.modifiedAt).getTime()) {
+          mapped.modifiedAt = cachedTs;
+        }
       }
       sessions.set(summary.resource, mapped);
     }
@@ -402,8 +407,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     // Trigger async enrichment (changeset + plan artifact) for all sessions
     for (const [uri, session] of sessions) {
       triggerEnrichment(uri);
-      // Subscribe to session channels for input-needed sessions
-      syncInputSubscription(uri, session.status);
+      // Fetch input for input-needed sessions
+      syncInputState(uri, session.status);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to list sessions";
@@ -434,12 +439,12 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           debug("sessionAdded:", mapped.resource, mapped.title);
           onEvent({ type: "sessionAdded", session: mapped, enrichment: enrichments.get(mapped.resource) });
           triggerEnrichment(mapped.resource);
-          syncInputSubscription(mapped.resource, mapped.status);
+          syncInputState(mapped.resource, mapped.status);
         } else if (event.type === "sessionRemoved") {
           debug("sessionRemoved:", event.params.session);
           sessions.delete(event.params.session);
           removeSessionCache(hostUrl, event.params.session);
-          clearInputSubscription(event.params.session);
+          clearPendingInput(event.params.session);
           onEvent({ type: "sessionRemoved", resource: event.params.session });
         } else if (event.type === "sessionSummaryChanged") {
           const { session: sessionUri, changes } = event.params;
@@ -468,7 +473,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
             // Check if session became archived
             if (existing.status & AHPStatus.IsArchived) {
-              clearInputSubscription(sessionUri);
+              clearPendingInput(sessionUri);
               if (shouldShowSession(existing.status, existing.changes?.files)) {
                 debug("sessionArchived: keeping (has code changes)", sessionUri);
                 sessions.set(sessionUri, existing);
@@ -484,9 +489,13 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
               continue;
             }
 
-            // Sync input subscription when status changes
+            // Sync input state when status changes
             if (changes.status !== undefined) {
-              syncInputSubscription(sessionUri, existing.status);
+              syncInputState(sessionUri, existing.status);
+            } else if ((existing.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded) {
+              // Refetch input if session is still InputNeeded but summary changed
+              // (host may have replaced the input request without toggling status)
+              fetchInputOnce(sessionUri);
             }
 
             sessions.set(sessionUri, existing);
@@ -497,8 +506,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
               enrichment: enrichments.get(sessionUri),
               pendingInput: pendingInputs.get(sessionUri),
             });
-            // Re-trigger enrichment if file changes updated
-            if (changes.changes !== undefined) {
+            // Re-trigger enrichment if file changes updated or session became idle
+            if (changes.changes !== undefined || (changes.status !== undefined && !(changes.status & AHPStatus.InProgress))) {
               triggerEnrichment(sessionUri);
             }
           } else {
