@@ -63,6 +63,7 @@ export interface KanbanCard {
   manualOverride?: boolean;
   attention: AttentionLevel;
   risk: RiskLevel;
+  riskFactors?: string[];
   activity: string;
   additions: number;
   deletions: number;
@@ -77,6 +78,7 @@ export interface KanbanCard {
   recentActivity?: ActivityEntry[];
   pendingInput?: PendingInput;
   lastAgentMessage?: string;
+  filePaths?: string[];
   isArchived?: boolean;
 }
 

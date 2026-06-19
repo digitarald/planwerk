@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -8,6 +8,7 @@ import {
   Send,
   GitBranch,
   FileText,
+  FileEdit as FilePen,
   FlaskConical,
   Lightbulb,
   BookOpen,
@@ -24,6 +25,7 @@ import {
   ShieldX,
   MessageCircleWarning,
   XCircle,
+  ChevronDown,
 } from "lucide-react";
 
 import { PendingInputCard } from "./pending-input-card";
@@ -200,9 +202,11 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
 
   const artifacts = card.artifacts ?? [];
   const recentActivity = card.recentActivity ?? [];
+  const filePaths = card.filePaths ?? [];
   const planArtifact = artifacts.find(
     (a) => a.type === "plan" && a.contentRef
   );
+  const [filesExpanded, setFilesExpanded] = useState(filePaths.length <= 12);
 
   return (
     <div className="absolute inset-0 z-40 flex items-start justify-center">
@@ -327,6 +331,44 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                       );
                     })}
                   </div>
+                </section>
+              )}
+
+              {/* Changed Files */}
+              {filePaths.length > 0 && (
+                <section>
+                  <button
+                    type="button"
+                    onClick={() => setFilesExpanded(!filesExpanded)}
+                    className="mb-2 flex w-full items-center gap-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    <ChevronDown className={cn("h-3 w-3 transition-transform", !filesExpanded && "-rotate-90")} />
+                    Changed Files
+                    <span className="ml-1 font-normal normal-case tabular-nums">({filePaths.length})</span>
+                  </button>
+                  {filesExpanded && (
+                    <div className="space-y-px rounded-lg border border-border/60 bg-muted/20 py-1">
+                      {filePaths.map((filePath) => {
+                        const segments = filePath.split("/");
+                        const fileName = segments.pop() ?? filePath;
+                        const dir = segments.join("/");
+                        return (
+                          <div
+                            key={filePath}
+                            className="group flex items-center gap-2 px-2.5 py-1 hover:bg-muted/50"
+                          >
+                            <FilePen className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+                            <span className="min-w-0 flex-1 truncate text-[12px] font-mono">
+                              <span className="text-foreground">{fileName}</span>
+                              {dir && (
+                                <span className="ml-1.5 text-muted-foreground/50">{dir}/</span>
+                              )}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </section>
               )}
 
