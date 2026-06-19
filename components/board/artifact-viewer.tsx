@@ -92,7 +92,7 @@ export function ArtifactViewer({ artifact, open, onOpenChange }: ArtifactViewerP
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-3xl max-h-[80vh] flex flex-col gap-0 p-0 overflow-hidden">
+      <DialogContent className="sm:max-w-3xl max-h-[80vh] grid-rows-[auto_1fr] gap-0 p-0 overflow-hidden">
         <DialogHeader className="px-6 pt-5 pb-3 border-b border-border shrink-0">
           <div className="flex items-center gap-2">
             <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -120,7 +120,7 @@ export function ArtifactViewer({ artifact, open, onOpenChange }: ArtifactViewerP
           </DialogDescription>
         </DialogHeader>
 
-        <ScrollArea className="flex-1 min-h-0">
+        <ScrollArea className="min-h-0">
           <div className="px-6 py-5">
             {artifact.contentRef ? (
               <article className="prose dark:prose-invert max-w-none prose-headings:font-heading prose-h1:text-xl prose-h1:mb-4 prose-h2:text-base prose-h2:mt-6 prose-h2:mb-2 prose-h3:text-sm prose-p:text-sm prose-p:leading-relaxed prose-li:text-sm prose-table:text-xs prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-[13px] prose-strong:font-semibold">
