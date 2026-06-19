@@ -23,6 +23,7 @@ export interface GateRun {
   startedAt: string;
   completedAt?: string;
   changesetRef?: string;
+  stale?: boolean;
 }
 
 export interface GateConfig {
@@ -32,6 +33,19 @@ export interface GateConfig {
   gateName?: string;
   required: boolean;
   riskThreshold?: RiskLevel;
+}
+
+/**
+ * Compute a changeset reference from card metrics.
+ * Used to detect when source has changed since a gate last ran.
+ */
+export function computeChangesetRef(
+  filesChanged: number,
+  additions: number,
+  deletions: number,
+  modifiedAt: number
+): string {
+  return `${filesChanged}:${additions}:${deletions}:${modifiedAt}`;
 }
 
 const RISK_ORDER: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2 };
@@ -192,7 +206,8 @@ export function startGateRun(
   fromPhase: Phase,
   toPhase: Phase,
   gateType: GateType,
-  gateName?: string
+  gateName?: string,
+  changesetRef?: string
 ): number {
   const db = getDb();
   db.prepare(
@@ -201,9 +216,9 @@ export function startGateRun(
 
   const result = db
     .prepare(
-      "INSERT INTO gate_runs (card_id, from_phase, to_phase, gate_type, gate_name) VALUES (?, ?, ?, ?, ?)"
+      "INSERT INTO gate_runs (card_id, from_phase, to_phase, gate_type, gate_name, changeset_ref) VALUES (?, ?, ?, ?, ?, ?)"
     )
-    .run(cardId, fromPhase, toPhase, gateType, gateName || null);
+    .run(cardId, fromPhase, toPhase, gateType, gateName || null, changesetRef || null);
 
   return Number(result.lastInsertRowid);
 }
@@ -231,7 +246,8 @@ export function getGateRunsForCard(cardId: string): GateRun[] {
 export function getLatestPassingRuns(
   cardId: string,
   fromPhase: Phase,
-  toPhase: Phase
+  toPhase: Phase,
+  currentChangesetRef?: string
 ): GateRun[] {
   const db = getDb();
   const rows = db
@@ -244,7 +260,15 @@ export function getLatestPassingRuns(
     )
     .all(cardId, fromPhase, toPhase) as GateRunRow[];
 
-  return rows.map(mapGateRun);
+  return rows.map((row) => {
+    const run = mapGateRun(row);
+    // Mark as stale if the changeset has changed since the gate ran,
+    // or if the run has no ref but we have a current one (legacy run)
+    if (currentChangesetRef && run.changesetRef !== currentChangesetRef) {
+      run.stale = true;
+    }
+    return run;
+  });
 }
 
 export function canAdvancePhase(
@@ -252,7 +276,8 @@ export function canAdvancePhase(
   fromPhase: Phase,
   toPhase: Phase,
   projectPath?: string,
-  riskLevel?: RiskLevel
+  riskLevel?: RiskLevel,
+  changesetRef?: string
 ): { allowed: boolean; pendingGates: GateConfig[] } {
   const gates = getGatesForTransition(fromPhase, toPhase, projectPath, riskLevel);
   const requiredGates = gates.filter((gate) => gate.required);
@@ -261,15 +286,17 @@ export function canAdvancePhase(
     return { allowed: true, pendingGates: [] };
   }
 
-  const passingRuns = getLatestPassingRuns(cardId, fromPhase, toPhase);
+  const passingRuns = getLatestPassingRuns(cardId, fromPhase, toPhase, changesetRef);
+  // Exclude stale runs — they don't count toward advancement
+  const freshRuns = passingRuns.filter((run) => !run.stale);
   const pendingGates = requiredGates.filter((gate) => {
     if (gate.gateName) {
-      return !passingRuns.some(
+      return !freshRuns.some(
         (run) => run.gateType === gate.gateType && run.gateName === gate.gateName
       );
     }
 
-    return !passingRuns.some((run) => run.gateType === gate.gateType);
+    return !freshRuns.some((run) => run.gateType === gate.gateType);
   });
 
   return {

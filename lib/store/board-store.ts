@@ -12,7 +12,7 @@ interface BoardState {
   workspaceFilters: Set<string>;
   setDetailCard: (id: string | null) => void;
   setCards: (cards: KanbanCard[]) => void;
-  updateCard: (id: string, card: KanbanCard) => void;
+  updateCard: (id: string, card: Partial<KanbanCard>) => void;
   addCard: (card: KanbanCard) => void;
   removeCard: (id: string) => void;
   getCard: (id: string) => KanbanCard | undefined;
@@ -20,6 +20,36 @@ interface BoardState {
   moveCard: (cardId: string, toPhase: Phase) => void;
   toggleWorkspaceFilter: (path: string) => void;
   clearWorkspaceFilters: () => void;
+}
+
+// Fields derived locally — preserved when the card has manualOverride set
+// (e.g., from a DnD phase move), otherwise accepted from server enrichment
+const LOCAL_OVERRIDE_FIELDS: ReadonlySet<keyof KanbanCard> = new Set([
+  "phase", "gateStatus",
+]);
+
+/**
+ * Merge an incoming card update with the existing card.
+ * AHP-owned fields always overwrite. When a card has manualOverride set
+ * (e.g., from a DnD phase move), phase and gateStatus are preserved.
+ * All other fields accept incoming values, falling back to existing.
+ */
+function mergeCard(existing: KanbanCard, incoming: Partial<KanbanCard>): KanbanCard {
+  const merged = { ...existing };
+
+  for (const key of Object.keys(incoming) as Array<keyof KanbanCard>) {
+    const value = incoming[key];
+    if (value === undefined) continue;
+
+    // When manually overridden, protect phase/gateStatus from server clobbering
+    if (existing.manualOverride && LOCAL_OVERRIDE_FIELDS.has(key)) {
+      continue;
+    }
+
+    (merged as Record<string, unknown>)[key] = value;
+  }
+
+  return merged;
 }
 
 /** Remove stale filter paths that no longer match any card */
@@ -124,9 +154,12 @@ export const useBoardStore = create<BoardState>()(
           cards,
           workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters),
         })),
-      updateCard: (id, card) =>
+      updateCard: (id, incoming) =>
         set((state) => {
-          const cards = state.cards.map((c) => (c.id === id ? card : c));
+          const cards = state.cards.map((existing) => {
+            if (existing.id !== id) return existing;
+            return mergeCard(existing, incoming);
+          });
           return { cards, workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters) };
         }),
       addCard: (card) =>
@@ -143,7 +176,7 @@ export const useBoardStore = create<BoardState>()(
       moveCard: (cardId, toPhase) =>
         set((state) => ({
           cards: state.cards.map((card) =>
-            card.id === cardId ? { ...card, phase: toPhase } : card
+            card.id === cardId ? { ...card, phase: toPhase, manualOverride: true } : card
           ),
         })),
       toggleWorkspaceFilter: (path) =>

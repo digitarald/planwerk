@@ -1,12 +1,23 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Monitor, ShieldAlert, Unplug, Wifi } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore, ConnectionErrorInfo } from "@/lib/store/connection-store";
 import type { ConnectionErrorCode } from "@/lib/ahp/connection-error";
+
+const DEFAULT_HOST = process.env.NEXT_PUBLIC_AHP_DEFAULT_HOST ?? "ws://localhost:8082";
+
+function isValidWsUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "ws:" || parsed.protocol === "wss:";
+  } catch {
+    return false;
+  }
+}
 
 const errorIcons: Record<ConnectionErrorCode, typeof AlertTriangle> = {
   connection_refused: Unplug,
@@ -50,6 +61,16 @@ export function Onboarding() {
     connect(remoteUrl);
   };
   const isConnecting = status === "reconnecting";
+  const remoteUrlValid = useMemo(() => isValidWsUrl(remoteUrl), [remoteUrl]);
+  const defaultHostLabel = useMemo(() => {
+    try {
+      const parsed = new URL(DEFAULT_HOST);
+      const defaultPort = parsed.protocol === "wss:" ? "443" : "80";
+      return `${parsed.hostname}:${parsed.port || defaultPort}`;
+    } catch {
+      return DEFAULT_HOST;
+    }
+  }, []);
 
   return (
     <div className="flex h-full items-center justify-center bg-gradient-to-b from-transparent via-transparent to-muted/20">
@@ -69,7 +90,7 @@ export function Onboarding() {
           {error && <ConnectionError error={error} />}
 
           <button
-            onClick={() => connect("ws://localhost:8082")}
+            onClick={() => connect(DEFAULT_HOST)}
             disabled={isConnecting}
             className="w-full rounded-md border border-border p-3 text-left transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
             type="button"
@@ -78,7 +99,7 @@ export function Onboarding() {
               <Monitor className="h-4 w-4 text-primary" />
               <div>
                 <div className="text-sm font-medium">VS Code (local)</div>
-                <div className="text-xs text-muted-foreground">Connect to localhost:8082</div>
+                <div className="text-xs text-muted-foreground">Connect to {defaultHostLabel}</div>
               </div>
             </div>
           </button>
@@ -94,11 +115,14 @@ export function Onboarding() {
               size="sm"
               variant="outline"
               onClick={handleRemoteConnect}
-              disabled={!remoteUrl || isConnecting}
+              disabled={!remoteUrlValid || isConnecting}
             >
               <Wifi className="h-3.5 w-3.5" />
             </Button>
           </div>
+          {remoteUrl && !remoteUrlValid && (
+            <p className="text-xs text-muted-foreground">URL must start with ws:// or wss://</p>
+          )}
         </div>
       </div>
     </div>

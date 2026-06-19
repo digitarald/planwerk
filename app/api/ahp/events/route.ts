@@ -132,7 +132,10 @@ async function projectRemoteEvent(event: BridgeEvent): Promise<CardStreamEvent> 
   };
 }
 
-/** When no host is connected, emit an empty board */
+/**
+ * Safety net: when the SSE endpoint is hit without a host param (e.g., during
+ * rehydration edge cases), emit an empty board so the client has a valid init.
+ */
 function createEmptyStream(): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   return new ReadableStream<Uint8Array>({

@@ -1,7 +1,8 @@
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
 import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
-import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
-import type { SessionSummary, SessionState } from "@microsoft/agent-host-protocol";
+import { SUPPORTED_PROTOCOL_VERSIONS, ActionType } from "@microsoft/agent-host-protocol";
+import type { SessionSummary, SessionState, SessionAction } from "@microsoft/agent-host-protocol";
+import { sessionReducer } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
@@ -218,53 +219,101 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }
 
     pendingInputFetches.add(sessionUri);
-    debug("fetching input (one-shot):", sessionUri);
+    info("fetchInput: subscribing", sessionUri);
 
     client.subscribe(sessionUri)
-      .then(({ result, subscription }) => {
-        // Immediately close the subscription iterator and unsubscribe
-        void subscription.close();
-        client?.unsubscribe(sessionUri).catch(() => {});
-
-        if (disposed) return;
+      .then(async ({ result, subscription }) => {
+        if (disposed) {
+          void subscription.close();
+          client?.unsubscribe(sessionUri).catch(() => {});
+          return;
+        }
 
         // Re-check: status may have changed while the request was in-flight
         const currentSession = sessions.get(sessionUri);
         const stillNeeded = currentSession
           && (currentSession.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
 
-        if (!stillNeeded) return;
+        if (!stillNeeded) {
+          info("fetchInput: no longer needed (status changed while in-flight)", sessionUri);
+          void subscription.close();
+          client?.unsubscribe(sessionUri).catch(() => {});
+          return;
+        }
 
-        // Extract inputRequests from snapshot
-        const snapshot = result.snapshot;
-        if (snapshot) {
-          const sessionState = snapshot.state as SessionState;
-          const mapped = mapInputRequests(sessionState.inputRequests);
-          if (mapped) {
-            pendingInputs.set(sessionUri, mapped);
-            debug("got pending input:", sessionUri, mapped.requestId);
-            const session = sessions.get(sessionUri)!;
-            onEvent({
-              type: "sessionSummaryChanged",
-              session,
-              enrichment: enrichments.get(sessionUri) ?? null,
-              pendingInput: mapped,
-            });
-          } else if (pendingInputs.has(sessionUri)) {
-            // Snapshot has no actionable request — clear stale local state
-            pendingInputs.delete(sessionUri);
-            const session = sessions.get(sessionUri)!;
-            onEvent({
-              type: "sessionSummaryChanged",
-              session,
-              enrichment: enrichments.get(sessionUri) ?? null,
-              pendingInput: null,
-            });
+        let sessionState = result.snapshot
+          ? result.snapshot.state as SessionState
+          : undefined;
+
+        // If the snapshot has no inputRequests, the host may deliver them
+        // as a subsequent SessionInputRequested action on the stream.
+        // Wait briefly for it before giving up.
+        if (sessionState && !sessionState.inputRequests?.length) {
+          info("fetchInput: snapshot has no inputRequests, waiting for action…", sessionUri);
+          const timeout = 3_000;
+          const deadline = Date.now() + timeout;
+
+          try {
+            for await (const action of subscription) {
+              if (disposed || Date.now() > deadline) break;
+              // Only process session actions through the reducer
+              const type = (action as { type?: string }).type;
+              if (!type?.startsWith("session/")) continue;
+              sessionState = sessionReducer(sessionState, action as unknown as SessionAction);
+              if (sessionState.inputRequests?.length) {
+                info("fetchInput: got inputRequests via action", sessionUri, `type=${type}`);
+                break;
+              }
+            }
+          } catch {
+            // subscription closed or errored — continue with what we have
           }
+        }
+
+        // Clean up subscription
+        void subscription.close();
+        client?.unsubscribe(sessionUri).catch(() => {});
+
+        if (disposed) return;
+
+        if (!sessionState) {
+          warn("fetchInput: subscribe returned no snapshot", sessionUri);
+          return;
+        }
+
+        const requests = sessionState.inputRequests;
+        info("fetchInput: final state, inputRequests:", sessionUri,
+          requests ? `${requests.length} request(s)` : "none",
+          requests?.[0] ? `first: id=${requests[0].id} questions=${requests[0].questions?.length ?? 0}` : "");
+
+        const mapped = mapInputRequests(requests);
+        if (mapped) {
+          pendingInputs.set(sessionUri, mapped);
+          info("fetchInput: mapped pending input", sessionUri, `requestId=${mapped.requestId} questions=${mapped.questions.length}`);
+          const session = sessions.get(sessionUri)!;
+          onEvent({
+            type: "sessionSummaryChanged",
+            session,
+            enrichment: enrichments.get(sessionUri) ?? null,
+            pendingInput: mapped,
+          });
+        } else if (pendingInputs.has(sessionUri)) {
+          warn("fetchInput: no actionable inputRequests, clearing stale pendingInput", sessionUri);
+          pendingInputs.delete(sessionUri);
+          const session = sessions.get(sessionUri)!;
+          onEvent({
+            type: "sessionSummaryChanged",
+            session,
+            enrichment: enrichments.get(sessionUri) ?? null,
+            pendingInput: null,
+          });
+        } else {
+          warn("fetchInput: no actionable inputRequests and no stale state", sessionUri,
+            "raw requests:", JSON.stringify(requests?.map(r => ({ id: r.id, questions: r.questions?.length })) ?? null));
         }
       })
       .catch((err) => {
-        debug("input fetch failed:", sessionUri, err instanceof Error ? err.message : err);
+        warn("fetchInput: subscribe failed", sessionUri, err instanceof Error ? err.message : err);
       })
       .finally(() => {
         pendingInputFetches.delete(sessionUri);

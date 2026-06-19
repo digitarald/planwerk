@@ -9,7 +9,9 @@ From rubber duck review (2026-06-15). Items to tackle in future iterations.
 **Severity:** Blocking for real usage  
 **Where:** `connection-store.ts`, `use-live-sessions.ts`, `/api/ahp/events`
 
-The onboarding accepts `ws://...` but `connect()` only fakes a 1.5s delay. `useLiveSessions()` always reads from local `/api/ahp/events` which streams mock data regardless of `hostUrl`.
+~~The onboarding accepts `ws://...` but `connect()` only fakes a 1.5s delay. `useLiveSessions()` always reads from local `/api/ahp/events` which streams mock data regardless of `hostUrl`.~~
+
+**Status:** Partially addressed. `connect()` now validates ws:// / wss:// protocol. The SSE route bridges to the real AHP host via `createAHPBridge`. The fake delay and mock data have been removed. Remaining: no preflight reachability check (reactive error handling via SSE is used instead).
 
 **To fix:**
 - Store mode: `mock | remote`
@@ -36,10 +38,12 @@ DnD moves mutate client state only. The gate API reads phase from SQLite (defaul
 
 ## 3. Gate Results Become Stale Immediately
 
-**Severity:** Correctness issue  
+**Severity:** ~~Correctness issue~~ Addressed  
 **Where:** `gate-engine.ts` — `canAdvancePhase()`
 
-Accepts any previous passing gate run regardless of whether code changed since. No comparison against commit SHA, session revision, or diff hash.
+~~Accepts any previous passing gate run regardless of whether code changed since. No comparison against commit SHA, session revision, or diff hash.~~
+
+**Status:** Addressed. `startGateRun()` now stores a `changeset_ref` (files:additions:deletions:modifiedAt). `canAdvancePhase()` marks runs with mismatched refs as stale and excludes them. Uses card metrics as proxy since AHP doesn't expose commit SHAs yet.
 
 **To fix:**
 - Store validity key in `changeset_ref` (commit SHA / diff hash)
@@ -50,10 +54,12 @@ Accepts any previous passing gate run regardless of whether code changed since. 
 
 ## 4. SSE Updates Overwrite Local Metadata
 
-**Severity:** Data loss on live updates  
+**Severity:** ~~Data loss on live updates~~ Addressed  
 **Where:** `use-live-sessions.ts`, `map-session.ts`
 
-SSE updates replace most card fields via `mapSessionToCard()`, preserving only `phase`. This resets `gateStatus`, `risk`, `planSteps`, and any locally enriched fields.
+~~SSE updates replace most card fields via `mapSessionToCard()`, preserving only `phase`. This resets `gateStatus`, `risk`, `planSteps`, and any locally enriched fields.~~
+
+**Status:** Addressed. `updateCard()` in board-store now uses merge semantics. AHP-owned fields always overwrite; locally-owned fields (phase, gateStatus, risk, attention, etc.) are preserved unless the server enrichment explicitly provides them.
 
 **To fix:**
 - Separate ownership: AHP owns runtime/activity/diff; Planwerk owns phase/gates/risk/review
@@ -64,10 +70,12 @@ SSE updates replace most card fields via `mapSessionToCard()`, preserving only `
 
 ## 5. Gate Execution Uses setTimeout (Not Durable)
 
-**Severity:** Infrastructure gap  
+**Severity:** ~~Infrastructure gap~~ Partially addressed  
 **Where:** `/api/gates/run/route.ts`
 
-Gate commands are "executed" via `setTimeout()` inside an API route handler. This is fine for demo but won't survive process restarts or handle real command execution.
+~~Gate commands are "executed" via `setTimeout()` inside an API route handler. This is fine for demo but won't survive process restarts or handle real command execution.~~
+
+**Status:** Partially addressed. `exec()` now wrapped in try/catch. Startup recovery message improved. New `/api/gates/status` endpoint for client polling. Still uses in-process exec (appropriate for local dev tool), not a durable job queue.
 
 **To fix:**
 - Move gate execution to a durable local worker/process queue

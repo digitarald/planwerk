@@ -2,7 +2,6 @@ import { exec } from "node:child_process";
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { getDb } from "@/lib/db/schema";
 import {
   canAdvancePhase,
   completeGateRun,
@@ -15,15 +14,6 @@ import {
 } from "@/lib/orchestrator/gate-engine";
 import { getCardRisk } from "@/lib/orchestrator/risk-store";
 import type { RiskLevel } from "@/lib/types";
-
-try {
-  const db = getDb();
-  db.prepare(
-    "UPDATE gate_runs SET status = 'failed', output = 'Abandoned: server restarted', completed_at = datetime('now') WHERE status = 'running'"
-  ).run();
-} catch {
-  // DB may not be initialized yet on first load
-}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,6 +31,7 @@ export async function POST(request: NextRequest) {
     gateName?: string;
     workingDirectory?: string;
     projectPath?: string;
+    changesetRef?: string;
   };
   const { cardId, action } = body;
 
@@ -62,7 +53,8 @@ export async function POST(request: NextRequest) {
       currentPhase,
       nextPhase,
       body.projectPath,
-      riskLevel
+      riskLevel,
+      body.changesetRef
     );
 
     return NextResponse.json({
@@ -80,7 +72,8 @@ export async function POST(request: NextRequest) {
       currentPhase,
       nextPhase,
       body.projectPath,
-      riskLevel
+      riskLevel,
+      body.changesetRef
     );
 
     if (!allowed) {
@@ -132,7 +125,8 @@ export async function POST(request: NextRequest) {
       currentPhase,
       nextPhase,
       gateType,
-      gateName
+      gateName,
+      body.changesetRef
     );
 
     if (!gate.command) {
@@ -142,23 +136,28 @@ export async function POST(request: NextRequest) {
       const cwd = body.workingDirectory || process.cwd();
       const maxOutput = 64 * 1024;
 
-      exec(
-        gate.command,
-        {
-          cwd,
-          timeout: 5 * 60 * 1000,
-          maxBuffer: maxOutput,
-        },
-        (error, stdout, stderr) => {
-          if (error) {
-            const output = (stderr || stdout || error.message).slice(0, maxOutput);
-            completeGateRun(runId, "failed", output);
-          } else {
-            const output = (stdout || "All checks passed").slice(0, maxOutput);
-            completeGateRun(runId, "passed", output);
+      try {
+        exec(
+          gate.command,
+          {
+            cwd,
+            timeout: 5 * 60 * 1000,
+            maxBuffer: maxOutput,
+          },
+          (error, stdout, stderr) => {
+            if (error) {
+              const output = (stderr || stdout || error.message).slice(0, maxOutput);
+              completeGateRun(runId, "failed", output);
+            } else {
+              const output = (stdout || "All checks passed").slice(0, maxOutput);
+              completeGateRun(runId, "passed", output);
+            }
           }
-        }
-      );
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to start gate command";
+        completeGateRun(runId, "failed", message);
+      }
     }
 
     return NextResponse.json({ runId, status: "running" });
@@ -197,7 +196,8 @@ export async function POST(request: NextRequest) {
       currentPhase,
       nextPhase,
       "human-approval",
-      gate.gateName ?? gateName
+      gate.gateName ?? gateName,
+      body.changesetRef
     );
     completeGateRun(runId, "passed", "Approved by human");
 
@@ -214,6 +214,7 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   const cardId = request.nextUrl.searchParams.get("cardId");
   const projectPath = request.nextUrl.searchParams.get("projectPath") || undefined;
+  const changesetRef = request.nextUrl.searchParams.get("changesetRef") || undefined;
 
   if (!cardId) {
     return NextResponse.json({ error: "cardId required" }, { status: 400 });
@@ -239,7 +240,8 @@ export async function GET(request: NextRequest) {
     currentPhase,
     nextPhase,
     projectPath,
-    riskLevel
+    riskLevel,
+    changesetRef
   );
 
   return NextResponse.json({

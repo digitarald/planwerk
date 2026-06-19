@@ -29,7 +29,11 @@ export const useConnectionStore = create<ConnectionState>()(
       error: null,
       connect: (url: string) => {
         try {
-          new URL(url);
+          const parsed = new URL(url);
+          if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+            set({ status: "disconnected", error: { message: "URL must use ws:// or wss:// protocol", code: "unknown" } });
+            return;
+          }
         } catch {
           console.error("[ahp:conn]", "invalid URL:", url);
           set({ status: "disconnected", error: { message: "Invalid connection URL", code: "unknown" } });

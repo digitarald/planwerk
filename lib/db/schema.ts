@@ -68,12 +68,21 @@ export function getDb(): Database.Database {
       CREATE INDEX IF NOT EXISTS idx_session_cache_host ON session_cache(host_url);
     `);
 
+    // Mark any gate runs left running from a previous process as failed
+    db.prepare(
+      "UPDATE gate_runs SET status = 'failed', output = 'Abandoned: server restarted — re-run this gate', completed_at = datetime('now') WHERE status = 'running'"
+    ).run();
+
     const gateRunsColumns = db
       .prepare("PRAGMA table_info(gate_runs)")
       .all() as Array<{ name: string }>;
 
     if (!gateRunsColumns.some((column) => column.name === "gate_name")) {
       db.exec("ALTER TABLE gate_runs ADD COLUMN gate_name TEXT;");
+    }
+
+    if (!gateRunsColumns.some((column) => column.name === "changeset_ref")) {
+      db.exec("ALTER TABLE gate_runs ADD COLUMN changeset_ref TEXT;");
     }
 
     // Migrate card_risk: remove legacy FK constraint on card_id → card_phases
