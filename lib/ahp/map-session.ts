@@ -187,7 +187,7 @@ export function mapSessionToCard(
           ? "error"
           : "none",
     risk: persistedRisk ?? "low",
-    activity: session.activity || "No activity",
+    activity: session.activity || (runtime === "running" ? "Thinking" : ""),
     additions,
     deletions,
     filesChanged,

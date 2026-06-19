@@ -203,7 +203,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                   {card.manualOverride && (
                     <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />
                   )}
-                  {card.runtime !== "input-needed" && (
+                  {card.runtime !== "input-needed" && card.activity && (
                     <p className="min-w-0 flex-1 truncate">{card.activity}</p>
                   )}
                   {showPlanSteps && (
