@@ -137,10 +137,14 @@ function inferPhase(
 
   // Split "code changes" into definite (enrichment-backed) vs ambiguous (raw count).
   // Without enrichment, raw file counts include plan/spec artifacts so we can't
-  // assume they represent code changes.
+  // assume they represent code changes — unless the count is high enough that
+  // plan-only work can't explain it (plan files rarely exceed 2).
+  const PLAN_ONLY_FILE_THRESHOLD = 2;
   const hasDefiniteCodeChanges = codeFileCount !== undefined ? codeFileCount > 0 : false;
   const hasAmbiguousFileChanges = codeFileCount === undefined && totalFiles > 0;
-  const hasCodeChanges = hasDefiniteCodeChanges || (hasAmbiguousFileChanges && !hasPlanSignal);
+  const hasCodeChanges = hasDefiniteCodeChanges
+    || (hasAmbiguousFileChanges && !hasPlanSignal)
+    || (hasAmbiguousFileChanges && totalFiles > PLAN_ONLY_FILE_THRESHOLD);
 
   // Archived sessions with code changes are completed work → ship
   if (isArchived && hasCodeChanges) return "ship";

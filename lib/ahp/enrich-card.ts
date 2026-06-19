@@ -5,6 +5,7 @@ import {
   deriveGateStatus,
   getNextPhase,
   getPersistedCardPhase,
+  setCardPhase,
 } from "@/lib/orchestrator/gate-engine";
 import { getCardRisk } from "@/lib/orchestrator/risk-store";
 
@@ -19,6 +20,11 @@ export function enrichSessionToCard(
   const persistedPhase = getPersistedCardPhase(session.resource);
   const storedRisk = getCardRisk(session.resource);
   const card = mapSessionToCard(session, persistedPhase, changesetData, storedRisk?.level);
+
+  // Sync DB when inference overrides the persisted phase (e.g. archived+code → ship)
+  if (card.phase !== persistedPhase) {
+    setCardPhase(session.resource, card.phase);
+  }
 
   if (storedRisk?.factors.length) {
     card.riskFactors = storedRisk.factors;
