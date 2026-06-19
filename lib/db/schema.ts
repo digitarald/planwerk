@@ -76,6 +76,27 @@ export function getDb(): Database.Database {
       db.exec("ALTER TABLE gate_runs ADD COLUMN gate_name TEXT;");
     }
 
+    // Migrate card_risk: remove legacy FK constraint on card_id → card_phases
+    const cardRiskFKs = db
+      .prepare("PRAGMA foreign_key_list(card_risk)")
+      .all() as Array<{ table: string }>;
+    if (cardRiskFKs.length > 0) {
+      db.pragma("foreign_keys = OFF");
+      db.exec(`
+        CREATE TABLE card_risk_new (
+          card_id TEXT PRIMARY KEY,
+          risk_level TEXT NOT NULL DEFAULT 'low',
+          risk_factors TEXT NOT NULL DEFAULT '[]',
+          assessed_at TEXT NOT NULL DEFAULT (datetime('now')),
+          assessed_by TEXT NOT NULL DEFAULT 'copilot'
+        );
+        INSERT INTO card_risk_new SELECT * FROM card_risk;
+        DROP TABLE card_risk;
+        ALTER TABLE card_risk_new RENAME TO card_risk;
+      `);
+      db.pragma("foreign_keys = ON");
+    }
+
     db.exec(`
       UPDATE card_phases SET phase = 'review' WHERE phase = 'verify';
       UPDATE gate_runs

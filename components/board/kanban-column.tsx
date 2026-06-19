@@ -15,7 +15,14 @@ interface KanbanColumnProps {
 }
 
 export function KanbanColumn({ column }: KanbanColumnProps) {
-  const cards = useBoardStore(useShallow((state) => selectFilteredCards(state).filter((c) => c.phase === column.id)));
+  const cards = useBoardStore(useShallow((state) => {
+    const filtered = selectFilteredCards(state).filter((c) => c.phase === column.id);
+    // Sort: non-archived first (by modifiedAt desc), archived last (by modifiedAt desc)
+    return filtered.sort((a, b) => {
+      if (a.isArchived !== b.isArchived) return a.isArchived ? 1 : -1;
+      return b.modifiedAt - a.modifiedAt;
+    });
+  }));
   const isOverWip = column.wipLimit ? cards.length > column.wipLimit : false;
   const isEmpty = cards.length === 0;
 

@@ -178,6 +178,12 @@
   .scrollbar-thin {
     scrollbar-width: thin;
   }
+  .scrollbar-none {
+    scrollbar-width: none;
+    &::-webkit-scrollbar {
+      display: none;
+    }
+  }
 
   /* Elevation utilities */
   .shadow-elevation-xs { box-shadow: var(--shadow-xs); }
