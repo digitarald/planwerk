@@ -42,6 +42,15 @@ async function getClient(): Promise<CopilotClient> {
   return clientStarting;
 }
 
+async function resetClient() {
+  const old = clientInstance;
+  clientInstance = null;
+  clientStarting = null;
+  if (old) {
+    await old.stop().catch(() => {});
+  }
+}
+
 const SYSTEM_PROMPT = `You are a risk triage agent for a software development lifecycle system.
 
 Given context about a task (title, activity, file metrics, plan content, and the agent's last response), assess the risk level as one of: "low", "medium", or "high".
@@ -156,8 +165,8 @@ export async function assessRisk(input: RiskInput): Promise<RiskAssessment> {
       await session.disconnect().catch(() => {});
     }
   } catch (err) {
-    // Reset client so the next call retries from scratch
-    clientInstance = null;
+    // Stop and reset client so the next call retries from scratch
+    await resetClient();
     console.warn(
       "[risk-assessor] Copilot SDK call failed, using fallback:",
       err instanceof Error ? err.message : err

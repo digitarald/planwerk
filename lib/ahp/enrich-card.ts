@@ -17,12 +17,16 @@ export function enrichSessionToCard(
   changesetData?: ChangesetEnrichment | null
 ): KanbanCard {
   const persistedPhase = getPersistedCardPhase(session.resource);
-  const persistedRisk = getCardRisk(session.resource)?.level;
-  const card = mapSessionToCard(session, persistedPhase, changesetData, persistedRisk);
+  const storedRisk = getCardRisk(session.resource);
+  const card = mapSessionToCard(session, persistedPhase, changesetData, storedRisk?.level);
+
+  if (storedRisk?.factors.length) {
+    card.riskFactors = storedRisk.factors;
+  }
 
   const nextPhase = getNextPhase(card.phase);
   if (nextPhase) {
-    card.gateStatus = deriveGateStatus(session.resource, card.phase, nextPhase, persistedRisk);
+    card.gateStatus = deriveGateStatus(session.resource, card.phase, nextPhase, storedRisk?.level);
   }
 
   return card;
