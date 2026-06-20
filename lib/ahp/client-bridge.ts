@@ -162,7 +162,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
             if (enrichment) {
               enrichment = { ...enrichment, artifacts: [...enrichment.artifacts, planArtifact] };
             } else {
-              enrichment = { artifacts: [planArtifact], codeFileCount: 0, totalFileCount: 0, filePaths: [] };
+              enrichment = { artifacts: [planArtifact], codeFileCount: 0, totalFileCount: 0, fileChanges: [] };
             }
           }
         }

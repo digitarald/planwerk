@@ -67,7 +67,7 @@ async function tryTriage(
         filesChanged: session.changes?.files ?? 0,
         additions: session.changes?.additions ?? 0,
         deletions: session.changes?.deletions ?? 0,
-        filePaths: enrichment?.filePaths,
+        filePaths: enrichment?.fileChanges?.map(f => f.path),
         lastAgentMessage: enrichment?.lastAgentMessage,
         planContent: enrichment?.planContent,
       },

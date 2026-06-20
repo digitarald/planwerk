@@ -54,6 +54,12 @@ export interface PendingInput {
   questions: PendingInputQuestion[];
 }
 
+export interface FileChange {
+  path: string;
+  added: number;
+  removed: number;
+}
+
 export interface KanbanCard {
   id: string;
   title: string;
@@ -78,7 +84,7 @@ export interface KanbanCard {
   recentActivity?: ActivityEntry[];
   pendingInput?: PendingInput;
   lastAgentMessage?: string;
-  filePaths?: string[];
+  fileChanges?: FileChange[];
   isArchived?: boolean;
 }
 

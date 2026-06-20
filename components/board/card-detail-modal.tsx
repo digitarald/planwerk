@@ -68,6 +68,27 @@ function formatTime(timestamp: number): string {
   });
 }
 
+function shortenPath(fullPath: string, projectRoot?: string): { name: string; dir: string } {
+  const normalized = fullPath.replace(/\/+$/, "");
+
+  // Try to strip project root prefix
+  if (projectRoot) {
+    const root = projectRoot.replace(/\/+$/, "") + "/";
+    if (normalized.startsWith(root)) {
+      const relative = normalized.slice(root.length);
+      const segments = relative.split("/");
+      const name = segments.pop() ?? relative;
+      const dir = segments.length > 0 ? segments.join("/") + "/" : "";
+      return { name, dir };
+    }
+  }
+
+  // Out-of-project file: show basename only
+  const segments = normalized.split("/");
+  const name = segments.pop() ?? normalized;
+  return { name, dir: "" };
+}
+
 function RuntimeBadge({ status }: { status: RuntimeStatus }) {
   switch (status) {
     case "running":
@@ -202,11 +223,11 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
 
   const artifacts = card.artifacts ?? [];
   const recentActivity = card.recentActivity ?? [];
-  const filePaths = card.filePaths ?? [];
+  const fileChanges = card.fileChanges ?? [];
   const planArtifact = artifacts.find(
     (a) => a.type === "plan" && a.contentRef
   );
-  const [filesExpanded, setFilesExpanded] = useState(filePaths.length <= 12);
+  const [filesExpanded, setFilesExpanded] = useState(fileChanges.length <= 12);
 
   return (
     <div className="absolute inset-0 z-40 flex items-start justify-center">
@@ -335,7 +356,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               )}
 
               {/* Changed Files */}
-              {filePaths.length > 0 && (
+              {fileChanges.length > 0 && (
                 <section>
                   <button
                     type="button"
@@ -344,29 +365,38 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                   >
                     <ChevronDown className={cn("h-3 w-3 transition-transform", !filesExpanded && "-rotate-90")} />
                     Changed Files
-                    <span className="ml-1 font-normal normal-case tabular-nums">({filePaths.length})</span>
+                    <span className="ml-1 font-normal normal-case tabular-nums">({fileChanges.length})</span>
                   </button>
                   {filesExpanded && (
                     <div className="space-y-px rounded-lg border border-border/60 bg-muted/20 py-1">
-                      {filePaths.map((filePath) => {
-                        const segments = filePath.split("/");
-                        const fileName = segments.pop() ?? filePath;
-                        const dir = segments.join("/");
-                        return (
-                          <div
-                            key={filePath}
-                            className="group flex items-center gap-2 px-2.5 py-1 hover:bg-muted/50"
-                          >
-                            <FilePen className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-                            <span className="min-w-0 flex-1 truncate text-[12px] font-mono">
-                              <span className="text-foreground">{fileName}</span>
-                              {dir && (
-                                <span className="ml-1.5 text-muted-foreground/50">{dir}/</span>
+                      {[...fileChanges]
+                        .sort((a, b) => (b.added + b.removed) - (a.added + a.removed))
+                        .map((file) => {
+                          const display = shortenPath(file.path, card.project?.path ?? card.workingDirectory);
+                          const hasStats = file.added > 0 || file.removed > 0;
+                          return (
+                            <div
+                              key={file.path}
+                              title={file.path}
+                              className="group flex items-center gap-2 px-2.5 py-1 hover:bg-muted/50"
+                            >
+                              <FilePen className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+                              <span className="min-w-0 flex-1 truncate text-[12px] font-mono">
+                                <span className="text-foreground">{display.name}</span>
+                                {display.dir && (
+                                  <span className="ml-1.5 text-muted-foreground/50">{display.dir}</span>
+                                )}
+                              </span>
+                              {hasStats && (
+                                <span className="shrink-0 text-[11px] tabular-nums">
+                                  {file.added > 0 && <span className="text-emerald-600">+{file.added}</span>}
+                                  {file.added > 0 && file.removed > 0 && <span className="text-muted-foreground/40"> </span>}
+                                  {file.removed > 0 && <span className="text-red-600">-{file.removed}</span>}
+                                </span>
                               )}
-                            </span>
-                          </div>
-                        );
-                      })}
+                            </div>
+                          );
+                        })}
                     </div>
                   )}
                 </section>

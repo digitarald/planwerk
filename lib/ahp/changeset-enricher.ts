@@ -8,7 +8,7 @@ import type {
   ResponsePart,
 } from "@microsoft/agent-host-protocol";
 
-import { Artifact, ArtifactType } from "@/lib/types";
+import { Artifact, ArtifactType, FileChange } from "@/lib/types";
 
 const LOG_PREFIX = "[ahp:changeset]";
 const debug = (...args: unknown[]) => {
@@ -47,7 +47,7 @@ export interface ChangesetEnrichment {
   artifacts: Artifact[];
   codeFileCount: number;
   totalFileCount: number;
-  filePaths: string[];
+  fileChanges: FileChange[];
   lastAgentMessage?: string;
   planContent?: string;
 }
@@ -205,7 +205,7 @@ export async function enrichFromChangeset(
     if (!sessionState?.changesets?.length) {
       debug("no changesets for", sessionUri);
       // Return agent message even without changeset data
-      return lastAgentMessage ? { artifacts: [], codeFileCount: 0, totalFileCount: 0, filePaths: [], lastAgentMessage } : null;
+      return lastAgentMessage ? { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], lastAgentMessage } : null;
     }
 
     const changeset = findSessionChangeset(sessionState.changesets);
@@ -230,7 +230,7 @@ export async function enrichFromChangeset(
     const csState = csResult.snapshot?.state as ChangesetState | undefined;
     if (!csState?.files) {
       debug("changeset has no files:", changesetUri);
-      return { artifacts: [], codeFileCount: 0, totalFileCount: 0, filePaths: [], lastAgentMessage };
+      return { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], lastAgentMessage };
     }
 
     // If changeset is still computing, return null to retry later
@@ -241,13 +241,17 @@ export async function enrichFromChangeset(
 
     // Classify files
     const artifacts: Artifact[] = [];
-    const filePaths: string[] = [];
+    const fileChanges: FileChange[] = [];
     let codeFileCount = 0;
     const artifactFiles: Array<{ file: ChangesetFile; path: string; type: ArtifactType }> = [];
 
     for (const file of csState.files) {
       const filePath = extractFilePath(file);
-      filePaths.push(filePath);
+      fileChanges.push({
+        path: filePath,
+        added: file.edit.diff?.added ?? 0,
+        removed: file.edit.diff?.removed ?? 0,
+      });
       const artifactType = classifyArtifactFile(filePath);
 
       if (artifactType && file.edit.after) {
@@ -300,7 +304,7 @@ export async function enrichFromChangeset(
       artifacts,
       codeFileCount,
       totalFileCount: csState.files.length,
-      filePaths,
+      fileChanges,
       lastAgentMessage,
       planContent,
     };

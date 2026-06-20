@@ -203,7 +203,7 @@ export function mapSessionToCard(
     project: session.project,
     artifacts: artifacts.length > 0 ? artifacts : undefined,
     lastAgentMessage: enrichment?.lastAgentMessage,
-    filePaths: enrichment?.filePaths.length ? enrichment.filePaths : undefined,
+    fileChanges: enrichment?.fileChanges.length ? enrichment.fileChanges : undefined,
     isArchived,
   };
 }

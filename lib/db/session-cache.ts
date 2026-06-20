@@ -22,12 +22,24 @@ export function getCachedSessions(hostUrl: string): CachedSession[] {
       updated_at: string;
     }>;
 
-  return rows.map((row) => ({
-    sessionUri: row.session_uri,
-    summary: JSON.parse(row.summary_json),
-    enrichment: row.enrichment_json ? JSON.parse(row.enrichment_json) : null,
-    updatedAt: row.updated_at,
-  }));
+  return rows.map((row) => {
+    let enrichment: ChangesetEnrichment | null = null;
+    if (row.enrichment_json) {
+      const parsed = JSON.parse(row.enrichment_json);
+      // Migrate old cached shape: filePaths → fileChanges
+      if (parsed.filePaths && !parsed.fileChanges) {
+        parsed.fileChanges = parsed.filePaths.map((path: string) => ({ path, added: 0, removed: 0 }));
+        delete parsed.filePaths;
+      }
+      enrichment = parsed as ChangesetEnrichment;
+    }
+    return {
+      sessionUri: row.session_uri,
+      summary: JSON.parse(row.summary_json),
+      enrichment,
+      updatedAt: row.updated_at,
+    };
+  });
 }
 
 // sentinel: pass CLEAR_ENRICHMENT to explicitly null out cached enrichment
