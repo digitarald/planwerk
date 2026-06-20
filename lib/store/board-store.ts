@@ -10,6 +10,7 @@ interface BoardState {
   cards: KanbanCard[];
   detailCardId: string | null;
   workspaceFilters: Set<string>;
+  hideDone: boolean;
   setDetailCard: (id: string | null) => void;
   setCards: (cards: KanbanCard[]) => void;
   updateCard: (id: string, card: Partial<KanbanCard>) => void;
@@ -20,6 +21,7 @@ interface BoardState {
   moveCard: (cardId: string, toPhase: Phase) => void;
   toggleWorkspaceFilter: (path: string) => void;
   clearWorkspaceFilters: () => void;
+  toggleHideDone: () => void;
 }
 
 // Fields derived locally — preserved when the card has manualOverride set
@@ -66,11 +68,12 @@ function normalizeWorkspaceFilters(cards: KanbanCard[], filters: Set<string>): S
   return next.size === filters.size ? filters : next;
 }
 
-/** Selector: derive filtered cards from cards + workspaceFilters */
+/** Selector: derive filtered cards from cards + hideDone + workspaceFilters */
 export function selectFilteredCards(state: BoardState): KanbanCard[] {
-  const { cards, workspaceFilters } = state;
-  if (workspaceFilters.size === 0) return cards;
-  return cards.filter((c) => {
+  const { cards, hideDone, workspaceFilters } = state;
+  const visible = hideDone ? cards.filter((c) => !c.isArchived) : cards;
+  if (workspaceFilters.size === 0) return visible;
+  return visible.filter((c) => {
     if (!c.project) return workspaceFilters.has(UNASSIGNED_WORKSPACE);
     return workspaceFilters.has(c.project.path);
   });
@@ -92,14 +95,16 @@ export interface WorkspaceInfo {
 
 // Stable cache for selectWorkspaces to avoid new object references on unchanged data
 let _prevCards: KanbanCard[] = [];
+let _prevHideDone = true;
 let _prevWorkspaces: WorkspaceInfo[] = [];
 
 /** Selector: unique workspaces with counts, sorted by most recent activity (memoized) */
 export function selectWorkspaces(state: BoardState): WorkspaceInfo[] {
-  if (state.cards === _prevCards) return _prevWorkspaces;
+  if (state.cards === _prevCards && state.hideDone === _prevHideDone) return _prevWorkspaces;
 
+  const cards = state.hideDone ? state.cards.filter((c) => !c.isArchived) : state.cards;
   const map = new Map<string, WorkspaceInfo>();
-  for (const card of state.cards) {
+  for (const card of cards) {
     if (!card.project) continue;
     const existing = map.get(card.project.path);
     if (existing) {
@@ -133,13 +138,20 @@ export function selectWorkspaces(state: BoardState): WorkspaceInfo[] {
   }
 
   _prevCards = state.cards;
+  _prevHideDone = state.hideDone;
   _prevWorkspaces = result;
   return result;
 }
 
-/** Whether any cards lack a project */
+/** Whether any visible cards lack a project */
 export function selectHasUnassigned(state: BoardState): boolean {
-  return state.cards.some((c) => !c.project);
+  const cards = state.hideDone ? state.cards.filter((c) => !c.isArchived) : state.cards;
+  return cards.some((c) => !c.project);
+}
+
+/** Count of archived cards (for the toggle badge) */
+export function selectArchivedCount(state: BoardState): number {
+  return state.cards.filter((c) => c.isArchived).length;
 }
 
 export const useBoardStore = create<BoardState>()(
@@ -148,6 +160,7 @@ export const useBoardStore = create<BoardState>()(
       cards: [],
       detailCardId: null,
       workspaceFilters: new Set(),
+      hideDone: true,
       setDetailCard: (id) => set({ detailCardId: id }),
       setCards: (cards) =>
         set((state) => ({
@@ -187,20 +200,29 @@ export const useBoardStore = create<BoardState>()(
           return { workspaceFilters: next };
         }),
       clearWorkspaceFilters: () => set({ workspaceFilters: new Set() }),
+      toggleHideDone: () => set((state) => ({ hideDone: !state.hideDone })),
     }),
     {
       name: "planwerk-board",
       storage: createJSONStorage(() => sessionStorage),
       partialize: (state) => ({
         workspaceFilters: Array.from(state.workspaceFilters),
+        hideDone: state.hideDone,
       }),
       merge: (persisted, current) => ({
         ...current,
-        ...(persisted && typeof persisted === "object" && "workspaceFilters" in persisted
+        ...(persisted && typeof persisted === "object"
           ? {
-              workspaceFilters: new Set(
-                (persisted as { workspaceFilters?: string[] }).workspaceFilters ?? [],
-              ),
+              ...("workspaceFilters" in persisted
+                ? {
+                    workspaceFilters: new Set(
+                      (persisted as { workspaceFilters?: string[] }).workspaceFilters ?? [],
+                    ),
+                  }
+                : {}),
+              ...("hideDone" in persisted
+                ? { hideDone: (persisted as { hideDone?: boolean }).hideDone ?? true }
+                : {}),
             }
           : {}),
       }),

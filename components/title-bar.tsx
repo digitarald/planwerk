@@ -3,13 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import Image from "next/image";
-import { FolderOpen } from "lucide-react";
+import { Eye, EyeOff, FolderOpen } from "lucide-react";
 
 import { ConnectionDot } from "@/components/connection/connection-dot";
 import {
   useBoardStore,
   selectWorkspaces,
   selectHasUnassigned,
+  selectArchivedCount,
   UNASSIGNED_WORKSPACE,
 } from "@/lib/store/board-store";
 import { cn } from "@/lib/utils";
@@ -23,6 +24,10 @@ export function TitleBar() {
   const clearWorkspaceFilters = useBoardStore((s) => s.clearWorkspaceFilters);
   const workspaces = useBoardStore(useShallow(selectWorkspaces));
   const hasUnassigned = useBoardStore(selectHasUnassigned);
+
+  const hideDone = useBoardStore((s) => s.hideDone);
+  const toggleHideDone = useBoardStore((s) => s.toggleHideDone);
+  const archivedCount = useBoardStore(selectArchivedCount);
 
   const isFiltered = workspaceFilters.size > 0;
 
@@ -52,6 +57,22 @@ export function TitleBar() {
       )}
 
       <div className="ml-auto flex shrink-0 items-center gap-3">
+        {archivedCount > 0 && (
+          <button
+            onClick={toggleHideDone}
+            aria-pressed={hideDone}
+            title={hideDone ? `Show ${archivedCount} done` : "Hide done"}
+            className={cn(
+              "flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors duration-200",
+              hideDone
+                ? "text-muted-foreground hover:bg-muted hover:text-foreground"
+                : "bg-primary/10 text-primary"
+            )}
+          >
+            {hideDone ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+            <span className="tabular-nums">{archivedCount}</span>
+          </button>
+        )}
         <ConnectionDot />
       </div>
     </header>
