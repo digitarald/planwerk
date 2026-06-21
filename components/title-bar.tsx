@@ -61,6 +61,7 @@ export function TitleBar() {
           <button
             onClick={toggleHideDone}
             aria-pressed={hideDone}
+            aria-label={hideDone ? `Show ${archivedCount} done sessions` : "Hide done sessions"}
             title={hideDone ? `Show ${archivedCount} done` : "Hide done"}
             className={cn(
               "flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors duration-200",
