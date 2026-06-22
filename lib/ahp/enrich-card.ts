@@ -14,6 +14,15 @@ import { mapSessionToCard } from "./map-session";
 import { AHPSessionSummary } from "./types";
 import type { ChangesetEnrichment } from "./changeset-enricher";
 
+function safeParseJson(json: string): string[] | undefined {
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.map(String) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function enrichSessionToCard(
   session: AHPSessionSummary,
   changesetData?: ChangesetEnrichment | null
@@ -48,7 +57,7 @@ export function enrichSessionToCard(
       iteration: run.iteration,
       maxIterations: run.maxIterations,
       summary: run.verdictSummary ?? undefined,
-      findings: run.findingsJson ? JSON.parse(run.findingsJson) : undefined,
+      findings: run.findingsJson ? safeParseJson(run.findingsJson) : undefined,
     }));
   }
 

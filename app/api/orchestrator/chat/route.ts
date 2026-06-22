@@ -12,6 +12,21 @@ import type { KanbanCard } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const ALLOWED_TOOL_NAMES: Set<string> = new Set([
+  "create_session", "send_message", "answer_input",
+  "trigger_review", "trigger_gate", "override_phase", "assess_risk",
+]);
+
+function isLocalHost(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname;
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
 // Module-level singleton for the orchestrator Copilot session
 let copilotClient: CopilotClient | null = null;
 let copilotSession: CopilotSession | null = null;
@@ -102,6 +117,11 @@ export async function POST(request: NextRequest) {
 
   if (!message) {
     return NextResponse.json({ error: "message required" }, { status: 400 });
+  }
+
+  // Validate hostUrl is localhost-only to prevent SSRF
+  if (hostUrl && !isLocalHost(hostUrl)) {
+    return NextResponse.json({ error: "hostUrl must be localhost" }, { status: 400 });
   }
 
   const cards = clientCards ?? getCardsFromDb();
@@ -205,6 +225,7 @@ function parseToolActions(content: string): Array<{ name: string; args: Record<s
 
   while ((match = pattern.exec(content)) !== null) {
     const name = match[1];
+    if (!ALLOWED_TOOL_NAMES.has(name)) continue;
     const argsStr = match[2];
     try {
       const args = argsStr ? JSON.parse(`{${argsStr}}`) : {};

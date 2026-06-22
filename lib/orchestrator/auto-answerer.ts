@@ -55,9 +55,11 @@ export function shouldAutoAnswer(card: KanbanCard): boolean {
   if (!card.pendingInput) return false;
 
   const storedRisk = getCardRisk(card.id);
-  const cardRisk = storedRisk?.level ?? card.risk ?? "medium";
-  const maxRisk = config.orchestrator.autoAnswerInput.maxRisk;
+  // Conservative: unassessed cards are NOT auto-answered
+  const cardRisk = storedRisk?.level ?? card.risk;
+  if (!cardRisk) return false;
 
+  const maxRisk = config.orchestrator.autoAnswerInput.maxRisk;
   return RISK_ORDER[cardRisk] < RISK_ORDER[maxRisk];
 }
 
