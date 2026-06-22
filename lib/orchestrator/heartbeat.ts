@@ -4,7 +4,7 @@ import { getDb } from "@/lib/db/schema";
 import { KanbanCard, Phase, RiskLevel } from "@/lib/types";
 import { loadConfig } from "./skill-config";
 import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills } from "./review-executor";
-import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef } from "./gate-engine";
+import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard } from "./gate-engine";
 import { getCardRisk } from "./risk-store";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
 
@@ -19,6 +19,7 @@ export type HeartbeatAction =
   | { type: "review-passed"; cardId: string; skillId: string }
   | { type: "escalated"; cardId: string; reason: string }
   | { type: "stale-gate-invalidated"; cardId: string; gateType: string }
+  | { type: "wip-violation"; phase: Phase; count: number; limit: number }
   | { type: "auto-answered"; cardId: string; answer: string };
 
 export interface HeartbeatTickResult {
@@ -148,6 +149,21 @@ async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatT
     }
   }
 
+  // WIP violation detection (board-level, not per-card)
+  const wipLimits = config.wipLimits;
+  const phaseCount: Record<string, number> = {};
+  for (const card of activeCards) {
+    phaseCount[card.phase] = (phaseCount[card.phase] ?? 0) + 1;
+  }
+  for (const [phase, limit] of Object.entries(wipLimits)) {
+    const count = phaseCount[phase] ?? 0;
+    if (count > limit) {
+      const action: HeartbeatAction = { type: "wip-violation", phase: phase as Phase, count, limit };
+      emit(action);
+      actions.push(action);
+    }
+  }
+
   return { actions, errors };
 }
 
@@ -245,8 +261,22 @@ async function runBuildPipeline(
 
   if (deterministicPending.length > 0) {
     state.pipelineStage.set(card.id, "gates");
-    // Don't auto-run deterministic gates here — the gate-engine handles that
-    // We just track the pipeline stage for detection
+
+    // Detect stale gates that need re-triggering
+    const existingRuns = getGateRunsForCard(card.id);
+    for (const gate of deterministicPending) {
+      const staleRun = existingRuns.find(
+        (r) => r.gateType === gate.gateType && r.status === "passed" &&
+          changesetRef && r.changesetRef !== changesetRef
+      );
+      if (staleRun) {
+        // Re-trigger the gate with current changeset
+        startGateRun(card.id, "build", "review", gate.gateType, gate.gateName);
+        const action: HeartbeatAction = { type: "stale-gate-invalidated", cardId: card.id, gateType: gate.gateType };
+        emit(action);
+        actions.push(action);
+      }
+    }
     return actions;
   }
 

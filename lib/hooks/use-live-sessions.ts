@@ -195,6 +195,16 @@ function formatHeartbeatAction(action: HeartbeatActionData): { type: "interventi
         type: "intervention",
         message: `Auto-answered pending input: "${(action as HeartbeatActionData & { answer?: string }).answer?.slice(0, 80) ?? ""}"`,
       };
+    case "stale-gate-invalidated":
+      return {
+        type: "intervention",
+        message: `Re-triggered stale ${action.gateType} gate (code changed since last run).`,
+      };
+    case "wip-violation":
+      return {
+        type: "alert",
+        message: `WIP limit exceeded in ${(action as HeartbeatActionData & { phase?: string }).phase}: ${(action as HeartbeatActionData & { count?: number }).count}/${(action as HeartbeatActionData & { limit?: number }).limit} cards.`,
+      };
     default:
       return null;
   }
