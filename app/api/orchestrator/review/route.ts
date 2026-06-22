@@ -1,20 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import {
-  getSkillsForTransition,
-  type SkillType,
-} from "@/lib/orchestrator/skills";
+  startReview,
+  getReviewRunsForCard,
+} from "@/lib/orchestrator/review-executor";
+import {
+  loadConfig,
+  getApplicableSkills,
+} from "@/lib/orchestrator/skill-config";
+import type { RiskLevel } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
-  const { cardId, skillId, phaseTransition, riskLevel } = (await request.json()) as {
-    cardId?: string;
-    skillId?: SkillType;
-    phaseTransition?: string;
-    riskLevel?: "low" | "medium" | "high";
-  };
+  const { cardId, skillId, phaseTransition, riskLevel, hostUrl, sessionUri, changesetRef } =
+    (await request.json()) as {
+      cardId?: string;
+      skillId?: string;
+      phaseTransition?: string;
+      riskLevel?: RiskLevel;
+      hostUrl?: string;
+      sessionUri?: string;
+      changesetRef?: string;
+    };
 
   if (!cardId || !skillId) {
     return NextResponse.json(
@@ -23,45 +32,68 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const availableSkills =
-    phaseTransition && riskLevel
-      ? getSkillsForTransition(phaseTransition, riskLevel)
-      : null;
-
-  if (availableSkills && !availableSkills.some((skill) => skill.id === skillId)) {
+  if (!hostUrl || !sessionUri) {
     return NextResponse.json(
-      {
-        error: "skillId is not valid for the given transition and risk level",
-      },
+      { error: "hostUrl and sessionUri required to inject review" },
       { status: 400 }
     );
   }
 
-  const result = {
-    verdict: "not_implemented" as const,
-    findings: [
-      `Review skill "${skillId}" is not yet connected to a real analysis engine.`,
-      "This will be backed by LLM-powered code review in a future update.",
-    ],
-  };
+  const config = loadConfig();
+  const skill = config.skills[skillId];
+  if (!skill) {
+    return NextResponse.json(
+      { error: `Unknown skill: ${skillId}` },
+      { status: 400 }
+    );
+  }
+
+  const transition = phaseTransition ?? "review->ship";
+  const risk = riskLevel ?? "medium";
+
+  const { reviewRunId, success } = await startReview(
+    hostUrl,
+    sessionUri,
+    cardId,
+    skill,
+    transition,
+    risk,
+    changesetRef
+  );
+
+  if (!success) {
+    return NextResponse.json(
+      { error: "Failed to start review", reviewRunId },
+      { status: 502 }
+    );
+  }
 
   return NextResponse.json({
     cardId,
     skillId,
-    phaseTransition: phaseTransition ?? null,
-    riskLevel: riskLevel ?? null,
-    ...result,
-    completedAt: new Date().toISOString(),
+    reviewRunId,
+    phaseTransition: transition,
+    riskLevel: risk,
+    status: "injected",
+    startedAt: new Date().toISOString(),
   });
 }
 
 export async function GET(request: NextRequest) {
+  const cardId = request.nextUrl.searchParams.get("cardId");
   const phaseTransition =
     request.nextUrl.searchParams.get("transition") || "plan->build";
   const riskLevel = (request.nextUrl.searchParams.get("risk") ||
-    "medium") as "low" | "medium" | "high";
+    "medium") as RiskLevel;
 
-  const skills = getSkillsForTransition(phaseTransition, riskLevel);
+  // If cardId provided, return review runs for that card
+  if (cardId) {
+    const runs = getReviewRunsForCard(cardId);
+    return NextResponse.json({ runs });
+  }
+
+  // Otherwise return available skills for the transition + risk
+  const skills = getApplicableSkills(phaseTransition, riskLevel);
 
   return NextResponse.json({ skills, phaseTransition, riskLevel });
 }

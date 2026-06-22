@@ -1,16 +1,61 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { CopilotClient } from "@github/copilot-sdk";
+import type { CopilotSession } from "@github/copilot-sdk";
+
 import { getDb } from "@/lib/db/schema";
+import { buildSystemPrompt } from "@/lib/orchestrator/orchestrator-agent";
+import type { KanbanCard } from "@/lib/types";
 
-type PhaseCountRow = {
-  phase: string;
-  count: number;
-};
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-type StatusCountRow = {
-  status: string;
-  count: number;
-};
+// Module-level singleton for the orchestrator Copilot session
+let copilotClient: CopilotClient | null = null;
+let copilotSession: CopilotSession | null = null;
+let clientStarting: Promise<void> | null = null;
+
+async function ensureSession(): Promise<CopilotSession | null> {
+  if (copilotSession) return copilotSession;
+  if (clientStarting) {
+    await clientStarting;
+    return copilotSession;
+  }
+
+  clientStarting = (async () => {
+    try {
+      copilotClient = new CopilotClient();
+      await copilotClient.start();
+      copilotSession = await copilotClient.createSession({
+        model: "gpt-4.1",
+        systemMessage: {
+          content:
+            "You are the CTO agent for Planwerk — an autonomous SDLC orchestrator. You help manage AI agent sessions flowing through a kanban pipeline. Be concise and actionable.",
+        },
+      });
+    } catch (err) {
+      console.warn("[orchestrator-chat] Failed to start Copilot SDK:", err instanceof Error ? err.message : err);
+      copilotClient = null;
+      copilotSession = null;
+    } finally {
+      clientStarting = null;
+    }
+  })();
+
+  await clientStarting;
+  return copilotSession;
+}
+
+async function resetSession() {
+  if (copilotSession) {
+    await copilotSession.disconnect().catch(() => {});
+    copilotSession = null;
+  }
+  if (copilotClient) {
+    await copilotClient.stop().catch(() => {});
+    copilotClient = null;
+  }
+}
 
 type CardPhaseRow = {
   card_id: string;
@@ -18,178 +63,107 @@ type CardPhaseRow = {
   updated_at: string;
 };
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-function parseTimestamp(value: string): number {
-  return new Date(value.replace(" ", "T") + "Z").getTime();
-}
-
-function formatAge(updatedAt: string): string {
-  const ageMs = Math.max(0, Date.now() - parseTimestamp(updatedAt));
-  const ageMinutes = Math.floor(ageMs / 60000);
-
-  if (ageMinutes < 1) return "just now";
-  if (ageMinutes === 1) return "1 minute ago";
-  if (ageMinutes < 60) return `${ageMinutes} minutes ago`;
-
-  const ageHours = Math.floor(ageMinutes / 60);
-  if (ageHours === 1) return "1 hour ago";
-  if (ageHours < 24) return `${ageHours} hours ago`;
-
-  const ageDays = Math.floor(ageHours / 24);
-  return ageDays === 1 ? "1 day ago" : `${ageDays} days ago`;
-}
-
-function buildSelectedCardSummary(card?: CardPhaseRow): string {
-  if (!card) return "";
-  return ` Selected card ${card.card_id} is in ${card.phase} and last changed ${formatAge(card.updated_at)}.`;
-}
-
-function generateResponse(
-  message: string,
-  selectedCard?: CardPhaseRow,
-): { response: string; action?: string } {
+function getCardsFromDb(): KanbanCard[] {
   const db = getDb();
-  const lower = message.toLowerCase();
-  const phaseRows = db
-    .prepare("SELECT phase, COUNT(*) as count FROM card_phases GROUP BY phase")
-    .all() as PhaseCountRow[];
-  const runningRows = db
-    .prepare(
-      "SELECT status, COUNT(*) as count FROM gate_runs WHERE status = 'running' GROUP BY status",
-    )
-    .all() as StatusCountRow[];
-  const phaseMap = Object.fromEntries(
-    phaseRows.map((row) => [row.phase, Number(row.count)]),
-  ) as Record<string, number>;
-  const runningCount = runningRows[0]?.count ?? 0;
-  const selectedCardSummary = buildSelectedCardSummary(selectedCard);
+  const rows = db
+    .prepare("SELECT card_id, phase, updated_at FROM card_phases")
+    .all() as CardPhaseRow[];
 
-  if (
-    lower.includes("create") ||
-    lower.includes("new") ||
-    lower.includes("start")
-  ) {
-    return {
-      response:
-        "I'll create a new task. What should it be called? Or paste a GitHub issue URL and I'll extract the details.",
-      action: "prompt_create",
-    };
-  }
-
-  if (lower.includes("override") || lower.includes("skip")) {
-    return {
-      response:
-        "Got it. I'll mark the review gate as manually approved. Note: this bypasses the adversarial review — the card will move to the next phase without AI validation.",
-      action: "override",
-    };
-  }
-
-  if (lower.includes("pause") || lower.includes("stop")) {
-    const activeCards = db
-      .prepare("SELECT COUNT(*) as count FROM card_phases WHERE phase != 'ship'")
-      .get() as { count: number };
-
-    return {
-      response: `Pausing active sessions. ${activeCards.count} cards are currently in progress outside ship, and ${runningCount} gate runs are active.${selectedCardSummary}`,
-      action: "pause",
-    };
-  }
-
-  if (
-    lower.includes("status") ||
-    lower.includes("board") ||
-    lower.includes("how")
-  ) {
-    return {
-      response: `Board: ${phaseMap.define || 0} defining, ${phaseMap.plan || 0} planning, ${phaseMap.build || 0} building, ${phaseMap.review || 0} in review, ${phaseMap.ship || 0} shipped. ${runningCount} gate runs active.${selectedCardSummary}`,
-      action: "status",
-    };
-  }
-
-  if (lower.includes("stuck") || lower.includes("why")) {
-    if (selectedCard) {
-      return {
-        response: `${selectedCard.card_id} is in ${selectedCard.phase} and has been idle since ${selectedCard.updated_at} (${formatAge(selectedCard.updated_at)}). There are ${runningCount} running gate checks right now.`,
-        action: "diagnose",
-      };
-    }
-
-    const oldestIdle = db
-      .prepare(
-        "SELECT * FROM card_phases ORDER BY updated_at ASC LIMIT 3",
-      )
-      .all() as CardPhaseRow[];
-
-    if (oldestIdle.length === 0) {
-      return {
-        response: "Nothing looks stuck yet — there are no tracked cards on the board.",
-        action: "diagnose",
-      };
-    }
-
-    const summary = oldestIdle
-      .map(
-        (card) =>
-          `${card.card_id} in ${card.phase} (last update ${formatAge(card.updated_at)})`,
-      )
-      .join("; ");
-
-    return {
-      response: `Oldest idle cards: ${summary}. ${runningCount} gate runs are currently active.`,
-      action: "diagnose",
-    };
-  }
-
-  if (lower.includes("next") || lower.includes("what should")) {
-    const nextCards = db
-      .prepare(
-        "SELECT * FROM card_phases WHERE phase = 'define' ORDER BY updated_at ASC LIMIT 3",
-      )
-      .all() as CardPhaseRow[];
-
-    if (nextCards.length === 0) {
-      return {
-        response: `There are no cards waiting in define right now. ${phaseMap.plan || 0} cards are already in planning and ${phaseMap.build || 0} are in build.${selectedCardSummary}`,
-        action: "suggest",
-      };
-    }
-
-    const [firstCard] = nextCards;
-    const backlog = nextCards
-      .map((card) => `${card.card_id} (${formatAge(card.updated_at)})`)
-      .join(", ");
-
-    return {
-      response: `Next up, I would move ${firstCard.card_id} out of define. Define candidates waiting longest: ${backlog}. ${runningCount} gate runs are active.${selectedCardSummary}`,
-      action: "suggest",
-    };
-  }
-
-  return {
-    response: `Board summary: ${phaseMap.define || 0} defining, ${phaseMap.plan || 0} planning, ${phaseMap.build || 0} building, ${phaseMap.review || 0} in review, ${phaseMap.ship || 0} shipped. ${runningCount} gate runs active.${selectedCardSummary}`,
-  };
+  return rows.map((row) => ({
+    id: row.card_id,
+    title: row.card_id,
+    phase: row.phase as KanbanCard["phase"],
+    runtime: "idle" as const,
+    gateStatus: "pending" as const,
+    attention: "none" as const,
+    risk: "low" as const,
+    activity: "",
+    additions: 0,
+    deletions: 0,
+    filesChanged: 0,
+    planSteps: { total: 0, done: 0 },
+    modifiedAt: new Date(row.updated_at).getTime(),
+  }));
 }
 
 export async function POST(request: NextRequest) {
-  const { message, selectedCardId } = (await request.json()) as {
+  const { message, selectedCardId, cards: clientCards } = (await request.json()) as {
     message?: string;
     selectedCardId?: string;
+    cards?: KanbanCard[];
   };
 
   if (!message) {
     return NextResponse.json({ error: "message required" }, { status: 400 });
   }
 
-  const db = getDb();
+  // Use client-provided cards (full state) or fall back to DB-only cards
+  const cards = clientCards ?? getCardsFromDb();
   const selectedCard = selectedCardId
-    ? ((db
-        .prepare("SELECT * FROM card_phases WHERE card_id = ?")
-        .get(selectedCardId) as CardPhaseRow | undefined) ?? undefined)
+    ? cards.find((c) => c.id === selectedCardId)
     : undefined;
 
-  const { response, action } = generateResponse(message, selectedCard);
+  // Build contextual prompt — separate system context from user input
+  const systemContext = buildSystemPrompt(cards, selectedCard);
+  // Board context goes as structured data; user message is clearly delimited
+  const fullPrompt = `<board_context>\n${systemContext}\n</board_context>\n\n<user_message>\n${message}\n</user_message>`;
 
-  return NextResponse.json({ response, action });
+  // Try LLM-powered response via Copilot SDK
+  const session = await ensureSession();
+  if (session) {
+    try {
+      const response = await session.sendAndWait(
+        { prompt: fullPrompt },
+        30_000
+      );
+
+      const content = response?.data?.content;
+      if (content) {
+        return NextResponse.json({ response: content, source: "copilot" });
+      }
+    } catch (err) {
+      console.warn("[orchestrator-chat] Copilot SDK error:", err instanceof Error ? err.message : err);
+      await resetSession();
+    }
+  }
+
+  // Fallback: use the existing keyword-based response
+  const fallbackResponse = generateFallback(message, cards, selectedCard);
+  return NextResponse.json({ response: fallbackResponse, source: "fallback" });
+}
+
+function generateFallback(
+  message: string,
+  cards: KanbanCard[],
+  selectedCard?: KanbanCard
+): string {
+  const lower = message.toLowerCase();
+  const phases = { define: 0, plan: 0, build: 0, review: 0, ship: 0 };
+  for (const card of cards) {
+    if (card.phase in phases) {
+      phases[card.phase as keyof typeof phases]++;
+    }
+  }
+
+  const summary = `Board: ${phases.define} defining, ${phases.plan} planning, ${phases.build} building, ${phases.review} in review, ${phases.ship} shipped.`;
+
+  if (lower.includes("status") || lower.includes("board") || lower.includes("how")) {
+    return summary + (selectedCard ? ` Selected: ${selectedCard.title} in ${selectedCard.phase}.` : "");
+  }
+
+  if (lower.includes("stuck") || lower.includes("why")) {
+    return selectedCard
+      ? `${selectedCard.title} is in ${selectedCard.phase} (${selectedCard.runtime}). Check if it needs input or has a gate failure.`
+      : `${summary} Use "stuck" with a selected card for details.`;
+  }
+
+  if (lower.includes("next") || lower.includes("what should")) {
+    const attentionCards = cards.filter((c) => c.attention !== "none" || c.runtime === "input-needed");
+    if (attentionCards.length > 0) {
+      return `Priority: ${attentionCards[0].title} needs attention (${attentionCards[0].attention || attentionCards[0].runtime}).`;
+    }
+    return `${summary} No cards need immediate attention.`;
+  }
+
+  return summary;
 }

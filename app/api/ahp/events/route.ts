@@ -10,6 +10,7 @@ import { getCachedSessions } from "@/lib/db/session-cache";
 import { triageCard } from "@/lib/orchestrator/triage";
 import { getPersistedCardPhase } from "@/lib/orchestrator/gate-engine";
 import { getCardRisk } from "@/lib/orchestrator/risk-store";
+import { startHeartbeat, stopHeartbeat, isHeartbeatRunning, type HeartbeatAction } from "@/lib/orchestrator/heartbeat";
 import { KanbanCard, type Phase, type RiskLevel } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -19,6 +20,7 @@ type CardStreamEvent =
   | { type: "init"; cards: KanbanCard[] }
   | { type: "cardChanged"; card: KanbanCard; triage?: TriageEvent }
   | { type: "cardRemoved"; cardId: string }
+  | { type: "heartbeat"; action: HeartbeatAction }
   | ConnectionError;
 
 interface TriageEvent {
@@ -146,12 +148,34 @@ function createEmptyStream(): ReadableStream<Uint8Array> {
   });
 }
 
+// Module-level card state for heartbeat access
+let currentCards: KanbanCard[] = [];
+let activeStreamCount = 0;
+
 function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const abortController = new AbortController();
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
+      activeStreamCount++;
+
+      // Start heartbeat if this is the first active stream
+      if (!isHeartbeatRunning()) {
+        startHeartbeat(
+          hostUrl,
+          () => currentCards,
+          (action) => {
+            try {
+              const event: CardStreamEvent = { type: "heartbeat", action };
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+            } catch {
+              // Stream may already be closed
+            }
+          }
+        );
+      }
+
       try {
         let streamWrites = Promise.resolve();
 
@@ -160,6 +184,7 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
           const cached = getCachedSessions(hostUrl);
           if (cached.length > 0) {
             const cards = cached.map((c) => safeEnrich(c.summary, c.enrichment));
+            currentCards = cards;
             const cacheEvent: CardStreamEvent = { type: "init", cards };
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(cacheEvent)}\n\n`));
           }
@@ -174,6 +199,17 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
             streamWrites = streamWrites
               .then(async () => {
                 const projected = await projectRemoteEvent(event);
+                // Track card state for heartbeat (immutable updates)
+                if (projected.type === "init") {
+                  currentCards = projected.cards;
+                } else if (projected.type === "cardChanged") {
+                  currentCards = [
+                    ...currentCards.filter((c) => c.id !== projected.card.id),
+                    projected.card,
+                  ];
+                } else if (projected.type === "cardRemoved") {
+                  currentCards = currentCards.filter((c) => c.id !== projected.cardId);
+                }
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify(projected)}\n\n`));
               })
               .catch(() => {
@@ -194,6 +230,11 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
     },
     cancel() {
       abortController.abort();
+      activeStreamCount--;
+      if (activeStreamCount <= 0) {
+        activeStreamCount = 0;
+        stopHeartbeat();
+      }
     },
   });
 }

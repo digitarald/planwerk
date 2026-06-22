@@ -1,0 +1,342 @@
+import "server-only";
+
+import { getDb } from "@/lib/db/schema";
+import { injectMessage, fetchLastTurns } from "@/lib/ahp/session-messenger";
+import {
+  loadConfig,
+  getApplicableSkills,
+  getEffectiveMaxIterations,
+  shouldFollowEdits,
+  type SkillConfig,
+} from "./skill-config";
+import { extractVerdict, type ReviewVerdict } from "./verdict-extractor";
+import {
+  startGateRun,
+  completeGateRun,
+} from "./gate-engine";
+import type { Phase, RiskLevel } from "@/lib/types";
+
+export type ReviewRunStatus =
+  | "pending"
+  | "injected"
+  | "extracting"
+  | "passed"
+  | "failed"
+  | "escalated";
+
+export interface ReviewRun {
+  id: number;
+  cardId: string;
+  skillId: string;
+  phaseTransition: string;
+  status: ReviewRunStatus;
+  iteration: number;
+  maxIterations: number;
+  promptInjectedAt: string | null;
+  verdictExtractedAt: string | null;
+  verdictSummary: string | null;
+  findingsJson: string | null;
+  gateRunId: number | null;
+  changesetRef: string | null;
+}
+
+interface ReviewRunRow {
+  id: number;
+  card_id: string;
+  skill_id: string;
+  phase_transition: string;
+  status: string;
+  iteration: number;
+  max_iterations: number;
+  prompt_injected_at: string | null;
+  verdict_extracted_at: string | null;
+  verdict_summary: string | null;
+  findings_json: string | null;
+  gate_run_id: number | null;
+  changeset_ref: string | null;
+}
+
+function mapRow(row: ReviewRunRow): ReviewRun {
+  return {
+    id: row.id,
+    cardId: row.card_id,
+    skillId: row.skill_id,
+    phaseTransition: row.phase_transition,
+    status: row.status as ReviewRunStatus,
+    iteration: row.iteration,
+    maxIterations: row.max_iterations,
+    promptInjectedAt: row.prompt_injected_at,
+    verdictExtractedAt: row.verdict_extracted_at,
+    verdictSummary: row.verdict_summary,
+    findingsJson: row.findings_json,
+    gateRunId: row.gate_run_id,
+    changesetRef: row.changeset_ref,
+  };
+}
+
+/**
+ * Get active review runs for a card (not in terminal state).
+ */
+export function getActiveReviewRuns(cardId: string): ReviewRun[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      "SELECT * FROM review_runs WHERE card_id = ? AND status NOT IN ('passed', 'escalated') ORDER BY id DESC"
+    )
+    .all(cardId) as ReviewRunRow[];
+  return rows.map(mapRow);
+}
+
+/**
+ * Get all review runs for a card (including completed).
+ */
+export function getReviewRunsForCard(cardId: string): ReviewRun[] {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT * FROM review_runs WHERE card_id = ? ORDER BY id DESC")
+    .all(cardId) as ReviewRunRow[];
+  return rows.map(mapRow);
+}
+
+/**
+ * Check if a card has all required review gates passing for a transition.
+ */
+export function hasPassingReviews(
+  cardId: string,
+  phaseTransition: string,
+  riskLevel: RiskLevel
+): boolean {
+  const skills = getApplicableSkills(phaseTransition, riskLevel);
+  if (skills.length === 0) return true;
+
+  const db = getDb();
+  // Only consider required skills from gate config
+  const config = loadConfig();
+  const key = phaseTransition.replace("->", "-to-");
+  const gateConfig = config.gates[key] ?? config.gates[phaseTransition];
+  if (!gateConfig) return true;
+
+  const requiredSkillIds = gateConfig.required
+    .filter((ref): ref is { type: "review"; skill: string } => ref.type === "review")
+    .map((ref) => ref.skill);
+
+  for (const skillId of requiredSkillIds) {
+    const passingRun = db
+      .prepare(
+        "SELECT id FROM review_runs WHERE card_id = ? AND skill_id = ? AND phase_transition = ? AND status = 'passed' ORDER BY id DESC LIMIT 1"
+      )
+      .get(cardId, skillId, phaseTransition) as { id: number } | undefined;
+
+    if (!passingRun) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Start a review skill execution for a card.
+ * Creates a review_run record and injects the review prompt into the AHP session.
+ */
+export async function startReview(
+  hostUrl: string,
+  sessionUri: string,
+  cardId: string,
+  skill: SkillConfig,
+  phaseTransition: string,
+  riskLevel: RiskLevel,
+  changesetRef?: string
+): Promise<{ reviewRunId: number; success: boolean }> {
+  const db = getDb();
+  const maxIterations = getEffectiveMaxIterations(skill.id, riskLevel);
+
+  // Check for existing active run for this skill
+  const existing = db
+    .prepare(
+      "SELECT id, iteration FROM review_runs WHERE card_id = ? AND skill_id = ? AND status NOT IN ('passed', 'escalated') ORDER BY id DESC LIMIT 1"
+    )
+    .get(cardId, skill.id) as { id: number; iteration: number } | undefined;
+
+  let reviewRunId: number;
+  let iteration: number;
+
+  if (existing) {
+    // Re-inject for existing run (next iteration)
+    reviewRunId = existing.id;
+    iteration = existing.iteration + 1;
+
+    if (iteration > maxIterations) {
+      // Escalate — too many iterations
+      db.prepare(
+        "UPDATE review_runs SET status = 'escalated', verdict_summary = 'Max iterations reached' WHERE id = ?"
+      ).run(reviewRunId);
+      return { reviewRunId, success: false };
+    }
+
+    db.prepare(
+      "UPDATE review_runs SET status = 'injected', iteration = ?, prompt_injected_at = datetime('now'), changeset_ref = ? WHERE id = ?"
+    ).run(iteration, changesetRef ?? null, reviewRunId);
+  } else {
+    // Create new review run
+    const result = db
+      .prepare(
+        `INSERT INTO review_runs (card_id, skill_id, phase_transition, status, iteration, max_iterations, changeset_ref)
+         VALUES (?, ?, ?, 'pending', 1, ?, ?)`
+      )
+      .run(cardId, skill.id, phaseTransition, maxIterations, changesetRef ?? null);
+    reviewRunId = Number(result.lastInsertRowid);
+    iteration = 1;
+  }
+
+  // Also create a corresponding gate_run record for gate-engine integration
+  const [fromPhase, toPhase] = phaseTransition.split("->") as [Phase, Phase];
+  const gateRunId = startGateRun(cardId, fromPhase, toPhase, "review", skill.id, changesetRef);
+  db.prepare("UPDATE review_runs SET gate_run_id = ? WHERE id = ?").run(gateRunId, reviewRunId);
+
+  // Inject the review prompt into the session
+  const prompt = buildReviewPrompt(skill, iteration, maxIterations);
+  const { success } = await injectMessage(hostUrl, sessionUri, prompt);
+
+  if (success) {
+    db.prepare(
+      "UPDATE review_runs SET status = 'injected', prompt_injected_at = datetime('now') WHERE id = ?"
+    ).run(reviewRunId);
+  } else {
+    db.prepare("UPDATE review_runs SET status = 'failed', verdict_summary = 'Failed to inject prompt' WHERE id = ?").run(reviewRunId);
+    completeGateRun(gateRunId, "failed", "Failed to inject review prompt into session");
+  }
+
+  return { reviewRunId, success };
+}
+
+/**
+ * Process a review after the session goes idle.
+ * Extracts the verdict and decides whether to pass, re-iterate, or escalate.
+ */
+export async function processReviewResult(
+  hostUrl: string,
+  sessionUri: string,
+  reviewRunId: number,
+  currentChangesetRef?: string
+): Promise<ReviewVerdict & { action: "passed" | "re-iterate" | "escalated" }> {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT * FROM review_runs WHERE id = ?")
+    .get(reviewRunId) as ReviewRunRow | undefined;
+
+  if (!row) {
+    return {
+      status: "needs-human",
+      summary: "Review run not found",
+      findings: [],
+      madeEdits: false,
+      action: "escalated",
+    };
+  }
+
+  const run = mapRow(row);
+
+  // Mark as extracting
+  db.prepare("UPDATE review_runs SET status = 'extracting' WHERE id = ?").run(reviewRunId);
+
+  // Fetch recent turns to extract verdict
+  const { turns } = await fetchLastTurns(hostUrl, sessionUri, 5);
+  const verdict = extractVerdict(turns);
+
+  // Store verdict
+  db.prepare(
+    `UPDATE review_runs SET
+      verdict_extracted_at = datetime('now'),
+      verdict_summary = ?,
+      findings_json = ?,
+      changeset_ref = ?
+    WHERE id = ?`
+  ).run(
+    verdict.summary,
+    JSON.stringify(verdict.findings),
+    currentChangesetRef ?? null,
+    reviewRunId
+  );
+
+  // Decide action based on verdict
+  if (verdict.status === "passed") {
+    db.prepare("UPDATE review_runs SET status = 'passed' WHERE id = ?").run(reviewRunId);
+    if (run.gateRunId) {
+      completeGateRun(run.gateRunId, "passed", verdict.summary);
+    }
+    return { ...verdict, action: "passed" };
+  }
+
+  if (verdict.status === "needs-human") {
+    db.prepare("UPDATE review_runs SET status = 'escalated' WHERE id = ?").run(reviewRunId);
+    if (run.gateRunId) {
+      completeGateRun(run.gateRunId, "failed", "Escalated to human: " + verdict.summary);
+    }
+    return { ...verdict, action: "escalated" };
+  }
+
+  // Failed — check if we should re-iterate
+  const config = loadConfig();
+  const riskLevel = guessRiskFromPhaseTransition(run.cardId);
+  const maxIter = getEffectiveMaxIterations(run.skillId, riskLevel, config);
+  const followEdits = shouldFollowEdits(riskLevel, config);
+
+  if (run.iteration < maxIter) {
+    // If edits were made but we don't follow edits at this risk level, still pass
+    if (verdict.madeEdits && !followEdits) {
+      db.prepare("UPDATE review_runs SET status = 'passed' WHERE id = ?").run(reviewRunId);
+      if (run.gateRunId) {
+        completeGateRun(run.gateRunId, "passed", "Fixes applied; re-review not required at this risk level.");
+      }
+      return { ...verdict, status: "passed", action: "passed" };
+    }
+
+    // Mark as failed (will be re-iterated by heartbeat)
+    db.prepare("UPDATE review_runs SET status = 'failed' WHERE id = ?").run(reviewRunId);
+    if (run.gateRunId) {
+      completeGateRun(run.gateRunId, "failed", verdict.summary);
+    }
+    return { ...verdict, action: "re-iterate" };
+  }
+
+  // Max iterations reached — escalate
+  db.prepare("UPDATE review_runs SET status = 'escalated', verdict_summary = ? WHERE id = ?").run(
+    `Max iterations (${maxIter}) reached: ${verdict.summary}`,
+    reviewRunId
+  );
+  if (run.gateRunId) {
+    completeGateRun(run.gateRunId, "failed", `Escalated after ${maxIter} iterations: ${verdict.summary}`);
+  }
+  return { ...verdict, action: "escalated" };
+}
+
+/**
+ * Get all skills that should be triggered for a card at a phase transition.
+ */
+export function getRequiredReviewSkills(
+  phaseTransition: string,
+  riskLevel: RiskLevel
+): SkillConfig[] {
+  return getApplicableSkills(phaseTransition, riskLevel);
+}
+
+function buildReviewPrompt(skill: SkillConfig, iteration: number, maxIterations: number): string {
+  let prompt = skill.prompt;
+
+  if (iteration > 1) {
+    prompt += `\n\nThis is iteration ${iteration}/${maxIterations} of the review. Previous review found issues. Please re-review the changes and verify the fixes are adequate. Focus on whether previously identified issues were resolved and whether new issues were introduced.`;
+  }
+
+  if (!skill.autoFix) {
+    prompt += "\n\nReport findings only — do NOT make any code changes.";
+  }
+
+  return prompt;
+}
+
+function guessRiskFromPhaseTransition(cardId: string): RiskLevel {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT risk_level FROM card_risk WHERE card_id = ?")
+    .get(cardId) as { risk_level: string } | undefined;
+  return (row?.risk_level as RiskLevel) ?? "medium";
+}

@@ -66,6 +66,37 @@ export function getDb(): Database.Database {
       CREATE INDEX IF NOT EXISTS idx_gate_runs_card ON gate_runs(card_id);
       CREATE INDEX IF NOT EXISTS idx_gate_runs_status ON gate_runs(status);
       CREATE INDEX IF NOT EXISTS idx_session_cache_host ON session_cache(host_url);
+
+      CREATE TABLE IF NOT EXISTS review_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        card_id TEXT NOT NULL,
+        skill_id TEXT NOT NULL,
+        phase_transition TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        iteration INTEGER NOT NULL DEFAULT 1,
+        max_iterations INTEGER NOT NULL DEFAULT 2,
+        prompt_injected_at TEXT,
+        verdict_extracted_at TEXT,
+        verdict_summary TEXT,
+        findings_json TEXT,
+        gate_run_id INTEGER,
+        changeset_ref TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_review_runs_card ON review_runs(card_id);
+      CREATE INDEX IF NOT EXISTS idx_review_runs_status ON review_runs(status);
+
+      CREATE TABLE IF NOT EXISTS heartbeat_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        detection TEXT NOT NULL,
+        card_id TEXT,
+        action_taken TEXT NOT NULL,
+        detail TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_heartbeat_log_card ON heartbeat_log(card_id);
     `);
 
     // Mark any gate runs left running from a previous process as failed
