@@ -6,6 +6,7 @@ import { loadConfig } from "./skill-config";
 import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills } from "./review-executor";
 import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef } from "./gate-engine";
 import { getCardRisk } from "./risk-store";
+import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
 
 /**
  * Heartbeat action types emitted to the orchestrator feed.
@@ -17,7 +18,8 @@ export type HeartbeatAction =
   | { type: "nudge-sent"; cardId: string; message: string }
   | { type: "review-passed"; cardId: string; skillId: string }
   | { type: "escalated"; cardId: string; reason: string }
-  | { type: "stale-gate-invalidated"; cardId: string; gateType: string };
+  | { type: "stale-gate-invalidated"; cardId: string; gateType: string }
+  | { type: "auto-answered"; cardId: string; answer: string };
 
 export interface HeartbeatTickResult {
   actions: HeartbeatAction[];
@@ -160,12 +162,13 @@ async function processCard(
 
   // Only process idle cards — running cards are doing work
   if (card.runtime !== "idle") {
-    // Check for stale input-needed cards
-    if (card.runtime === "input-needed" && config.orchestrator.autoAnswerInput.enabled) {
-      const maxRisk = config.orchestrator.autoAnswerInput.maxRisk;
-      if (riskIsBelow(riskLevel, maxRisk)) {
-        // Auto-answer could be triggered here; for now just detect
-        // Full auto-answer requires LLM call — implemented separately
+    // Auto-answer input-needed cards below risk threshold
+    if (card.runtime === "input-needed" && shouldAutoAnswer(card)) {
+      const result = await autoAnswer(hostUrl, card);
+      if (result.answered) {
+        const action: HeartbeatAction = { type: "auto-answered", cardId: card.id, answer: result.answer ?? "" };
+        emit(action);
+        actions.push(action);
       }
     }
     return actions;
@@ -463,8 +466,4 @@ function buildNudgeMessage(card: KanbanCard, nudgesSent: number): string {
   return `This session has been idle for an extended period. Please respond with your current status.`;
 }
 
-function riskIsBelow(actual: RiskLevel, threshold: RiskLevel): boolean {
-  const order: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2 };
-  return order[actual] < order[threshold];
-}
 

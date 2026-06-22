@@ -8,7 +8,9 @@ export type FeedItemType =
   | "suggestion"
   | "triage"
   | "user"
-  | "response";
+  | "response"
+  | "heartbeat"
+  | "tool-action";
 
 export interface FeedItem {
   id: string;
@@ -17,6 +19,8 @@ export interface FeedItem {
   timestamp: number;
   cardId?: string;
   cardTitle?: string;
+  isStreaming?: boolean;
+  toolName?: string;
 }
 
 interface OrchestratorState {
@@ -24,9 +28,11 @@ interface OrchestratorState {
   isProcessing: boolean;
   hasConnectedOnce: boolean;
   addFeedItem: (item: Omit<FeedItem, "id" | "timestamp">) => void;
+  /** Update the most recent response item (for streaming) */
+  updateLastResponse: (message: string, done?: boolean) => void;
   /** Coalesce repeated transition messages (e.g. "Connected") into one item */
   upsertTransition: (message: string) => void;
-  sendMessage: (message: string) => Promise<void>;
+  sendMessage: (message: string, hostUrl?: string, cards?: unknown[]) => Promise<void>;
   clearFeed: () => void;
 }
 
@@ -47,6 +53,22 @@ export const useOrchestratorStore = create<OrchestratorState>()(
             ...state.feedItems,
           ],
         }));
+      },
+
+      updateLastResponse: (message: string, done = false) => {
+        set((state) => {
+          const idx = state.feedItems.findIndex(
+            (f) => f.type === "response" && f.isStreaming
+          );
+          if (idx === -1) return state;
+          const updated = [...state.feedItems];
+          updated[idx] = {
+            ...updated[idx],
+            message,
+            isStreaming: !done,
+          };
+          return { feedItems: updated };
+        });
       },
 
       upsertTransition: (message: string) => {
@@ -70,8 +92,8 @@ export const useOrchestratorStore = create<OrchestratorState>()(
         });
       },
 
-      sendMessage: async (message: string) => {
-        const { addFeedItem } = get();
+      sendMessage: async (message: string, hostUrl?: string, cards?: unknown[]) => {
+        const { addFeedItem, updateLastResponse } = get();
 
         addFeedItem({ type: "user", message });
         set({ isProcessing: true });
@@ -80,11 +102,64 @@ export const useOrchestratorStore = create<OrchestratorState>()(
           const response = await fetch("/api/orchestrator/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message }),
+            body: JSON.stringify({ message, hostUrl, cards }),
           });
 
-          const data = await response.json();
-          addFeedItem({ type: "response", message: data.response });
+          const contentType = response.headers.get("content-type") ?? "";
+
+          if (contentType.includes("text/event-stream")) {
+            // Streaming response — read SSE events
+            addFeedItem({ type: "response", message: "", isStreaming: true });
+
+            const reader = response.body?.getReader();
+            if (!reader) throw new Error("No response body");
+
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() ?? "";
+
+              for (const line of lines) {
+                if (!line.startsWith("data: ")) continue;
+                const jsonStr = line.slice(6);
+                try {
+                  const event = JSON.parse(jsonStr);
+                  if (event.type === "text") {
+                    updateLastResponse(event.content);
+                  } else if (event.type === "tool") {
+                    addFeedItem({
+                      type: "tool-action",
+                      message: event.result?.message ?? `Executed ${event.name}`,
+                      toolName: event.name,
+                    });
+                  } else if (event.type === "done") {
+                    updateLastResponse(
+                      get().feedItems.find((f) => f.isStreaming)?.message ?? "",
+                      true
+                    );
+                  }
+                } catch {
+                  // Skip malformed events
+                }
+              }
+            }
+
+            // Ensure streaming state is cleaned up
+            updateLastResponse(
+              get().feedItems.find((f) => f.isStreaming)?.message ?? "",
+              true
+            );
+          } else {
+            // Non-streaming JSON fallback
+            const data = await response.json();
+            addFeedItem({ type: "response", message: data.response });
+          }
         } catch {
           addFeedItem({
             type: "alert",
@@ -101,7 +176,9 @@ export const useOrchestratorStore = create<OrchestratorState>()(
       name: "planwerk-feed",
       storage: createJSONStorage(() => sessionStorage),
       partialize: (state) => ({
-        feedItems: state.feedItems.slice(0, 50),
+        feedItems: state.feedItems
+          .filter((f) => !f.isStreaming)
+          .slice(0, 50),
       }),
       onRehydrateStorage: () => (state) => {
         if (!state) return;

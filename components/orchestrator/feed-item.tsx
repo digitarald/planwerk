@@ -9,6 +9,8 @@ import {
   RefreshCw,
   Shield,
   User,
+  Wrench,
+  Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBoardStore } from "@/lib/store/board-store";
@@ -21,7 +23,9 @@ type FeedItemType =
   | "suggestion"
   | "triage"
   | "user"
-  | "response";
+  | "response"
+  | "heartbeat"
+  | "tool-action";
 
 interface FeedItemProps {
   id: string;
@@ -30,16 +34,20 @@ interface FeedItemProps {
   timestamp: number;
   cardId?: string;
   cardTitle?: string;
+  isStreaming?: boolean;
+  toolName?: string;
 }
 
 const typeConfig: Record<FeedItemType, { icon: typeof RefreshCw; color: string }> = {
-  intervention: { icon: RefreshCw, color: "text-primary" },
+  intervention: { icon: Zap, color: "text-primary" },
   alert: { icon: AlertTriangle, color: "text-amber-600" },
   transition: { icon: CheckCircle2, color: "text-emerald-600" },
   suggestion: { icon: Lightbulb, color: "text-violet-600" },
   triage: { icon: Shield, color: "text-blue-600" },
   user: { icon: User, color: "text-foreground" },
   response: { icon: Bot, color: "text-primary" },
+  heartbeat: { icon: RefreshCw, color: "text-muted-foreground" },
+  "tool-action": { icon: Wrench, color: "text-orange-600" },
 };
 
 function formatRelativeTime(timestamp: number): string {
@@ -123,7 +131,7 @@ function InlinePendingInput({ card }: { card: KanbanCard }) {
   );
 }
 
-export function FeedItem({ type, message, timestamp, cardId, cardTitle }: FeedItemProps) {
+export function FeedItem({ type, message, timestamp, cardId, cardTitle, isStreaming, toolName }: FeedItemProps) {
   const config = typeConfig[type];
   const Icon = config.icon;
   const card = useBoardStore((s) => (cardId ? s.getCard(cardId) : undefined));
@@ -135,6 +143,7 @@ export function FeedItem({ type, message, timestamp, cardId, cardTitle }: FeedIt
       className={cn(
         "flex gap-2 text-xs animate-in fade-in slide-in-from-top-2 duration-300",
         type === "user" && "bg-muted/50 -mx-3 px-3 py-1.5 rounded",
+        type === "tool-action" && "bg-orange-50/50 dark:bg-orange-950/20 -mx-3 px-3 py-1 rounded",
       )}
     >
       <div className={cn(
@@ -146,10 +155,17 @@ export function FeedItem({ type, message, timestamp, cardId, cardTitle }: FeedIt
         type === "triage" && "bg-blue-500/40",
         type === "user" && "bg-foreground/20",
         type === "response" && "bg-primary/40",
+        type === "heartbeat" && "bg-muted-foreground/20",
+        type === "tool-action" && "bg-orange-500/40",
       )} />
       <Icon className={cn("h-3.5 w-3.5 mt-0.5 shrink-0", config.color)} />
       <div className="flex-1 min-w-0">
         <span className="text-muted-foreground">{formatRelativeTime(timestamp)}</span>
+        {toolName && (
+          <span className="ml-1 text-[10px] font-mono text-orange-600 bg-orange-100 dark:bg-orange-900/30 px-1 rounded">
+            {toolName}
+          </span>
+        )}
 
         {cardId && cardTitle ? (
           <div className="mt-0.5">
@@ -157,7 +173,12 @@ export function FeedItem({ type, message, timestamp, cardId, cardTitle }: FeedIt
             <p className="text-muted-foreground leading-relaxed mt-0.5">{message}</p>
           </div>
         ) : (
-          <p className="text-foreground leading-relaxed mt-0.5">{message}</p>
+          <p className={cn(
+            "text-foreground leading-relaxed mt-0.5",
+            isStreaming && "after:content-['▊'] after:animate-pulse after:ml-0.5 after:text-primary"
+          )}>
+            {message || (isStreaming ? "Thinking..." : "")}
+          </p>
         )}
 
         {showInlineInput && card && <InlinePendingInput card={card} />}

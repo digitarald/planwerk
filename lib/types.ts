@@ -86,6 +86,17 @@ export interface KanbanCard {
   lastAgentMessage?: string;
   fileChanges?: FileChange[];
   isArchived?: boolean;
+  reviewFindings?: ReviewFinding[];
+}
+
+export interface ReviewFinding {
+  id: string;
+  skillId: string;
+  status: "passed" | "failed" | "escalated" | "in-progress";
+  iteration: number;
+  maxIterations: number;
+  summary?: string;
+  findings?: string[];
 }
 
 export interface Column {

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { KanbanCard } from "@/lib/types";
+import { KanbanCard, ReviewFinding } from "@/lib/types";
 import {
   deriveGateStatus,
   getNextPhase,
@@ -8,6 +8,7 @@ import {
   setCardPhase,
 } from "@/lib/orchestrator/gate-engine";
 import { getCardRisk } from "@/lib/orchestrator/risk-store";
+import { getReviewRunsForCard } from "@/lib/orchestrator/review-executor";
 
 import { mapSessionToCard } from "./map-session";
 import { AHPSessionSummary } from "./types";
@@ -33,6 +34,22 @@ export function enrichSessionToCard(
   const nextPhase = getNextPhase(card.phase);
   if (nextPhase) {
     card.gateStatus = deriveGateStatus(session.resource, card.phase, nextPhase, storedRisk?.level);
+  }
+
+  // Attach review findings from DB
+  const reviewRuns = getReviewRunsForCard(session.resource);
+  if (reviewRuns.length > 0) {
+    card.reviewFindings = reviewRuns.slice(0, 10).map((run): ReviewFinding => ({
+      id: String(run.id),
+      skillId: run.skillId,
+      status: run.status === "pending" || run.status === "injected" || run.status === "extracting"
+        ? "in-progress"
+        : run.status as "passed" | "failed" | "escalated",
+      iteration: run.iteration,
+      maxIterations: run.maxIterations,
+      summary: run.verdictSummary ?? undefined,
+      findings: run.findingsJson ? JSON.parse(run.findingsJson) : undefined,
+    }));
   }
 
   return card;

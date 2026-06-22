@@ -5,16 +5,20 @@ import { Loader2, Send } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
+import { useConnectionStore } from "@/lib/store/connection-store";
+import { useBoardStore } from "@/lib/store/board-store";
 
 export function ChatInput() {
   const [value, setValue] = useState("");
   const sendMessage = useOrchestratorStore((s) => s.sendMessage);
   const isProcessing = useOrchestratorStore((s) => s.isProcessing);
+  const hostUrl = useConnectionStore((s) => s.hostUrl);
+  const cards = useBoardStore((s) => s.cards);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!value.trim() || isProcessing) return;
-    void sendMessage(value.trim());
+    void sendMessage(value.trim(), hostUrl ?? undefined, cards);
     setValue("");
   };
 

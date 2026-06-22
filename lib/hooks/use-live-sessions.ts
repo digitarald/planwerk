@@ -103,6 +103,20 @@ export function useLiveSessions() {
           }
         } else if (data.type === "cardRemoved") {
           removeCard(data.cardId);
+        } else if (data.type === "heartbeat") {
+          // Heartbeat action from the autonomous loop
+          const action = data.action;
+          if (action) {
+            const feedMsg = formatHeartbeatAction(action);
+            if (feedMsg) {
+              addFeedItem({
+                type: feedMsg.type,
+                message: feedMsg.message,
+                cardId: action.cardId,
+                cardTitle: useBoardStore.getState().getCard(action.cardId)?.title,
+              });
+            }
+          }
         }
       } catch (e) {
         console.error("Failed to parse SSE event:", e);
@@ -130,4 +144,58 @@ export function useLiveSessions() {
       eventSourceRef.current = null;
     };
   }, [status, hostUrl, setCards, updateCard, addCard, removeCard, addFeedItem, upsertTransition, setConnected, setError]);
+}
+
+interface HeartbeatActionData {
+  type: string;
+  cardId?: string;
+  skillId?: string;
+  from?: string;
+  to?: string;
+  message?: string;
+  reason?: string;
+  gateType?: string;
+  iteration?: number;
+}
+
+function formatHeartbeatAction(action: HeartbeatActionData): { type: "intervention" | "suggestion" | "alert"; message: string } | null {
+  switch (action.type) {
+    case "review-injected":
+      return {
+        type: "intervention",
+        message: `Auto-triggered ${action.skillId} review${action.iteration && action.iteration > 1 ? ` (iteration ${action.iteration})` : ""}.`,
+      };
+    case "review-passed":
+      return {
+        type: "suggestion",
+        message: `${action.skillId} review passed ✓`,
+      };
+    case "phase-advanced":
+      return {
+        type: "intervention",
+        message: `Auto-advanced from ${action.from} → ${action.to}.`,
+      };
+    case "nudge-sent":
+      return {
+        type: "suggestion",
+        message: `Nudged idle session: "${action.message?.slice(0, 80)}"`,
+      };
+    case "escalated":
+      return {
+        type: "alert",
+        message: `Escalated: ${action.reason ?? "Review requires human attention."}`,
+      };
+    case "gate-triggered":
+      return {
+        type: "intervention",
+        message: `Triggered ${action.gateType} gate check.`,
+      };
+    case "auto-answered":
+      return {
+        type: "intervention",
+        message: `Auto-answered pending input: "${(action as HeartbeatActionData & { answer?: string }).answer?.slice(0, 80) ?? ""}"`,
+      };
+    default:
+      return null;
+  }
 }

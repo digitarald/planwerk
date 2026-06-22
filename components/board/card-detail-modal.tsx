@@ -421,6 +421,55 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 </section>
               )}
 
+              {/* Review Findings */}
+              {card.reviewFindings && card.reviewFindings.length > 0 && (
+                <section>
+                  <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                    Review Findings
+                  </h3>
+                  <div className="space-y-2">
+                    {card.reviewFindings.map((review) => (
+                      <div
+                        key={review.id}
+                        className={cn(
+                          "rounded-lg border p-3",
+                          review.status === "passed" && "border-emerald-200 bg-emerald-50/50 dark:border-emerald-800 dark:bg-emerald-950/20",
+                          review.status === "failed" && "border-red-200 bg-red-50/50 dark:border-red-800 dark:bg-red-950/20",
+                          review.status === "escalated" && "border-amber-200 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/20",
+                          review.status === "in-progress" && "border-blue-200 bg-blue-50/50 dark:border-blue-800 dark:bg-blue-950/20",
+                        )}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium">{review.skillId}</span>
+                          <span className={cn(
+                            "text-[10px] font-medium px-1.5 py-0.5 rounded",
+                            review.status === "passed" && "text-emerald-700 bg-emerald-100 dark:text-emerald-300 dark:bg-emerald-900/40",
+                            review.status === "failed" && "text-red-700 bg-red-100 dark:text-red-300 dark:bg-red-900/40",
+                            review.status === "escalated" && "text-amber-700 bg-amber-100 dark:text-amber-300 dark:bg-amber-900/40",
+                            review.status === "in-progress" && "text-blue-700 bg-blue-100 dark:text-blue-300 dark:bg-blue-900/40",
+                          )}>
+                            {review.status === "in-progress" ? `reviewing (${review.iteration}/${review.maxIterations})` : review.status}
+                          </span>
+                        </div>
+                        {review.summary && (
+                          <p className="mt-1 text-[11px] text-muted-foreground">{review.summary}</p>
+                        )}
+                        {review.findings && review.findings.length > 0 && (
+                          <ul className="mt-1.5 space-y-0.5">
+                            {review.findings.slice(0, 5).map((finding, i) => (
+                              <li key={i} className="text-[11px] text-muted-foreground flex gap-1">
+                                <span className="shrink-0">•</span>
+                                <span>{finding}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
               {/* Pending Input */}
               {card.pendingInput && (
                 <section>

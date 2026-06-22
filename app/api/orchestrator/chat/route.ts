@@ -5,6 +5,8 @@ import type { CopilotSession } from "@github/copilot-sdk";
 
 import { getDb } from "@/lib/db/schema";
 import { buildSystemPrompt } from "@/lib/orchestrator/orchestrator-agent";
+import { executeToolCall } from "@/lib/orchestrator/tool-executor";
+import type { OrchestratorToolName } from "@/lib/orchestrator/orchestrator-agent";
 import type { KanbanCard } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -86,50 +88,133 @@ function getCardsFromDb(): KanbanCard[] {
   }));
 }
 
+/**
+ * Chat endpoint — streams response via SSE for progressive rendering.
+ * Each SSE event is a JSON object with type: "text" | "tool" | "done" | "error"
+ */
 export async function POST(request: NextRequest) {
-  const { message, selectedCardId, cards: clientCards } = (await request.json()) as {
+  const { message, selectedCardId, cards: clientCards, hostUrl } = (await request.json()) as {
     message?: string;
     selectedCardId?: string;
     cards?: KanbanCard[];
+    hostUrl?: string;
   };
 
   if (!message) {
     return NextResponse.json({ error: "message required" }, { status: 400 });
   }
 
-  // Use client-provided cards (full state) or fall back to DB-only cards
   const cards = clientCards ?? getCardsFromDb();
   const selectedCard = selectedCardId
     ? cards.find((c) => c.id === selectedCardId)
     : undefined;
 
-  // Build contextual prompt — separate system context from user input
   const systemContext = buildSystemPrompt(cards, selectedCard);
-  // Board context goes as structured data; user message is clearly delimited
   const fullPrompt = `<board_context>\n${systemContext}\n</board_context>\n\n<user_message>\n${message}\n</user_message>`;
 
-  // Try LLM-powered response via Copilot SDK
+  // Try LLM-powered streaming response via Copilot SDK
   const session = await ensureSession();
   if (session) {
     try {
-      const response = await session.sendAndWait(
-        { prompt: fullPrompt },
-        30_000
-      );
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          function send(data: Record<string, unknown>) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+          }
 
-      const content = response?.data?.content;
-      if (content) {
-        return NextResponse.json({ response: content, source: "copilot" });
-      }
+          let fullResponse = "";
+
+          const unsubscribe = session!.on((event) => {
+            if (event.type === "assistant.message") {
+              const content = event.data?.content;
+              if (content) {
+                fullResponse = content;
+              }
+            }
+          });
+
+          try {
+            const response = await session!.sendAndWait(
+              { prompt: fullPrompt },
+              60_000
+            );
+
+            const content = response?.data?.content ?? fullResponse;
+
+            if (content) {
+              // Check if response contains tool-call patterns (action suggestions)
+              const toolActions = parseToolActions(content);
+              if (toolActions.length > 0 && hostUrl) {
+                // Execute tool calls server-side
+                for (const action of toolActions) {
+                  const result = await executeToolCall(
+                    action.name as OrchestratorToolName,
+                    action.args,
+                    { hostUrl, cards }
+                  );
+                  send({ type: "tool", name: action.name, result });
+                }
+              }
+
+              send({ type: "text", content });
+              send({ type: "done" });
+            } else {
+              send({ type: "text", content: generateFallback(message, cards, selectedCard) });
+              send({ type: "done", source: "fallback" });
+            }
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            console.warn("[orchestrator-chat] Copilot SDK error:", errMsg);
+            send({ type: "text", content: generateFallback(message, cards, selectedCard) });
+            send({ type: "done", source: "fallback" });
+            resetSession().catch(() => {});
+          } finally {
+            unsubscribe();
+            controller.close();
+          }
+        },
+      });
+
+      return new NextResponse(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+        },
+      });
     } catch (err) {
-      console.warn("[orchestrator-chat] Copilot SDK error:", err instanceof Error ? err.message : err);
+      console.warn("[orchestrator-chat] Stream setup error:", err instanceof Error ? err.message : err);
       await resetSession();
     }
   }
 
-  // Fallback: use the existing keyword-based response
+  // Non-streaming fallback
   const fallbackResponse = generateFallback(message, cards, selectedCard);
   return NextResponse.json({ response: fallbackResponse, source: "fallback" });
+}
+
+/**
+ * Parse tool call patterns from the LLM response text.
+ * The LLM may embed action markers like [ACTION: tool_name(args)]
+ */
+function parseToolActions(content: string): Array<{ name: string; args: Record<string, unknown> }> {
+  const actions: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const pattern = /\[ACTION:\s*(\w+)\(([^)]*)\)\]/g;
+  let match;
+
+  while ((match = pattern.exec(content)) !== null) {
+    const name = match[1];
+    const argsStr = match[2];
+    try {
+      const args = argsStr ? JSON.parse(`{${argsStr}}`) : {};
+      actions.push({ name, args });
+    } catch {
+      // Skip malformed action
+    }
+  }
+
+  return actions;
 }
 
 function generateFallback(
