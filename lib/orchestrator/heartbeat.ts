@@ -1,12 +1,15 @@
 import "server-only";
 
+import { exec } from "node:child_process";
+
 import { getDb } from "@/lib/db/schema";
 import { KanbanCard, Phase, RiskLevel } from "@/lib/types";
 import { loadConfig } from "./skill-config";
 import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills } from "./review-executor";
-import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard } from "./gate-engine";
+import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard, completeGateRun } from "./gate-engine";
 import { getCardRisk } from "./risk-store";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
+import { injectMessage } from "@/lib/ahp/session-messenger";
 
 /**
  * Heartbeat action types emitted to the orchestrator feed.
@@ -34,6 +37,7 @@ interface HeartbeatState {
   nudgeCount: Map<string, number>;
   gateRetryCount: Map<string, number>;
   pipelineStage: Map<string, "gates" | "review" | "advancing">;
+  lastWipViolations: Map<string, number>; // phase → count when last emitted
 }
 
 const state: HeartbeatState = {
@@ -43,6 +47,7 @@ const state: HeartbeatState = {
   nudgeCount: new Map(),
   gateRetryCount: new Map(),
   pipelineStage: new Map(),
+  lastWipViolations: new Map(),
 };
 
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -119,6 +124,16 @@ function logAction(action: HeartbeatAction): void {
 }
 
 /**
+ * Check if a phase has room under its WIP limit.
+ */
+function canEnterPhase(phase: Phase, cards: KanbanCard[], config: ReturnType<typeof loadConfig>): boolean {
+  const limit = config.wipLimits[phase];
+  if (!limit) return true;
+  const count = cards.filter((c) => c.phase === phase && !c.isArchived).length;
+  return count < limit;
+}
+
+/**
  * Core tick logic: scan cards and execute the build-phase pipeline.
  */
 async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatTickResult> {
@@ -132,7 +147,7 @@ async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatT
 
   for (const card of activeCards) {
     try {
-      const cardActions = await processCard(hostUrl, card, config);
+      const cardActions = await processCard(hostUrl, card, config, cards);
       actions.push(...cardActions);
     } catch (err) {
       errors.push(`${card.id}: ${err instanceof Error ? err.message : String(err)}`);
@@ -149,7 +164,7 @@ async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatT
     }
   }
 
-  // WIP violation detection (board-level, not per-card)
+  // WIP violation detection (board-level, only emit on state change)
   const wipLimits = config.wipLimits;
   const phaseCount: Record<string, number> = {};
   for (const card of activeCards) {
@@ -157,10 +172,14 @@ async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatT
   }
   for (const [phase, limit] of Object.entries(wipLimits)) {
     const count = phaseCount[phase] ?? 0;
-    if (count > limit) {
+    const lastCount = state.lastWipViolations.get(phase);
+    if (count > limit && lastCount !== count) {
+      state.lastWipViolations.set(phase, count);
       const action: HeartbeatAction = { type: "wip-violation", phase: phase as Phase, count, limit };
       emit(action);
       actions.push(action);
+    } else if (count <= limit) {
+      state.lastWipViolations.delete(phase);
     }
   }
 
@@ -170,7 +189,8 @@ async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatT
 async function processCard(
   hostUrl: string,
   card: KanbanCard,
-  config: ReturnType<typeof loadConfig>
+  config: ReturnType<typeof loadConfig>,
+  allCards: KanbanCard[]
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
   const storedRisk = getCardRisk(card.id);
@@ -195,19 +215,19 @@ async function processCard(
 
   // Build phase pipeline: deterministic gates → review skills → auto-advance
   if (phase === "build") {
-    const buildActions = await runBuildPipeline(hostUrl, card, riskLevel, changesetRef, config);
+    const buildActions = await runBuildPipeline(hostUrl, card, riskLevel, changesetRef, config, allCards);
     actions.push(...buildActions);
   }
 
   // Plan phase: check for plan review gates
   if (phase === "plan") {
-    const planActions = await runPlanPipeline(hostUrl, card, riskLevel, changesetRef);
+    const planActions = await runPlanPipeline(hostUrl, card, riskLevel, changesetRef, allCards);
     actions.push(...planActions);
   }
 
   // Review phase: check for review skills
   if (phase === "review") {
-    const reviewActions = await runReviewPipeline(hostUrl, card, riskLevel, changesetRef);
+    const reviewActions = await runReviewPipeline(hostUrl, card, riskLevel, changesetRef, allCards);
     actions.push(...reviewActions);
   }
 
@@ -237,7 +257,8 @@ async function runBuildPipeline(
   card: KanbanCard,
   riskLevel: RiskLevel,
   changesetRef: string,
-  config: ReturnType<typeof loadConfig>
+  config: ReturnType<typeof loadConfig>,
+  allCards: KanbanCard[]
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
   const transition = "build->review";
@@ -262,19 +283,44 @@ async function runBuildPipeline(
   if (deterministicPending.length > 0) {
     state.pipelineStage.set(card.id, "gates");
 
-    // Detect stale gates that need re-triggering
     const existingRuns = getGateRunsForCard(card.id);
     for (const gate of deterministicPending) {
+      // Check if a run already exists for this gate
+      const alreadyRunning = existingRuns.find(
+        (r) => r.gateType === gate.gateType && r.status === "running" &&
+          r.changesetRef === changesetRef
+      );
+      if (alreadyRunning) continue;
+
+      // Detect stale passed gates that need re-triggering
       const staleRun = existingRuns.find(
         (r) => r.gateType === gate.gateType && r.status === "passed" &&
           changesetRef && r.changesetRef !== changesetRef
       );
+
+      // Start (or re-start) the gate
+      const runId = startGateRun(card.id, "build", "review", gate.gateType, gate.gateName, changesetRef);
+
       if (staleRun) {
-        // Re-trigger the gate with current changeset
-        startGateRun(card.id, "build", "review", gate.gateType, gate.gateName);
         const action: HeartbeatAction = { type: "stale-gate-invalidated", cardId: card.id, gateType: gate.gateType };
         emit(action);
         actions.push(action);
+      } else {
+        const action: HeartbeatAction = { type: "gate-triggered", cardId: card.id, gateType: gate.gateType };
+        emit(action);
+        actions.push(action);
+      }
+
+      // Execute the gate command if available, otherwise nudge agent
+      if (gate.command && card.workingDirectory) {
+        executeGateCommand(runId, gate.command, card.workingDirectory);
+      } else if (gate.command) {
+        // No working directory — nudge agent to run the check
+        const nudge = `Please run: ${gate.command}`;
+        injectMessage(hostUrl, card.id, nudge).catch(() => {});
+      } else {
+        // No command (manual gate) — pass immediately
+        completeGateRun(runId, "passed", "No command configured");
       }
     }
     return actions;
@@ -362,9 +408,9 @@ async function runBuildPipeline(
 
   // Step 3: All gates pass (including reviews) → auto-advance
   if (gatesPassed && config.orchestrator.autoAdvancePhases) {
-    state.pipelineStage.set(card.id, "advancing");
     const nextPhase = getNextPhase("build");
-    if (nextPhase) {
+    if (nextPhase && canEnterPhase(nextPhase, allCards, config)) {
+      state.pipelineStage.set(card.id, "advancing");
       setCardPhase(card.id, nextPhase);
       const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "build", to: nextPhase };
       emit(action);
@@ -384,7 +430,8 @@ async function runPlanPipeline(
   hostUrl: string,
   card: KanbanCard,
   riskLevel: RiskLevel,
-  changesetRef: string
+  changesetRef: string,
+  allCards: KanbanCard[]
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
   const config = loadConfig();
@@ -402,7 +449,7 @@ async function runPlanPipeline(
   );
 
   if (allowed) {
-    if (config.orchestrator.autoAdvancePhases) {
+    if (config.orchestrator.autoAdvancePhases && canEnterPhase("build", allCards, config)) {
       setCardPhase(card.id, "build");
       const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "plan", to: "build" };
       emit(action);
@@ -426,20 +473,44 @@ async function runPlanPipeline(
           actions.push(action);
         }
       }
+    } else {
+      // Process active reviews (verdict extraction, re-iteration, escalation)
+      for (const review of activeReviews) {
+        if (review.status === "injected") {
+          const sessionUri = card.id;
+          const verdict = await processReviewResult(hostUrl, sessionUri, review.id, changesetRef);
+          if (verdict.action === "passed") {
+            emit({ type: "review-passed", cardId: card.id, skillId: review.skillId });
+            actions.push({ type: "review-passed", cardId: card.id, skillId: review.skillId });
+          } else if (verdict.action === "escalated") {
+            emit({ type: "escalated", cardId: card.id, reason: verdict.summary });
+            actions.push({ type: "escalated", cardId: card.id, reason: verdict.summary });
+          }
+        } else if (review.status === "failed") {
+          const skills = getRequiredReviewSkills(transition, riskLevel);
+          const skill = skills.find((s) => s.id === review.skillId);
+          if (skill) {
+            const sessionUri = card.id;
+            const { success } = await startReview(hostUrl, sessionUri, card.id, skill, transition, riskLevel, changesetRef);
+            if (success) {
+              const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: review.iteration + 1 };
+              emit(action);
+              actions.push(action);
+            }
+          }
+        }
+      }
     }
   }
 
   return actions;
 }
-
-/**
- * Review phase: check for review-to-ship gates.
- */
 async function runReviewPipeline(
   hostUrl: string,
   card: KanbanCard,
   riskLevel: RiskLevel,
-  changesetRef: string
+  changesetRef: string,
+  allCards: KanbanCard[]
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
   const config = loadConfig();
@@ -457,7 +528,7 @@ async function runReviewPipeline(
   );
 
   if (allowed) {
-    if (config.orchestrator.autoAdvancePhases) {
+    if (config.orchestrator.autoAdvancePhases && canEnterPhase("ship", allCards, config)) {
       setCardPhase(card.id, "ship");
       const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "review", to: "ship" };
       emit(action);
@@ -480,10 +551,61 @@ async function runReviewPipeline(
           actions.push(action);
         }
       }
+    } else {
+      // Process active reviews (verdict extraction, re-iteration, escalation)
+      for (const review of activeReviews) {
+        if (review.status === "injected") {
+          const sessionUri = card.id;
+          const verdict = await processReviewResult(hostUrl, sessionUri, review.id, changesetRef);
+          if (verdict.action === "passed") {
+            emit({ type: "review-passed", cardId: card.id, skillId: review.skillId });
+            actions.push({ type: "review-passed", cardId: card.id, skillId: review.skillId });
+          } else if (verdict.action === "escalated") {
+            emit({ type: "escalated", cardId: card.id, reason: verdict.summary });
+            actions.push({ type: "escalated", cardId: card.id, reason: verdict.summary });
+          }
+        } else if (review.status === "failed") {
+          const skills = getRequiredReviewSkills(transition, riskLevel);
+          const skill = skills.find((s) => s.id === review.skillId);
+          if (skill) {
+            const sessionUri = card.id;
+            const { success } = await startReview(hostUrl, sessionUri, card.id, skill, transition, riskLevel, changesetRef);
+            if (success) {
+              const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: review.iteration + 1 };
+              emit(action);
+              actions.push(action);
+            }
+          }
+        }
+      }
     }
   }
 
   return actions;
+}
+
+/**
+ * Execute a gate command asynchronously. Completes the gate run on exit.
+ */
+function executeGateCommand(runId: number, command: string, cwd: string): void {
+  const maxOutput = 64 * 1024;
+  try {
+    exec(
+      command,
+      { cwd, timeout: 5 * 60_000, maxBuffer: maxOutput },
+      (error, stdout, stderr) => {
+        if (error) {
+          const output = (stderr || stdout || error.message).slice(0, maxOutput);
+          completeGateRun(runId, "failed", output);
+        } else {
+          const output = (stdout || "All checks passed").slice(0, maxOutput);
+          completeGateRun(runId, "passed", output);
+        }
+      }
+    );
+  } catch (err) {
+    completeGateRun(runId, "failed", err instanceof Error ? err.message : "Failed to start gate command");
+  }
 }
 
 function buildNudgeMessage(card: KanbanCard, nudgesSent: number): string {

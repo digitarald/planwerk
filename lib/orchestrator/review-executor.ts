@@ -149,23 +149,28 @@ export async function startReview(
   const db = getDb();
   const maxIterations = getEffectiveMaxIterations(skill.id, riskLevel);
 
-  // Check for existing active run for this skill
+  // Atomic claim: check for existing active run AND for an already-injected run
+  // to prevent heartbeat/chat race creating duplicates
   const existing = db
     .prepare(
-      "SELECT id, iteration FROM review_runs WHERE card_id = ? AND skill_id = ? AND status NOT IN ('passed', 'escalated') ORDER BY id DESC LIMIT 1"
+      "SELECT id, iteration, status FROM review_runs WHERE card_id = ? AND skill_id = ? AND status NOT IN ('passed', 'escalated') ORDER BY id DESC LIMIT 1"
     )
-    .get(cardId, skill.id) as { id: number; iteration: number } | undefined;
+    .get(cardId, skill.id) as { id: number; iteration: number; status: string } | undefined;
+
+  // If already injected/pending/extracting, don't double-inject
+  if (existing && (existing.status === "injected" || existing.status === "pending" || existing.status === "extracting")) {
+    return { reviewRunId: existing.id, success: true };
+  }
 
   let reviewRunId: number;
   let iteration: number;
 
   if (existing) {
-    // Re-inject for existing run (next iteration)
+    // Re-inject for existing failed run (next iteration)
     reviewRunId = existing.id;
     iteration = existing.iteration + 1;
 
     if (iteration > maxIterations) {
-      // Escalate — too many iterations
       db.prepare(
         "UPDATE review_runs SET status = 'escalated', verdict_summary = 'Max iterations reached' WHERE id = ?"
       ).run(reviewRunId);
@@ -192,20 +197,30 @@ export async function startReview(
   const gateRunId = startGateRun(cardId, fromPhase, toPhase, "review", skill.id, changesetRef);
   db.prepare("UPDATE review_runs SET gate_run_id = ? WHERE id = ?").run(gateRunId, reviewRunId);
 
-  // Inject the review prompt into the session
+  // Inject the review prompt into the session (failure-safe: always terminalize on error)
   const prompt = buildReviewPrompt(skill, iteration, maxIterations);
-  const { success } = await injectMessage(hostUrl, sessionUri, prompt);
+  try {
+    const { success } = await injectMessage(hostUrl, sessionUri, prompt);
 
-  if (success) {
-    db.prepare(
-      "UPDATE review_runs SET status = 'injected', prompt_injected_at = datetime('now') WHERE id = ?"
-    ).run(reviewRunId);
-  } else {
-    db.prepare("UPDATE review_runs SET status = 'failed', verdict_summary = 'Failed to inject prompt' WHERE id = ?").run(reviewRunId);
-    completeGateRun(gateRunId, "failed", "Failed to inject review prompt into session");
+    if (success) {
+      db.prepare(
+        "UPDATE review_runs SET status = 'injected', prompt_injected_at = datetime('now') WHERE id = ?"
+      ).run(reviewRunId);
+    } else {
+      db.prepare("UPDATE review_runs SET status = 'failed', verdict_summary = 'Failed to inject prompt' WHERE id = ?").run(reviewRunId);
+      completeGateRun(gateRunId, "failed", "Failed to inject review prompt into session");
+    }
+
+    return { reviewRunId, success };
+  } catch (err) {
+    // Ensure DB rows don't get stuck in pending/running state
+    db.prepare("UPDATE review_runs SET status = 'failed', verdict_summary = ? WHERE id = ?").run(
+      `Injection error: ${err instanceof Error ? err.message : String(err)}`,
+      reviewRunId
+    );
+    completeGateRun(gateRunId, "failed", "Exception during prompt injection");
+    return { reviewRunId, success: false };
   }
-
-  return { reviewRunId, success };
 }
 
 /**

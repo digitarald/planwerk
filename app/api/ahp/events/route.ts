@@ -169,6 +169,17 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
             try {
               const event: CardStreamEvent = { type: "heartbeat", action };
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+
+              // Phase-advance actions should also update the board immediately
+              if (action.type === "phase-advanced" && "cardId" in action) {
+                const card = currentCards.find((c) => c.id === action.cardId);
+                if (card) {
+                  const updated = { ...card, phase: action.to };
+                  currentCards = [...currentCards.filter((c) => c.id !== card.id), updated];
+                  const cardEvent: CardStreamEvent = { type: "cardChanged", card: updated };
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(cardEvent)}\n\n`));
+                }
+              }
             } catch {
               // Stream may already be closed
             }
