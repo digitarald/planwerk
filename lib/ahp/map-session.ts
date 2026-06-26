@@ -1,14 +1,14 @@
 import { Artifact, KanbanCard, PendingInput, PendingInputQuestion, PendingInputOptionKind, Phase, RiskLevel, RuntimeStatus } from "@/lib/types";
-import type { SessionInputRequest, SessionInputQuestion } from "@microsoft/agent-host-protocol";
+import type { ChatInputRequest, ChatInputQuestion } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPStatus, parseAHPStatus } from "./types";
 import type { ChangesetEnrichment } from "./changeset-enricher";
 
 /**
- * Convert SDK SessionInputRequest[] into the first actionable PendingInput.
+ * Convert SDK ChatInputRequest[] into the first actionable PendingInput.
  * Only surfaces the first non-answered request to avoid overwhelming the card.
  */
-export function mapInputRequests(requests: SessionInputRequest[] | undefined): PendingInput | undefined {
+export function mapInputRequests(requests: ChatInputRequest[] | undefined): PendingInput | undefined {
   if (!requests || requests.length === 0) return undefined;
 
   const req = requests[0];
@@ -21,7 +21,7 @@ export function mapInputRequests(requests: SessionInputRequest[] | undefined): P
   };
 }
 
-function mapQuestion(q: SessionInputQuestion): PendingInputQuestion {
+function mapQuestion(q: ChatInputQuestion): PendingInputQuestion {
   const base: PendingInputQuestion = {
     id: q.id,
     kind: q.kind as PendingInputOptionKind,

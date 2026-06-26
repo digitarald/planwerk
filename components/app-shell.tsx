@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { TitleBar } from "@/components/title-bar";
 import { OrchestratorFeed } from "@/components/orchestrator/feed";
+import { usePersistentState } from "@/lib/hooks/use-persistent-state";
 import { cn } from "@/lib/utils";
 
 interface AppShellProps {
@@ -14,16 +14,11 @@ interface AppShellProps {
 const SIDEBAR_KEY = "planwerk:sidebar-collapsed";
 
 export function AppShell({ children }: AppShellProps) {
-  const [collapsed, setCollapsed] = useState(false);
-
-  useEffect(() => {
-    setCollapsed(localStorage.getItem(SIDEBAR_KEY) === "true");
-  }, []);
+  const [collapsedValue, setCollapsedValue] = usePersistentState(SIDEBAR_KEY, "false");
+  const collapsed = collapsedValue === "true";
 
   const toggle = () => {
-    const next = !collapsed;
-    setCollapsed(next);
-    localStorage.setItem(SIDEBAR_KEY, String(next));
+    setCollapsedValue(String(!collapsed));
   };
 
   return (

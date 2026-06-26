@@ -22,7 +22,7 @@ async function submitInputResponse(
   requestId: string,
   response: "accept" | "decline" | "cancel",
   answers?: Record<string, unknown>
-): Promise<{ inputRemoved: boolean; activeClient: boolean }> {
+): Promise<{ inputRemoved: boolean }> {
   const res = await fetch("/api/ahp/sessions/input", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

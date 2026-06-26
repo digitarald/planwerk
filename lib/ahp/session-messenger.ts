@@ -1,9 +1,15 @@
 import "server-only";
 
-import type { StateAction, SessionState } from "@microsoft/agent-host-protocol";
+import type { SessionState, ChatState } from "@microsoft/agent-host-protocol";
 
 import { getAHPClient, releaseAHPClient } from "./client-manager";
 import { parseAHPStatus } from "./types";
+import {
+  chatTurnStarted,
+  chatQueuedMessage,
+  chatInputAnswerChanged,
+  chatInputCompleted,
+} from "./actions";
 
 const debug = (...args: unknown[]) => {
   if (process.env.AHP_DEBUG) console.info("[ahp:messenger]", ...args);
@@ -24,9 +30,7 @@ async function getSessionContext(
   const status = sessionState?.summary?.status ?? 0;
   const parsed = parseAHPStatus(status);
 
-  // defaultChat is on the session state directly (not in summary)
-  const stateAny = sessionState as Record<string, unknown> | undefined;
-  const chatUri = (stateAny?.defaultChat as string) ?? null;
+  const chatUri = sessionState?.defaultChat ?? null;
 
   return { chatUri, status, isInProgress: parsed.isInProgress };
 }
@@ -34,8 +38,8 @@ async function getSessionContext(
 /**
  * Inject a user message into an AHP session.
  *
- * If the session is idle → dispatches session/turnStarted (starts a new turn).
- * If the session is active → dispatches session/pendingMessageSet with kind "queued"
+ * If the session is idle → dispatches chat/turnStarted (starts a new turn).
+ * If the session is active → dispatches chat/pendingMessageSet with kind "queued"
  * so the message is delivered after the current turn finishes.
  */
 export async function injectMessage(
@@ -57,15 +61,7 @@ export async function injectMessage(
 
     if (isInProgress) {
       // Session is active — queue the message for delivery after current turn
-      client.dispatch(chatUri, {
-        type: "session/pendingMessageSet",
-        kind: "queued",
-        id: messageId,
-        message: {
-          text: message,
-          origin: { kind: "user" },
-        },
-      } as unknown as StateAction);
+      client.dispatch(chatUri, chatQueuedMessage(messageId, message));
 
       // Verify dispatch reached the server via a ping
       await client.ping();
@@ -75,14 +71,7 @@ export async function injectMessage(
     }
 
     // Session is idle — start a new turn directly
-    client.dispatch(chatUri, {
-      type: "session/turnStarted",
-      turnId: messageId,
-      message: {
-        text: message,
-        origin: { kind: "user" },
-      },
-    } as unknown as StateAction);
+    client.dispatch(chatUri, chatTurnStarted(messageId, message));
 
     // Verify dispatch reached the server
     await client.ping();
@@ -121,12 +110,8 @@ export async function answerInput(
     void chatSub.close();
     await client.unsubscribe(chatUri).catch(() => {});
 
-    const chatState = chatResult.snapshot?.state as
-      | Record<string, unknown>
-      | undefined;
-    const chatInputRequests = chatState?.inputRequests as
-      | { id: string }[]
-      | undefined;
+    const chatState = chatResult.snapshot?.state as ChatState | undefined;
+    const chatInputRequests = chatState?.inputRequests;
 
     if (!chatInputRequests?.some((r) => r.id === requestId)) {
       debug("Input request not found (stale):", requestId);
@@ -136,22 +121,12 @@ export async function answerInput(
     // Dispatch answers
     if (answers) {
       for (const [questionId, answer] of Object.entries(answers)) {
-        client.dispatch(chatUri, {
-          type: "session/inputAnswerChanged",
-          requestId,
-          questionId,
-          answer,
-        } as unknown as StateAction);
+        client.dispatch(chatUri, chatInputAnswerChanged(requestId, questionId, answer));
       }
     }
 
     // Dispatch completion
-    client.dispatch(chatUri, {
-      type: "session/inputCompleted",
-      requestId,
-      response,
-      ...(answers ? { answers } : {}),
-    } as unknown as StateAction);
+    client.dispatch(chatUri, chatInputCompleted(requestId, response, answers));
 
     // Verify dispatch reached the server
     await client.ping();
@@ -211,6 +186,9 @@ export async function waitForIdle(
 
 /**
  * Fetch the last N turns from a session to read agent output.
+ *
+ * In AHP 0.4.0 turns live on the chat channel, so resolve the session's
+ * defaultChat and fetch from there, falling back to the session URI.
  */
 export async function fetchLastTurns(
   hostUrl: string,
@@ -219,8 +197,9 @@ export async function fetchLastTurns(
 ): Promise<{ turns: unknown[]; hasMore: boolean }> {
   const client = await getAHPClient(hostUrl);
   try {
+    const { chatUri } = await getSessionContext(client, sessionUri);
     const result = await client.request("fetchTurns", {
-      channel: sessionUri,
+      channel: chatUri ?? sessionUri,
       limit,
     });
     return { turns: result.turns, hasMore: result.hasMore };

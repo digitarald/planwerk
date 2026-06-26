@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { StateAction, SessionState } from "@microsoft/agent-host-protocol";
+import type { SessionState, ChatState } from "@microsoft/agent-host-protocol";
+
+import { chatInputAnswerChanged, chatInputCompleted } from "@/lib/ahp/actions";
 
 const debug = (...args: unknown[]) => {
   if (process.env.AHP_DEBUG) console.info("[ahp:input]", ...args);
@@ -35,11 +37,9 @@ export async function POST(request: NextRequest) {
       void sessionSub.close();
 
       const sessionState = sessionResult.snapshot?.state as SessionState | undefined;
-      const stateAny = sessionState as unknown as Record<string, unknown> | undefined;
-      const defaultChatUri = stateAny?.defaultChat as string | undefined;
-      const hasActiveClient = !!sessionState?.activeClient;
+      const defaultChatUri = sessionState?.defaultChat;
 
-      debug("chatUri:", defaultChatUri ? "found" : "none", "activeClient:", hasActiveClient);
+      debug("chatUri:", defaultChatUri ? "found" : "none");
 
       if (!defaultChatUri) {
         await client.unsubscribe(sessionUri).catch(() => {});
@@ -50,8 +50,8 @@ export async function POST(request: NextRequest) {
       const { result: chatResult, subscription: chatSub } = await client.subscribe(defaultChatUri);
       void chatSub.close();
 
-      const chatState = chatResult.snapshot?.state as Record<string, unknown> | undefined;
-      const chatInputRequests = chatState?.inputRequests as { id: string }[] | undefined;
+      const chatState = chatResult.snapshot?.state as ChatState | undefined;
+      const chatInputRequests = chatState?.inputRequests;
 
       if (!chatInputRequests?.some(r => r.id === requestId)) {
         debug("inputRequest not found — already consumed or stale");
@@ -63,22 +63,12 @@ export async function POST(request: NextRequest) {
       // Dispatch inputAnswerChanged for each answer
       if (body.answers) {
         for (const [questionId, answer] of Object.entries(body.answers)) {
-          client.dispatch(defaultChatUri, {
-            type: "session/inputAnswerChanged",
-            requestId,
-            questionId,
-            answer,
-          } as unknown as StateAction);
+          client.dispatch(defaultChatUri, chatInputAnswerChanged(requestId, questionId, answer));
         }
       }
 
       // Dispatch inputCompleted
-      client.dispatch(defaultChatUri, {
-        type: "session/inputCompleted",
-        requestId,
-        response,
-        ...(body.answers ? { answers: body.answers } : {}),
-      } as unknown as StateAction);
+      client.dispatch(defaultChatUri, chatInputCompleted(requestId, response, body.answers));
 
       // Brief wait for state to propagate, then verify
       await new Promise(resolve => setTimeout(resolve, 300));
@@ -86,11 +76,11 @@ export async function POST(request: NextRequest) {
       // Re-read chat state to check if inputRequest was removed
       const { result: verifyResult, subscription: verifySub } = await client.subscribe(defaultChatUri);
       void verifySub.close();
-      const verifyState = verifyResult.snapshot?.state as Record<string, unknown> | undefined;
-      const remaining = verifyState?.inputRequests as { id: string }[] | undefined;
+      const verifyState = verifyResult.snapshot?.state as ChatState | undefined;
+      const remaining = verifyState?.inputRequests;
       const inputRemoved = !remaining?.some(r => r.id === requestId);
 
-      debug("inputRemoved:", inputRemoved, "activeClient:", hasActiveClient);
+      debug("inputRemoved:", inputRemoved);
 
       // Cleanup
       await client.unsubscribe(defaultChatUri).catch(() => {});
@@ -99,7 +89,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         ok: true,
         inputRemoved,
-        activeClient: hasActiveClient,
       });
     } finally {
       releaseAHPClient(hostUrl);

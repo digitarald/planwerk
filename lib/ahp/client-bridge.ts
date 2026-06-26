@@ -1,7 +1,6 @@
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
 import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
-import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
-import type { SessionSummary, SessionState, SessionInputRequest } from "@microsoft/agent-host-protocol";
+import type { SessionSummary, SessionState, ChatState, ChatInputRequestedAction } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
@@ -11,13 +10,11 @@ import { mapInputRequests } from "./map-session";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT } from "@/lib/db/session-cache";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
+import { OFFERED_PROTOCOL_VERSIONS } from "./protocol";
 import type { PendingInput } from "@/lib/types";
 
 // Re-export for consumers that imported from here
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
-
-// Offer both SDK-supported versions and newer server versions we're compatible with
-const OFFERED_PROTOCOL_VERSIONS = [...SUPPORTED_PROTOCOL_VERSIONS, "0.4.0"];
 
 export type BridgeEvent =
   | { type: "init"; sessions: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment>; pendingInputs: Map<string, PendingInput> }
@@ -244,18 +241,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           return;
         }
 
-        // Check if the session state directly has inputRequests (legacy model)
-        if (sessionState.inputRequests?.length) {
-          const mapped = mapInputRequests(sessionState.inputRequests);
-          if (mapped) {
-            emitPendingInput(sessionUri, mapped);
-          }
-          return;
-        }
-
-        // Chat-based model: subscribe to the chat channel to get inputRequests
-        const stateAny = sessionState as unknown as Record<string, unknown>;
-        const defaultChatUri = stateAny.defaultChat as string | undefined;
+        // Input requests live on the chat channel; read the session's
+        // defaultChat. (We only inspect defaultChat, not other chats in the
+        // session.)
+        const defaultChatUri = sessionState.defaultChat;
         if (!defaultChatUri) {
           warn("fetchInput: no inputRequests and no defaultChat URI", sessionUri);
           emitNoPendingInput(sessionUri);
@@ -295,13 +284,13 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
     const { result, subscription } = chatSub;
 
-    const chatState = result.snapshot?.state as Record<string, unknown> | undefined;
+    const chatState = result.snapshot?.state as ChatState | undefined;
     if (chatState) {
       // Check for inputRequests directly in chat state
-      if (chatState.inputRequests && Array.isArray(chatState.inputRequests) && chatState.inputRequests.length > 0) {
+      if (chatState.inputRequests && chatState.inputRequests.length > 0) {
         void subscription.close();
         client?.unsubscribe(chatUri).catch(() => {});
-        const mapped = mapInputRequests(chatState.inputRequests as SessionInputRequest[]);
+        const mapped = mapInputRequests(chatState.inputRequests);
         if (mapped) {
           emitPendingInput(sessionUri, mapped);
         } else {
@@ -319,11 +308,14 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }, 5_000);
 
     try {
-      for await (const action of subscription) {
+      for await (const event of subscription) {
         if (disposed) break;
-        const type = (action as { type?: string }).type;
-        if (type === "session/inputRequested") {
-          const request = (action as { request?: SessionInputRequest }).request;
+        // The subscription stream yields SubscriptionEvent envelopes; the
+        // mutation actions arrive as `{ type: "action", params: ActionEnvelope }`.
+        if (event.type !== "action") continue;
+        const action = event.params.action;
+        if ((action.type as string) === "chat/inputRequested") {
+          const request = (action as ChatInputRequestedAction).request;
           if (request) {
             debug("fetchInput: got inputRequested from chat stream", sessionUri);
             const mapped = mapInputRequests([request]);

@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { AlertTriangle, Monitor, ShieldAlert, Unplug, Wifi } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore, ConnectionErrorInfo } from "@/lib/store/connection-store";
+import { usePersistentState } from "@/lib/hooks/use-persistent-state";
 import type { ConnectionErrorCode } from "@/lib/ahp/connection-error";
 
 const DEFAULT_HOST = process.env.NEXT_PUBLIC_AHP_DEFAULT_HOST ?? "ws://localhost:8082";
@@ -47,17 +48,16 @@ function ConnectionError({ error }: { error: ConnectionErrorInfo }) {
 const CUSTOM_HOST_KEY = "planwerk-custom-host";
 
 export function Onboarding() {
-  const [remoteUrl, setRemoteUrl] = useState("");
+  // Saved host persists only on a successful connect; `draft` holds in-progress
+  // edits so we don't write half-typed URLs to storage on every keystroke.
+  const [savedUrl, setSavedUrl] = usePersistentState(CUSTOM_HOST_KEY, "");
+  const [draft, setDraft] = useState<string | null>(null);
+  const remoteUrl = draft ?? savedUrl;
+  const setRemoteUrl = setDraft;
   const { connect, status, error } = useConnectionStore();
 
-  // Restore last custom host URL from localStorage
-  useEffect(() => {
-    const saved = localStorage.getItem(CUSTOM_HOST_KEY);
-    if (saved) setRemoteUrl(saved);
-  }, []);
-
   const handleRemoteConnect = () => {
-    localStorage.setItem(CUSTOM_HOST_KEY, remoteUrl);
+    setSavedUrl(remoteUrl);
     connect(remoteUrl);
   };
   const isConnecting = status === "reconnecting";

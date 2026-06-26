@@ -1,10 +1,9 @@
 import "server-only";
 
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
-import { SUPPORTED_PROTOCOL_VERSIONS } from "@microsoft/agent-host-protocol";
 import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 
-const OFFERED_PROTOCOL_VERSIONS = [...SUPPORTED_PROTOCOL_VERSIONS, "0.4.0"];
+import { OFFERED_PROTOCOL_VERSIONS } from "./protocol";
 
 let activeClient: { hostUrl: string; client: AhpClient; refs: number } | null = null;
 let pendingInit: Promise<AhpClient> | null = null;
