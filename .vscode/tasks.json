@@ -11,7 +11,7 @@
     {
       "label": "Start dev server",
       "type": "shell",
-      "command": "npm run dev",
+      "command": "AHP_DEBUG=1 npm run dev",
       "inAgents": true
     }
   ]

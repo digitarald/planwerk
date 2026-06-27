@@ -34,6 +34,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { useBoardStore } from "@/lib/store/board-store";
+import { useConnectionStore } from "@/lib/store/connection-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import {
   KanbanCard,
@@ -191,7 +192,9 @@ interface CardDetailModalProps {
 export function CardDetailModal({ card }: CardDetailModalProps) {
   const setDetailCard = useBoardStore((s) => s.setDetailCard);
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
+  const hostUrl = useConnectionStore((s) => s.hostUrl);
   const [message, setMessage] = useState("");
+  const [sendState, setSendState] = useState<"idle" | "sending" | "error">("idle");
   const scrimRef = useRef<HTMLDivElement>(null);
 
   // Close on Escape
@@ -203,15 +206,39 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
     return () => document.removeEventListener("keydown", handler);
   }, [setDetailCard]);
 
-  const handleInject = (e: React.FormEvent) => {
+  const handleInject = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!message.trim()) return;
-    addFeedItem({
-      type: "intervention",
-      message: `Message sent to "${card.title}": "${message.trim()}"`,
-      cardId: card.id,
-    });
-    setMessage("");
+    const text = message.trim();
+    if (!text || sendState === "sending") return;
+    if (!hostUrl) {
+      setSendState("error");
+      setTimeout(() => setSendState("idle"), 3000);
+      return;
+    }
+
+    setSendState("sending");
+    try {
+      const res = await fetch("/api/ahp/sessions/message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hostUrl, sessionUri: card.id, message: text }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to send");
+      }
+      const data = (await res.json()) as { queued?: boolean };
+      addFeedItem({
+        type: "intervention",
+        message: `Message ${data.queued ? "queued for" : "sent to"} "${card.title}": "${text}"`,
+        cardId: card.id,
+      });
+      setMessage("");
+      setSendState("idle");
+    } catch {
+      setSendState("error");
+      setTimeout(() => setSendState("idle"), 3000);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -536,6 +563,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                     onChange={(e) => setMessage(e.target.value)}
                     onKeyDown={handleKeyDown}
                     placeholder="Send instructions to this session..."
+                    disabled={sendState === "sending"}
                     className="min-h-[3rem] resize-none pr-10 text-[13px]"
                     rows={2}
                   />
@@ -543,12 +571,21 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                     type="submit"
                     size="icon-sm"
                     variant="ghost"
-                    disabled={!message.trim()}
+                    disabled={!message.trim() || sendState === "sending"}
                     className="absolute bottom-2 right-2"
                   >
-                    <Send className="h-3.5 w-3.5" />
+                    {sendState === "sending" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Send className="h-3.5 w-3.5" />
+                    )}
                   </Button>
                 </form>
+                {sendState === "error" && (
+                  <p className="mt-1 text-[11px] text-destructive">
+                    Failed to send — check the connection and try again.
+                  </p>
+                )}
               </section>
             </div>
           </ScrollArea>

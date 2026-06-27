@@ -3,13 +3,13 @@ import "server-only";
 import { exec } from "node:child_process";
 
 import { getDb } from "@/lib/db/schema";
-import { KanbanCard, Phase, RiskLevel } from "@/lib/types";
+import { KanbanCard, Phase, RiskLevel, PendingInput } from "@/lib/types";
 import { loadConfig } from "./skill-config";
-import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills } from "./review-executor";
+import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills, hasPlanRubberDuck, recordPlanRubberDuck } from "./review-executor";
 import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard, completeGateRun } from "./gate-engine";
 import { getCardRisk } from "./risk-store";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
-import { injectMessage } from "@/lib/ahp/session-messenger";
+import { injectMessage, answerInput, requestPlanChanges } from "@/lib/ahp/session-messenger";
 
 /**
  * Heartbeat action types emitted to the orchestrator feed.
@@ -23,7 +23,9 @@ export type HeartbeatAction =
   | { type: "escalated"; cardId: string; reason: string }
   | { type: "stale-gate-invalidated"; cardId: string; gateType: string }
   | { type: "wip-violation"; phase: Phase; count: number; limit: number }
-  | { type: "auto-answered"; cardId: string; answer: string };
+  | { type: "auto-answered"; cardId: string; answer: string }
+  | { type: "plan-approved"; cardId: string }
+  | { type: "plan-rubber-ducked"; cardId: string };
 
 export interface HeartbeatTickResult {
   actions: HeartbeatAction[];
@@ -143,14 +145,25 @@ async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatT
   const actions: HeartbeatAction[] = [];
   const errors: string[] = [];
 
-  const activeCards = cards.filter((c) => !c.isArchived && c.phase !== "ship" && c.phase !== "define");
+  // Process non-archived, non-shipped cards. `define` cards are normally
+  // skipped, but a brand-new session's plan-approval (and other input requests)
+  // can appear while planwerk still has the card in `define`, so include
+  // define cards that are waiting on input.
+  const activeCards = cards.filter(
+    (c) =>
+      !c.isArchived &&
+      c.phase !== "ship" &&
+      (c.phase !== "define" || c.runtime === "input-needed")
+  );
 
   for (const card of activeCards) {
     try {
       const cardActions = await processCard(hostUrl, card, config, cards);
       actions.push(...cardActions);
     } catch (err) {
-      errors.push(`${card.id}: ${err instanceof Error ? err.message : String(err)}`);
+      const msg = `${card.id}: ${err instanceof Error ? err.message : String(err)}`;
+      if (process.env.AHP_DEBUG) console.warn("[heartbeat:card-error]", msg);
+      errors.push(msg);
     }
   }
 
@@ -198,13 +211,26 @@ async function processCard(
 
   // Only process idle cards — running cards are doing work
   if (card.runtime !== "idle") {
-    // Auto-answer input-needed cards below risk threshold
-    if (card.runtime === "input-needed" && shouldAutoAnswer(card)) {
-      const result = await autoAnswer(hostUrl, card);
-      if (result.answered) {
-        const action: HeartbeatAction = { type: "auto-answered", cardId: card.id, answer: result.answer ?? "" };
-        emit(action);
-        actions.push(action);
+    if (card.runtime === "input-needed") {
+      const planApproval = detectPlanApproval(card.pendingInput);
+      if (planApproval) {
+        // Plan-approval inputs are handled by the plan-approval pipeline:
+        // auto-approve low risk, force a rubber-duck on un-reviewed medium+ plans.
+        const planActions = await runPlanApprovalPipeline(
+          hostUrl,
+          card,
+          card.pendingInput!,
+          planApproval
+        );
+        actions.push(...planActions);
+      } else if (shouldAutoAnswer(card)) {
+        // Regular clarifying question — auto-answer below the risk threshold.
+        const result = await autoAnswer(hostUrl, card);
+        if (result.answered) {
+          const action: HeartbeatAction = { type: "auto-answered", cardId: card.id, answer: result.answer ?? "" };
+          emit(action);
+          actions.push(action);
+        }
       }
     }
     return actions;
@@ -420,6 +446,117 @@ async function runBuildPipeline(
     }
   }
 
+  return actions;
+}
+
+/**
+ * copilotcli plan-approval (exit-plan-mode) option IDs. A pending input whose
+ * single-select options are drawn from this set is a plan approval, not a
+ * regular clarifying question.
+ */
+const PLAN_APPROVAL_ACTION_IDS = new Set([
+  "autopilot",
+  "autopilot_fleet",
+  "interactive",
+  "exit_only",
+]);
+
+/**
+ * Detect a plan-approval input ("How would you like to proceed?" with
+ * autopilot / interactive / approve-plan-only options). Returns the question
+ * ID and the option to pick when auto-approving (an execute action, never the
+ * "approve only, I'll implement it myself" option), or null if not a plan
+ * approval.
+ */
+function detectPlanApproval(
+  input: PendingInput | undefined
+): { questionId: string; approveOptionId: string } | null {
+  if (!input || input.questions.length !== 1) return null;
+  const q = input.questions[0];
+  if (q.kind !== "single-select" || !q.options?.length) return null;
+  // Every option must be a known plan-approval action (this avoids matching
+  // generic single-select questions), and at least one must be an executable
+  // (non-"exit_only") action so auto-approve can actually proceed.
+  const allApproval = q.options.every((o) => PLAN_APPROVAL_ACTION_IDS.has(o.id));
+  const hasExecute = q.options.some((o) => o.id !== "exit_only");
+  if (!allApproval || !hasExecute) return null;
+
+  // Prefer an execute action (autopilot → autopilot_fleet → interactive) so
+  // auto-approve actually proceeds; fall back to any non-"exit_only" option.
+  const approve =
+    q.options.find((o) => o.id === "autopilot") ??
+    q.options.find((o) => o.id === "autopilot_fleet") ??
+    q.options.find((o) => o.id === "interactive") ??
+    q.options.find((o) => o.id !== "exit_only") ??
+    q.options[0];
+
+  return { questionId: q.id, approveOptionId: approve.id };
+}
+
+/** Rubber-duck critique injected to force a plan revision on medium+ plans. */
+const PLAN_RUBBER_DUCK_FEEDBACK =
+  "Before approval, rubber-duck this plan: challenge each assumption, enumerate " +
+  "the edge cases, failure modes, and gaps you have not addressed, verify the " +
+  "files/imports/types you intend to touch actually exist and fit, and tighten " +
+  "the scope. Then produce a revised plan and present it for approval.";
+
+/**
+ * Plan-approval pipeline for input-needed cards sitting on a copilotcli
+ * plan-approval:
+ * - Low risk → auto-approve (accept the recommended execute action).
+ * - Medium+ risk that has not been rubber-ducked → force one plan revision,
+ *   then leave the revised plan for a human to approve.
+ * - Medium+ risk already rubber-ducked → leave for human (no-op).
+ */
+async function runPlanApprovalPipeline(
+  hostUrl: string,
+  card: KanbanCard,
+  input: PendingInput,
+  approval: { questionId: string; approveOptionId: string }
+): Promise<HeartbeatAction[]> {
+  const actions: HeartbeatAction[] = [];
+
+  // Only auto-approve when the card was *explicitly* assessed as low risk.
+  // Un-triaged plans (no stored risk) are treated as medium+ and rubber-ducked,
+  // so a plan never advances to build without either an explicit low verdict or
+  // a review pass. The card's own `risk` field defaults to "low" before triage,
+  // so it is not trusted here — only the persisted assessment is.
+  const assessedLow = getCardRisk(card.id)?.level === "low";
+
+  if (assessedLow) {
+    const answers = {
+      [approval.questionId]: {
+        state: "submitted",
+        value: { kind: "selected", value: approval.approveOptionId },
+      },
+    };
+    const { success } = await answerInput(hostUrl, card.id, input.requestId, "accept", answers);
+    if (success) {
+      const action: HeartbeatAction = { type: "plan-approved", cardId: card.id };
+      emit(action);
+      actions.push(action);
+    }
+    return actions;
+  }
+
+  // Medium+ risk: force a single rubber-duck pass on plans not yet reviewed.
+  if (hasPlanRubberDuck(card.id)) {
+    // Already rubber-ducked — leave the revised plan for a human to approve.
+    return actions;
+  }
+
+  const { success } = await requestPlanChanges(
+    hostUrl,
+    card.id,
+    input.requestId,
+    PLAN_RUBBER_DUCK_FEEDBACK
+  );
+  if (success) {
+    recordPlanRubberDuck(card.id);
+    const action: HeartbeatAction = { type: "plan-rubber-ducked", cardId: card.id };
+    emit(action);
+    actions.push(action);
+  }
   return actions;
 }
 

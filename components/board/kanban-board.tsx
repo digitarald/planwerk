@@ -11,10 +11,16 @@ import { COLUMNS, PHASE_ORDER, type Phase } from "@/lib/types";
 export function KanbanBoard() {
   const getCard = useBoardStore((state) => state.getCard);
   const updateCard = useBoardStore((state) => state.updateCard);
-  const detailCardId = useBoardStore((state) => state.detailCardId);
   const addFeedItem = useOrchestratorStore((state) => state.addFeedItem);
 
-  const detailCard = detailCardId ? getCard(detailCardId) : undefined;
+  // Subscribe to the actual card object (not just its id) so the open detail
+  // modal re-renders when live SSE updates mutate the card — e.g. a sent
+  // message starts a new turn and the runtime/activity/last response change.
+  const detailCard = useBoardStore((state) =>
+    state.detailCardId
+      ? state.cards.find((c) => c.id === state.detailCardId)
+      : undefined
+  );
 
   const handleDragEnd = (result: DropResult) => {
     if (!result.destination) return;

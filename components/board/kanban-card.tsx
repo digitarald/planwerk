@@ -89,9 +89,26 @@ function RuntimeIndicator({ status }: { status: RuntimeStatus }) {
 }
 
 function InputContext({ card }: { card: KanbanCardType }) {
-  // When we have structured pending input data, render the actionable UI
+  // When we have structured pending input data, render the actionable UI.
+  //
+  // The card is a @hello-pangea/dnd drag handle, whose drag sensor arms on
+  // mousedown/touchstart. The picker buttons only stop click propagation,
+  // which is too late: any tiny pointer movement while pressing a button
+  // starts a micro-drag that cancels the click, so the answer is never
+  // submitted (the input stays open in the agent). Stop pointer-down events
+  // here so the drag sensor never engages over the interactive region, and
+  // stop clicks so interacting with the picker doesn't open the detail modal.
   if (card.pendingInput) {
-    return <PendingInputCard cardId={card.id} input={card.pendingInput} />;
+    return (
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        onTouchStart={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <PendingInputCard cardId={card.id} input={card.pendingInput} />
+      </div>
+    );
   }
 
   // Fallback: no input data yet (still subscribing), show activity text

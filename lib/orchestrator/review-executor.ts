@@ -98,6 +98,35 @@ export function getReviewRunsForCard(cardId: string): ReviewRun[] {
   return rows.map(mapRow);
 }
 
+/** Skill ID used to record a forced plan rubber-duck pass. */
+const PLAN_REVIEW_SKILL = "plan-review";
+
+/**
+ * Whether this card's plan has already been rubber-ducked once. Used to force
+ * a single plan revision on un-reviewed plans without looping.
+ */
+export function hasPlanRubberDuck(cardId: string): boolean {
+  const db = getDb();
+  const row = db
+    .prepare(
+      "SELECT 1 FROM review_runs WHERE card_id = ? AND skill_id = ? LIMIT 1"
+    )
+    .get(cardId, PLAN_REVIEW_SKILL) as { 1: number } | undefined;
+  return row !== undefined;
+}
+
+/**
+ * Record that a forced plan rubber-duck was injected for a card. Stored as a
+ * terminal `passed` review run so it is not re-processed by the review machinery.
+ */
+export function recordPlanRubberDuck(cardId: string): void {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO review_runs (card_id, skill_id, phase_transition, status, iteration, max_iterations, verdict_summary, prompt_injected_at, verdict_extracted_at)
+     VALUES (?, ?, 'plan->build', 'passed', 1, 1, 'Forced rubber-duck of un-reviewed plan', datetime('now'), datetime('now'))`
+  ).run(cardId, PLAN_REVIEW_SKILL);
+}
+
 /**
  * Check if a card has all required review gates passing for a transition.
  */

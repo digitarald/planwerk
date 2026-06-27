@@ -195,6 +195,16 @@ function formatHeartbeatAction(action: HeartbeatActionData): { type: "interventi
         type: "intervention",
         message: `Auto-answered pending input: "${(action as HeartbeatActionData & { answer?: string }).answer?.slice(0, 80) ?? ""}"`,
       };
+    case "plan-approved":
+      return {
+        type: "intervention",
+        message: "Auto-approved low-risk plan — proceeding to implementation.",
+      };
+    case "plan-rubber-ducked":
+      return {
+        type: "intervention",
+        message: "Sent plan back for a rubber-duck review before approval.",
+      };
     case "stale-gate-invalidated":
       return {
         type: "intervention",

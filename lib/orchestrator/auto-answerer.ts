@@ -3,11 +3,69 @@ import "server-only";
 import { CopilotClient } from "@github/copilot-sdk";
 
 import { answerInput } from "@/lib/ahp/session-messenger";
-import { loadConfig } from "./skill-config";
+import { canAutoAnswer } from "./skill-config";
 import { getCardRisk } from "./risk-store";
-import type { KanbanCard, RiskLevel } from "@/lib/types";
+import type { KanbanCard, PendingInputQuestion } from "@/lib/types";
 
-const RISK_ORDER: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2 };
+/**
+ * A typed AHP answer value (mirrors `ChatInputAnswerValue` from the protocol).
+ * Built locally as plain literals to avoid depending on ambient SDK enums.
+ */
+type AnswerValue =
+  | { kind: "selected"; value: string }
+  | { kind: "text"; value: string }
+  | { kind: "boolean"; value: boolean }
+  | { kind: "number"; value: number };
+
+function parseBoolean(s: string): boolean | null {
+  const v = s.trim().toLowerCase();
+  if (/^(yes|y|true|enabled?|on|ok|sure|affirmative|approve)\b/.test(v)) return true;
+  if (/^(no|n|false|disabled?|off|never|decline|reject)\b/.test(v)) return false;
+  return null;
+}
+
+/**
+ * Map a free-form LLM answer onto the typed, question-specific answer value the
+ * AHP host expects. Returns the value plus a human-readable label for the feed,
+ * or `null` when the answer can't be confidently mapped (so the caller escalates
+ * instead of submitting a malformed answer).
+ */
+function buildAnswer(
+  question: PendingInputQuestion,
+  llmAnswer: string,
+): { value: AnswerValue; display: string } | null {
+  switch (question.kind) {
+    case "single-select": {
+      const options = question.options ?? [];
+      const lower = llmAnswer.toLowerCase();
+      const matched =
+        options.find((o) => o.label.toLowerCase() === lower || o.id.toLowerCase() === lower) ??
+        options.find(
+          (o) =>
+            o.label.toLowerCase().includes(lower) || lower.includes(o.label.toLowerCase()),
+        ) ??
+        options.find((o) => o.recommended);
+      if (!matched) return null;
+      return { value: { kind: "selected", value: matched.id }, display: matched.label };
+    }
+    case "boolean": {
+      const b = parseBoolean(llmAnswer);
+      if (b === null) return null;
+      return { value: { kind: "boolean", value: b }, display: b ? "Yes" : "No" };
+    }
+    case "number": {
+      const n = Number(llmAnswer.replace(/[^0-9.+-]/g, ""));
+      if (!Number.isFinite(n)) return null;
+      return { value: { kind: "number", value: n }, display: String(n) };
+    }
+    case "text": {
+      return { value: { kind: "text", value: llmAnswer }, display: llmAnswer };
+    }
+    default:
+      // multi-select (or unknown) — let a human handle it.
+      return null;
+  }
+}
 
 // Reuse the singleton pattern from risk-assessor
 let clientInstance: CopilotClient | null = null;
@@ -50,17 +108,17 @@ export interface AutoAnswerResult {
  * Determine if a card's pending input should be auto-answered.
  */
 export function shouldAutoAnswer(card: KanbanCard): boolean {
-  const config = loadConfig();
-  if (!config.orchestrator.autoAnswerInput.enabled) return false;
   if (!card.pendingInput) return false;
 
+  // Conservative: only auto-answer cards with an *explicit* risk assessment.
+  // The card's own `risk` field defaults to "low" before triage, so relying on
+  // it would auto-answer every un-triaged card. Require a persisted verdict.
   const storedRisk = getCardRisk(card.id);
-  // Conservative: unassessed cards are NOT auto-answered
-  const cardRisk = storedRisk?.level ?? card.risk;
-  if (!cardRisk) return false;
+  if (!storedRisk) return false;
 
-  const maxRisk = config.orchestrator.autoAnswerInput.maxRisk;
-  return RISK_ORDER[cardRisk] < RISK_ORDER[maxRisk];
+  // Eligible when the assessed risk is at or below the configured max risk
+  // (canAutoAnswer also checks that the feature is enabled).
+  return canAutoAnswer(storedRisk.level);
 }
 
 /**
@@ -114,36 +172,33 @@ export async function autoAnswer(
         return { answered: false, reason: "LLM declined to answer" };
       }
 
-      // For single-select, match the answer to an option
-      let finalAnswer = answer;
-      if (question.kind === "single-select" && question.options) {
-        const matchedOption = question.options.find(
-          (o) =>
-            o.label.toLowerCase().includes(answer.toLowerCase()) ||
-            answer.toLowerCase().includes(o.label.toLowerCase())
-        );
-        if (matchedOption) {
-          finalAnswer = matchedOption.id;
-        } else if (question.options.some((o) => o.recommended)) {
-          // Fall back to recommended option
-          finalAnswer = question.options.find((o) => o.recommended)!.id;
-        }
+      // Map the free-form answer onto the question's typed answer shape.
+      const built = buildAnswer(question, answer);
+      if (!built) {
+        return { answered: false, reason: "Could not map answer to question format" };
       }
 
-      // Submit the answer via AHP
-      const requestId = question.id ?? "unknown";
-      const { success } = await answerInput(
+      // Submit the answer via AHP, keyed by question ID, under the request ID.
+      const answers = {
+        [question.id]: { state: "submitted", value: built.value },
+      };
+      const { success, stale } = await answerInput(
         hostUrl,
         card.id,
-        requestId,
+        input.requestId,
         "accept",
-        { answer: finalAnswer }
+        answers,
       );
 
       if (success) {
-        return { answered: true, answer: finalAnswer };
+        return { answered: true, answer: built.display };
       }
-      return { answered: false, reason: "Failed to submit answer to AHP" };
+      return {
+        answered: false,
+        reason: stale
+          ? "Input request no longer present (stale)"
+          : "Failed to submit answer to AHP",
+      };
     } finally {
       await session.disconnect().catch(() => {});
     }

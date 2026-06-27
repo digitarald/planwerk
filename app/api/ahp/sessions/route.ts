@@ -4,6 +4,19 @@ import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 
 import { AHPSessionSummary, shouldShowSession } from "@/lib/ahp/types";
 import { OFFERED_PROTOCOL_VERSIONS } from "@/lib/ahp/protocol";
+import { injectMessage } from "@/lib/ahp/session-messenger";
+
+/** Default agent provider for new sessions on this host. */
+const DEFAULT_PROVIDER = "copilotcli";
+
+/**
+ * Session config applied to every new task:
+ * - `mode: "plan"` — the agent plans first and asks clarifying questions
+ *   before writing code (surfaced on the board as input requests).
+ * - `autoApprove: "autoApprove"` — bypass per-tool approval prompts so the
+ *   session can proceed autonomously once the plan is accepted.
+ */
+const NEW_SESSION_CONFIG = { mode: "plan", autoApprove: "autoApprove" } as const;
 
 export async function GET(request: NextRequest) {
   const hostUrl = request.nextUrl.searchParams.get("host");
@@ -67,40 +80,61 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const { hostUrl, title, provider, model, workingDirectory } = (await request.json()) as {
-    hostUrl?: string;
-    title?: string;
-    provider?: string;
-    model?: string;
-    workingDirectory?: string;
-  };
+  const { hostUrl, title, prompt, provider, model, workingDirectory } =
+    (await request.json()) as {
+      hostUrl?: string;
+      title?: string;
+      prompt?: string;
+      provider?: string;
+      model?: string;
+      workingDirectory?: string;
+    };
 
   if (!hostUrl) {
     return NextResponse.json({ error: "hostUrl required" }, { status: 400 });
   }
 
-  if (!title) {
-    return NextResponse.json({ error: "title required" }, { status: 400 });
+  // The task description doubles as the title and the first message. Accept
+  // either field; the agent host derives the real session title from the
+  // first message, so `title` is just a fallback label for the response.
+  const task = (prompt ?? title ?? "").trim();
+  if (!task) {
+    return NextResponse.json({ error: "task description required" }, { status: 400 });
   }
+
+  const agentProvider = provider || DEFAULT_PROVIDER;
 
   try {
     const { getAHPClient, releaseAHPClient } = await import("@/lib/ahp/client-manager");
     const client = await getAHPClient(hostUrl);
     const sessionId = crypto.randomUUID();
-    const channel = `ahp-session:/${sessionId}`;
+    // The session URI scheme must match the provider so the host routes it to
+    // the right agent (e.g. `copilotcli:/<uuid>`).
+    const channel = `${agentProvider}:/${sessionId}`;
 
     try {
       await client.request("createSession", {
         channel,
-        provider: provider || "copilot",
+        provider: agentProvider,
+        workingDirectory: workingDirectory || undefined,
+        config: NEW_SESSION_CONFIG,
         ...(model ? { model: { id: model } } : {}),
-        ...(workingDirectory ? { workingDirectory } : {}),
       });
     } finally {
       releaseAHPClient(hostUrl);
     }
 
-    return NextResponse.json({ resource: channel, title });
+    // Deliver the task as the first message so the planning turn starts.
+    // injectMessage manages its own client lifecycle and flushes via ping.
+    const delivered = await injectMessage(hostUrl, channel, task);
+    if (!delivered.success) {
+      return NextResponse.json(
+        { error: "Session created but failed to start the task" },
+        { status: 502 }
+      );
+    }
+
+    return NextResponse.json({ resource: channel, title: title ?? task });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to create session";
     return NextResponse.json({ error: message }, { status: 502 });

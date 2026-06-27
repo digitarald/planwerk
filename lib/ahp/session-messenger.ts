@@ -139,6 +139,83 @@ export async function answerInput(
 }
 
 /**
+ * Force a plan revision ("rubber duck") on a session that is blocked on a
+ * copilotcli plan-approval input.
+ *
+ * The plan-approval input offers approve/execute options. Declining it makes
+ * the agent surface a follow-up text input — "What changes would you like me
+ * to make to the plan?" — which we answer with the rubber-duck critique. The
+ * agent then revises its plan and presents a new plan-approval input.
+ *
+ * Both steps run on one connection so the dispatches are flushed in order.
+ */
+export async function requestPlanChanges(
+  hostUrl: string,
+  sessionUri: string,
+  planRequestId: string,
+  feedback: string,
+  options?: { timeoutMs?: number; pollIntervalMs?: number },
+): Promise<{ success: boolean; stale?: boolean }> {
+  // Allow generous time for the agent to surface the follow-up text input —
+  // declining the plan is irreversible, so we must answer the "what changes?"
+  // input that follows. If it never appears in time the heartbeat's stuck-card
+  // nudging is the backstop.
+  const timeoutMs = options?.timeoutMs ?? 60_000;
+  const pollMs = options?.pollIntervalMs ?? 500;
+  const client = await getAHPClient(hostUrl);
+
+  try {
+    const { chatUri } = await getSessionContext(client, sessionUri);
+    if (!chatUri) {
+      debug("No chat channel found for", sessionUri);
+      return { success: false };
+    }
+
+    const readInputs = async (): Promise<ChatState["inputRequests"]> => {
+      const { result, subscription } = await client.subscribe(chatUri);
+      void subscription.close();
+      await client.unsubscribe(chatUri).catch(() => {});
+      return (result.snapshot?.state as ChatState | undefined)?.inputRequests;
+    };
+
+    // The plan-approval input must still be present.
+    const current = await readInputs();
+    if (!current?.some((r) => r.id === planRequestId)) {
+      debug("Plan-approval request not found (stale):", planRequestId);
+      return { success: false, stale: true };
+    }
+
+    // Step 1 — decline the plan-approval; the agent will ask what to change.
+    client.dispatch(chatUri, chatInputCompleted(planRequestId, "decline"));
+    await client.ping();
+
+    // Step 2 — wait for the follow-up text input and answer it with feedback.
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      const inputs = await readInputs();
+      const followUp = inputs?.find(
+        (r) => r.id !== planRequestId && r.questions?.[0]?.kind === "text",
+      );
+      if (!followUp) continue;
+
+      const questionId = followUp.questions![0].id;
+      const answer = { state: "submitted", value: { kind: "text", value: feedback } };
+      client.dispatch(chatUri, chatInputAnswerChanged(followUp.id, questionId, answer));
+      client.dispatch(chatUri, chatInputCompleted(followUp.id, "accept", { [questionId]: answer }));
+      await client.ping();
+      debug("Requested plan changes on", sessionUri, "follow-up:", followUp.id);
+      return { success: true };
+    }
+
+    debug("Plan-change follow-up input never appeared for", sessionUri);
+    return { success: false };
+  } finally {
+    releaseAHPClient(hostUrl);
+  }
+}
+
+/**
  * Poll session status until idle or timeout.
  * Resolves when the session's summary.status includes Idle (and not InProgress/InputNeeded).
  */

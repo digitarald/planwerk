@@ -214,9 +214,24 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
                 if (projected.type === "init") {
                   currentCards = projected.cards;
                 } else if (projected.type === "cardChanged") {
+                  // pendingInput is fetched asynchronously and arrives on its
+                  // own event; enrichment events (changeset/plan) re-emit the
+                  // card without it. Preserve the existing pendingInput while
+                  // the card is still input-needed so those events don't clobber
+                  // it (mirrors the client store's mergeCard semantics). Once the
+                  // input resolves, runtime leaves input-needed and it clears.
+                  const incoming = projected.card;
+                  const existing = currentCards.find((c) => c.id === incoming.id);
+                  if (
+                    existing?.pendingInput &&
+                    !incoming.pendingInput &&
+                    incoming.runtime === "input-needed"
+                  ) {
+                    incoming.pendingInput = existing.pendingInput;
+                  }
                   currentCards = [
-                    ...currentCards.filter((c) => c.id !== projected.card.id),
-                    projected.card,
+                    ...currentCards.filter((c) => c.id !== incoming.id),
+                    incoming,
                   ];
                 } else if (projected.type === "cardRemoved") {
                   currentCards = currentCards.filter((c) => c.id !== projected.cardId);
