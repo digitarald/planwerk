@@ -1,36 +1,36 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Planwerk
 
-## Getting Started
+> The management surface for agentic software development.
 
-First, run the development server:
+AI agents write 4x more code — but most of that speed gets eaten by the verification work humans still do by hand. Review queues are overflowing, sessions get babysat one at a time, and there's no single place to see what every agent is actually doing.
+
+**Planwerk is a kanban board for the agentic SDLC.** Each agent session becomes a card flowing through `Define → Plan → Build → Review → Ship`. Quality gates block every phase transition, an AI orchestrator manages the work autonomously, and you direct from a single board instead of micromanaging each session.
+
+## Why it's different
+
+- **A management surface, not an IDE.** See progress, decisions, and blockers — no code in the UI.
+- **Gates are external and enforced.** The agent that wrote the code never grades its own work. A different reviewer — sometimes a different model — verifies it.
+- **Autonomous but accountable.** The orchestrator monitors, intervenes, and enforces, but logs every decision so you can override with a full audit trail.
+- **Risk-proportional.** A typo fix gets auto-merged; a security change gets adversarial review, multiple reviewers, and human sign-off.
+
+## How it works
+
+Cards are live agent sessions. A persistent orchestrator ("CTO agent") detects stuck sessions, assigns risk levels, manages WIP, and escalates to you only when judgment is needed. Automated checks must pass before a card leaves Build; independent reviews run in Review, and failed reviews loop back until they pass or escalate.
+
+A conversational sidebar lets you command the orchestrator in plain language — *"start a task for rate limiting,"* *"why is auth stuck?"*, *"pause all sessions."*
+
+Planwerk manages the AI execution layer between "task defined" and "PR merged," integrating with GitHub Issues, Projects, and PRs rather than replacing them.
+
+## Getting started
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) and connect to your Agent Host Protocol endpoint to start managing sessions.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Learn more
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- [`zettelkasten/vision.md`](zettelkasten/vision.md) — the problem, principles, and north star
+- [`zettelkasten/architecture-and-design.md`](zettelkasten/architecture-and-design.md) — design decisions, tech stack, and structure

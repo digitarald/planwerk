@@ -106,10 +106,12 @@ Missing fields needed for real SDLC:
 
 ## 7. Mock Data Not Behaviorally Realistic
 
-**Severity:** Testing gap  
-**Where:** `/api/ahp/events/route.ts`, `mock-sessions.ts`
+**Severity:** ~~Testing gap~~ Obsolete (mock layer removed)
+**Where:** ~~`/api/ahp/events/route.ts`, `mock-sessions.ts`~~
 
-The mock SSE stream only changes `activity` and `additions`. It does not simulate:
+**Status:** Obsolete. The mock/demo data layer (`mock-sessions.ts` and demo mode) has been removed entirely — `/api/ahp/events` now bridges only to a real AHP host. There is no simulated session stream left to make realistic. If a fixture/replay mode is reintroduced later for testing, the points below apply.
+
+~~The mock SSE stream only changes `activity` and `additions`. It does not simulate:~~
 - Phase progression over time
 - Input-needed → recovery cycle
 - Error → retry cycle
@@ -117,7 +119,7 @@ The mock SSE stream only changes `activity` and `additions`. It does not simulat
 - Session creation/removal events
 - Stale session detection (idle too long)
 
-Adding these would surface UX problems earlier and make demos more impressive.
+~~Adding these would surface UX problems earlier and make demos more impressive.~~
 
 ---
 

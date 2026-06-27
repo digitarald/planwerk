@@ -81,7 +81,7 @@ Dragging a card forward logs a "manual override" to the orchestrator feed and ma
 ┌────────────────────────────────────────────────────────────┐
 │                    Next.js App (App Router)                  │
 ├──────────────────┬─────────────────────────────────────────┤
-│  Orchestrator    │  Board + Inline Card Expansion            │
+│  Orchestrator    │  Board + Card Detail Modal                │
 │  Live Feed       │  (single view, no routing)               │
 ├──────────────────┴─────────────────────────────────────────┤
 │  Client State (Zustand + SSE sync)                          │
@@ -97,8 +97,9 @@ Dragging a card forward logs a "manual override" to the orchestrator feed and ma
 
 | Layer | Choice |
 | --- | --- |
-| Framework | Next.js 15 (App Router) |
-| UI | shadcn/ui + Tailwind CSS v4 |
+| Framework | Next.js 16 (App Router) |
+| UI | shadcn/ui (on Base UI / `@base-ui/react`) + Tailwind CSS v4 |
+| Markdown | `react-markdown` + `remark-gfm` (plan/review artifacts) |
 | State | Zustand (client) with `useShallow` for derived selectors, workspace filter via `selectFilteredCards` |
 | Real-time | Server-Sent Events bridging AHP WebSocket |
 | AHP Client | `@microsoft/agent-host-protocol` TypeScript SDK |
@@ -127,14 +128,14 @@ Dragging a card forward logs a "manual override" to the orchestrator feed and ma
 |---|---------|-------------|
 | F1 | App Shell | Fixed desktop layout, title bar, sidebar + main |
 | F2 | Kanban Board | 5 columns, DnD, WIP limits, compact cards |
-| F3 | Card Expansion | Inline expand: gate pipeline, files, metadata, inject message |
+| F3 | Card Detail | Modal detail view: gate pipeline, plan/review artifacts, files, metadata, inject message |
 | F4 | Orchestrator Feed | Conversational sidebar — read decisions + give commands |
 | F5 | Real-Time Connection | SSE bridge, connection status, auto-reconnect |
 | F6 | Project Config | `.github/planwerk.yml`, convention extraction |
 | F7 | Gate Engine | GateRun records, SQLite persistence, stale detection |
 | F8 | Notifications | Card pulses, column badges, title bar count, desktop notifs |
 | F9 | Work Creation | + button, Cmd+K, orchestrator chat |
-| F10 | AHP Connection | Onboarding, mock mode, saved connections |
+| F10 | AHP Connection | Onboarding, local/remote host selection, saved connection, reconnect |
 | F11 | Workspace Filter | Dropdown in TitleBar to filter board by AHP project; derived selector, stale-filter auto-reset |
 
 ---
@@ -145,7 +146,10 @@ Dragging a card forward logs a "manual override" to the orchestrator feed and ma
 |-------|--------|---------|
 | `/api/ahp/events` | GET (SSE) | Stream session updates to browser |
 | `/api/ahp/sessions` | GET | List current sessions |
+| `/api/ahp/sessions/message` | POST | Inject a message into a session |
+| `/api/ahp/sessions/input` | POST | Respond to a session's input-needed prompt |
 | `/api/gates/run` | GET/POST | Check gate status, trigger/advance gates |
+| `/api/gates/status` | GET | Poll gate-run status for the client |
 | `/api/orchestrator/chat` | POST | Handle user messages to CTO |
 | `/api/orchestrator/status` | GET | Board health + orchestrator state |
 | `/api/orchestrator/review` | GET/POST | Trigger/query skill-based reviews |
@@ -160,8 +164,8 @@ planwerk/
 │   ├── layout.tsx
 │   ├── page.tsx
 │   └── api/
-│       ├── ahp/{events,sessions}/
-│       ├── gates/run/
+│       ├── ahp/{events,sessions,sessions/message,sessions/input}/
+│       ├── gates/{run,status}/
 │       └── orchestrator/{chat,review,status}/
 ├── components/
 │   ├── app-shell.tsx
@@ -169,17 +173,17 @@ planwerk/
 │   ├── command-palette.tsx
 │   ├── live-session-provider.tsx
 │   ├── notification-provider.tsx
-│   ├── board/{kanban-board,kanban-column,kanban-card,card-expansion,session-creator,board-skeleton}.tsx
+│   ├── board/{kanban-board,kanban-column,kanban-card,card-detail-modal,artifact-viewer,pending-input-card,session-creator,board-skeleton}.tsx
 │   ├── orchestrator/{feed,feed-item,chat-input,health-bar}.tsx
 │   ├── gates/gate-pipeline.tsx
 │   ├── connection/{connection-dot,onboarding}.tsx
-│   └── ui/ (shadcn)
+│   └── ui/ (shadcn on Base UI)
 ├── lib/
-│   ├── ahp/{types,mock-sessions,map-session}.ts
-│   ├── orchestrator/{gate-engine,skills,risk-assessor}.ts
+│   ├── ahp/{types,protocol,map-session,enrich-card,changeset-enricher,client-bridge,client-manager,session-messenger,actions,connection-error,plan-artifact,telemetry-logs,telemetry-transport}.ts
+│   ├── orchestrator/{orchestrator-agent,heartbeat,gate-engine,skills,skill-config,risk-assessor,risk-store,review-executor,verdict-extractor,triage,auto-answerer,board-context,tool-executor}.ts
 │   ├── store/{board-store,connection-store,orchestrator-store}.ts
-│   ├── db/schema.ts
-│   ├── hooks/{use-live-sessions,use-notifications}.ts
+│   ├── db/{schema,session-cache}.ts
+│   ├── hooks/{use-live-sessions,use-notifications,use-persistent-state}.ts
 │   └── types.ts
 ├── .github/planwerk.yml
 └── zettelkasten/

@@ -3,3 +3,16 @@
 
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
 <!-- END:nextjs-agent-rules -->
+
+# Planwerk
+
+**A kanban board for the agentic SDLC.** Each AI agent session is a card flowing through `Define → Plan → Build → Review → Ship`. Planwerk is a *management surface, not an IDE* — show progress, decisions, and blockers; never code in the UI.
+
+Keep these invariants in mind for every change:
+
+- **Phase ≠ runtime status.** SDLC phase is persisted by Planwerk (SQLite); AHP runtime status (`idle`/`running`/`input-needed`/`error`) only updates card *facts*. Never let runtime status move a card between columns.
+- **Gates are external and enforced.** The agent that wrote the code never grades its own work — a different reviewer (sometimes a different model) verifies. Only the gate engine transitions phase forward.
+- **Autonomous but accountable.** The orchestrator ("CTO agent") monitors and intervenes, but every decision is logged for human override.
+- **Local Node.js app**, not serverless: long-lived AHP WebSocket, persistent orchestrator heartbeat, `better-sqlite3`. Next.js is just the UI layer.
+
+Deeper context lives in `zettelkasten/vision.md` and `zettelkasten/architecture-and-design.md`.
