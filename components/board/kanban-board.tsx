@@ -6,11 +6,90 @@ import { CardDetailModal } from "@/components/board/card-detail-modal";
 import { KanbanColumn } from "@/components/board/kanban-column";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import { useBoardStore } from "@/lib/store/board-store";
-import { COLUMNS, PHASE_ORDER, type Phase } from "@/lib/types";
+import { COLUMNS, PHASE_ORDER, type GateStatus, type KanbanCard, type Phase } from "@/lib/types";
+
+interface TransitionArgs {
+  cardId: string;
+  toPhase: Phase;
+  projectPath?: string;
+  changesetRef: string;
+  title: string;
+  original: {
+    phase: Phase;
+    gateStatus: GateStatus;
+    manualOverride?: boolean;
+    modifiedAt: number;
+  };
+  generation: number;
+  reconcileCard: (id: string, card: Partial<KanbanCard>) => void;
+  addFeedItem: (item: { type: "alert"; message: string; cardId?: string }) => void;
+}
+
+/** Latest drag generation per card. A reconcile/rollback only applies if it is
+ *  still the most recent drag for that card, so out-of-order responses from
+ *  rapid successive drags can't clobber the user's latest action. */
+const transitionGen = new Map<string, number>();
+
+/** Persist a DnD phase move to the gate engine and reconcile the optimistic
+ *  client update against the server's stored truth. Rolls back on failure so
+ *  the board never shows a phase the system doesn't actually hold. */
+async function persistTransition({
+  cardId,
+  toPhase,
+  projectPath,
+  changesetRef,
+  title,
+  original,
+  generation,
+  reconcileCard,
+  addFeedItem,
+}: TransitionArgs): Promise<void> {
+  const isLatest = () => transitionGen.get(cardId) === generation;
+  try {
+    const res = await fetch("/api/gates/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "transition", cardId, toPhase, projectPath, changesetRef }),
+    });
+
+    if (!res.ok) throw new Error(`transition failed: ${res.status}`);
+
+    const data = (await res.json()) as {
+      newPhase: Phase;
+      gateStatus: GateStatus;
+      manualOverride: boolean;
+    };
+
+    // Ignore a stale response superseded by a newer drag on the same card.
+    if (!isLatest()) return;
+
+    // Reconcile to the persisted truth (usually matches the optimistic update).
+    reconcileCard(cardId, {
+      phase: data.newPhase,
+      gateStatus: data.gateStatus,
+      manualOverride: data.manualOverride,
+    });
+  } catch {
+    // A newer drag has superseded this one — don't roll back to a stale state.
+    if (!isLatest()) return;
+    // Roll back to the pre-drag state and tell the user the move didn't stick.
+    reconcileCard(cardId, {
+      phase: original.phase,
+      gateStatus: original.gateStatus,
+      manualOverride: original.manualOverride ?? false,
+      modifiedAt: original.modifiedAt,
+    });
+    addFeedItem({
+      type: "alert",
+      message: `Couldn't save the move for "${title}" — reverted to ${original.phase.toUpperCase()}`,
+      cardId,
+    });
+  }
+}
 
 export function KanbanBoard() {
   const getCard = useBoardStore((state) => state.getCard);
-  const updateCard = useBoardStore((state) => state.updateCard);
+  const reconcileCard = useBoardStore((state) => state.reconcileCard);
   const addFeedItem = useOrchestratorStore((state) => state.addFeedItem);
 
   // Subscribe to the actual card object (not just its id) so the open detail
@@ -32,37 +111,64 @@ export function KanbanBoard() {
 
     const fromIdx = PHASE_ORDER.indexOf(card.phase);
     const toIdx = PHASE_ORDER.indexOf(toPhase);
-    const modifiedAt = Date.now();
 
     if (fromIdx === toIdx) return;
 
-    if (toIdx > fromIdx) {
-      updateCard(card.id, {
-        ...card,
-        phase: toPhase,
-        gateStatus: "evaluating",
-        manualOverride: true,
-        modifiedAt,
-      });
-      addFeedItem({
-        type: "alert",
-        message: `Manual override: "${card.title}" moved ${card.phase.toUpperCase()} → ${toPhase.toUpperCase()} while gates are being checked`,
-        cardId: card.id,
-      });
-      return;
-    }
+    // Snapshot original state so we can roll back if the server rejects the move.
+    const original = {
+      phase: card.phase,
+      gateStatus: card.gateStatus,
+      manualOverride: card.manualOverride,
+      modifiedAt: card.modifiedAt,
+    };
+    const fromPhase = card.phase;
+    const modifiedAt = Date.now();
+    const forward = toIdx > fromIdx;
 
-    updateCard(card.id, {
-      ...card,
+    // Mark this as the latest drag for the card so out-of-order responses from
+    // earlier drags can't clobber it.
+    const generation = (transitionGen.get(card.id) ?? 0) + 1;
+    transitionGen.set(card.id, generation);
+
+    // Optimistic update for a snappy board, reconciled against server truth
+    // below. Uses reconcileCard (force-apply) because the drag is the
+    // authoritative local intent — mergeCard's manualOverride protection would
+    // otherwise drop a backward move on a card that's currently overridden.
+    // Forward moves are an override (gates not run), so status is "pending".
+    reconcileCard(card.id, {
       phase: toPhase,
       gateStatus: "pending",
-      manualOverride: false,
+      manualOverride: forward,
       modifiedAt,
     });
-    addFeedItem({
-      type: "transition",
-      message: `"${card.title}" moved back to ${toPhase.toUpperCase()} for rework`,
+
+    if (forward) {
+      addFeedItem({
+        type: "alert",
+        message: `Manual override: "${card.title}" moved ${fromPhase.toUpperCase()} → ${toPhase.toUpperCase()} — gates not verified for this move`,
+        cardId: card.id,
+      });
+    } else {
+      addFeedItem({
+        type: "transition",
+        message: `"${card.title}" moved back to ${toPhase.toUpperCase()} for rework`,
+        cardId: card.id,
+      });
+    }
+
+    // Persist the transition and reconcile with the gate engine's stored truth.
+    // changeset_ref mirrors gate-engine.computeChangesetRef so staleness lines up.
+    const changesetRef = `${card.filesChanged}:${card.additions}:${card.deletions}:${modifiedAt}`;
+    void persistTransition({
       cardId: card.id,
+      toPhase,
+      projectPath: card.project?.path,
+      changesetRef,
+      generation,
+      reconcileCard,
+      addFeedItem,
+      title: card.title,
+      original,
     });
   };
 

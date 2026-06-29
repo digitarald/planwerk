@@ -38,13 +38,16 @@ import { useConnectionStore } from "@/lib/store/connection-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import {
   KanbanCard,
-  Artifact,
   ArtifactType,
   ActivityEntry,
   RiskLevel,
   RuntimeStatus,
   GateStatus,
+  type GateRunView,
+  isGateRunStale,
 } from "@/lib/types";
+import { GatePipeline } from "@/components/gates/gate-pipeline";
+import { useGateRuns } from "@/lib/hooks/use-gate-runs";
 import { cn } from "@/lib/utils";
 
 const artifactIcons: Record<ArtifactType, typeof FileText> = {
@@ -151,6 +154,90 @@ function GateBadge({ status }: { status: GateStatus }) {
   }
 }
 
+function gateRunRelativeTime(iso?: string): string {
+  if (!iso) return "";
+  const ts = Date.parse(iso.includes("Z") || iso.includes("+") ? iso : `${iso}Z`);
+  if (Number.isNaN(ts)) return "";
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function gateRunMethod(run: GateRunView): string {
+  if (run.gateType === "human-approval") return "human approval";
+  if (run.gateType === "review") return "reviewer";
+  return `\`${run.gateType}\``;
+}
+
+/** One real gate verdict: what was checked, the result, freshness, and output. */
+function GateRunRow({
+  run,
+  cardDiff,
+}: {
+  run: GateRunView;
+  cardDiff: { filesChanged: number; additions: number; deletions: number };
+}) {
+  const stale = run.status === "passed" && isGateRunStale(run, cardDiff);
+
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-3",
+        run.status === "passed" && "border-emerald-200 bg-emerald-50/50 dark:border-emerald-800 dark:bg-emerald-950/20",
+        run.status === "failed" && "border-red-200 bg-red-50/50 dark:border-red-800 dark:bg-red-950/20",
+        run.status === "running" && "border-blue-200 bg-blue-50/50 dark:border-blue-800 dark:bg-blue-950/20",
+        stale && "border-amber-300 dark:border-amber-700"
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          {run.status === "passed" && <ShieldCheck className="h-3 w-3 shrink-0 text-emerald-600" />}
+          {run.status === "failed" && <ShieldX className="h-3 w-3 shrink-0 text-red-600" />}
+          {run.status === "running" && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-blue-600" />}
+          <span className="truncate text-xs font-medium">{run.gateName ?? run.gateType}</span>
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            {run.fromPhase} → {run.toPhase}
+          </span>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {stale && (
+            <span className="inline-flex items-center gap-0.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+              <AlertTriangle className="h-2.5 w-2.5" />
+              Stale
+            </span>
+          )}
+          <span
+            className={cn(
+              "rounded px-1.5 py-0.5 text-[10px] font-medium",
+              run.status === "passed" && "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+              run.status === "failed" && "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+              run.status === "running" && "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300"
+            )}
+          >
+            {run.status}
+          </span>
+        </div>
+      </div>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        Verified via {gateRunMethod(run)}
+        {run.completedAt && ` · ${gateRunRelativeTime(run.completedAt)}`}
+        {stale && (
+          <span className="text-amber-600 dark:text-amber-400"> · verified against older code</span>
+        )}
+      </p>
+      {run.output && (
+        <pre className="mt-1.5 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-muted/40 p-2 text-[10px] leading-snug text-muted-foreground">
+          {run.output.length > 600 ? `${run.output.slice(0, 600)}…` : run.output}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 const riskBadgeStyles: Record<RiskLevel, string> = {
   low: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400",
   medium: "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400",
@@ -196,6 +283,15 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   const [message, setMessage] = useState("");
   const [sendState, setSendState] = useState<"idle" | "sending" | "error">("idle");
   const scrimRef = useRef<HTMLDivElement>(null);
+
+  // Real gate verdicts for this card — the modal is the judgment surface where
+  // the user inspects *why* gates passed/failed and how fresh those verdicts are.
+  const { runs: gateRuns } = useGateRuns(card.id, true);
+  const cardDiff = {
+    filesChanged: card.filesChanged,
+    additions: card.additions,
+    deletions: card.deletions,
+  };
 
   // Close on Escape
   useEffect(() => {
@@ -319,6 +415,16 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                   {card.filesChanged} files
                 </span>
               )}
+            </div>
+            <div className="mt-3">
+              <GatePipeline
+                cardId={card.id}
+                currentPhase={card.phase}
+                gateStatus={card.gateStatus}
+                runtime={card.runtime}
+                runs={gateRuns}
+                cardDiff={cardDiff}
+              />
             </div>
           </div>
           <Button
@@ -444,6 +550,20 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                         {card.lastAgentMessage}
                       </ReactMarkdown>
                     </article>
+                  </div>
+                </section>
+              )}
+
+              {/* Gates — real verdicts from the gate engine, with freshness */}
+              {gateRuns.length > 0 && (
+                <section>
+                  <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                    Gates
+                  </h3>
+                  <div className="space-y-2">
+                    {gateRuns.map((run) => (
+                      <GateRunRow key={run.id} run={run} cardDiff={cardDiff} />
+                    ))}
                   </div>
                 </section>
               )}

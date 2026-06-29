@@ -8,12 +8,13 @@ import {
   getCardPhase,
   getGatesForTransition,
   getNextPhase,
+  logManualOverride,
   setCardPhase,
   startGateRun,
   type GateType,
 } from "@/lib/orchestrator/gate-engine";
 import { getCardRisk } from "@/lib/orchestrator/risk-store";
-import type { RiskLevel } from "@/lib/types";
+import { PHASE_ORDER, type Phase, type RiskLevel } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,6 +33,7 @@ export async function POST(request: NextRequest) {
     workingDirectory?: string;
     projectPath?: string;
     changesetRef?: string;
+    toPhase?: Phase;
   };
   const { cardId, action } = body;
 
@@ -40,6 +42,48 @@ export async function POST(request: NextRequest) {
   }
 
   const currentPhase = getCardPhase(cardId);
+
+  // Explicit phase transition from a drag-and-drop move. Handled before the
+  // "final phase" guard so cards can always be dragged back for rework.
+  // The board is a management surface: human overrides are allowed but audited,
+  // and forward moves still leave gate enforcement to the gate engine.
+  if (action === "transition") {
+    const { toPhase } = body;
+    if (!toPhase || !PHASE_ORDER.includes(toPhase)) {
+      return NextResponse.json({ error: "valid toPhase required" }, { status: 400 });
+    }
+
+    const fromIdx = PHASE_ORDER.indexOf(currentPhase);
+    const toIdx = PHASE_ORDER.indexOf(toPhase);
+
+    if (fromIdx === toIdx) {
+      return NextResponse.json({
+        cardId,
+        previousPhase: currentPhase,
+        newPhase: currentPhase,
+        gateStatus: "pending",
+        manualOverride: false,
+        direction: "none",
+      });
+    }
+
+    const direction = toIdx > fromIdx ? "forward" : "backward";
+    setCardPhase(cardId, toPhase);
+    logManualOverride(cardId, currentPhase, toPhase, direction);
+
+    return NextResponse.json({
+      cardId,
+      previousPhase: currentPhase,
+      newPhase: toPhase,
+      // A drag is a manual override: it does not run the skipped transition's
+      // gates. Report "pending" (verification still owed) rather than a fake
+      // "evaluating" — gates are enforced separately by the orchestrator.
+      gateStatus: "pending",
+      manualOverride: direction === "forward",
+      direction,
+    });
+  }
+
   const nextPhase = getNextPhase(currentPhase);
 
   if (!nextPhase) {

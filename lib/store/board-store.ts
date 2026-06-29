@@ -14,6 +14,7 @@ interface BoardState {
   setDetailCard: (id: string | null) => void;
   setCards: (cards: KanbanCard[]) => void;
   updateCard: (id: string, card: Partial<KanbanCard>) => void;
+  reconcileCard: (id: string, card: Partial<KanbanCard>) => void;
   addCard: (card: KanbanCard) => void;
   removeCard: (id: string) => void;
   getCard: (id: string) => KanbanCard | undefined;
@@ -146,6 +147,40 @@ export function selectWorkspaces(state: BoardState): WorkspaceInfo[] {
   return result;
 }
 
+/** Session counts derived from runtime status — single source of truth for
+ *  the feed header and the health bar so they can never disagree (ISSUE-006). */
+export interface SessionCounts {
+  total: number;
+  active: number;
+  idle: number;
+  errors: number;
+  needsInput: number;
+}
+
+export function selectSessionCounts(state: BoardState): SessionCounts {
+  let active = 0;
+  let idle = 0;
+  let errors = 0;
+  let needsInput = 0;
+  for (const c of state.cards) {
+    switch (c.runtime) {
+      case "running":
+        active++;
+        break;
+      case "idle":
+        idle++;
+        break;
+      case "error":
+        errors++;
+        break;
+      case "input-needed":
+        needsInput++;
+        break;
+    }
+  }
+  return { total: state.cards.length, active, idle, errors, needsInput };
+}
+
 /** Whether any visible cards lack a project */
 export function selectHasUnassigned(state: BoardState): boolean {
   const cards = state.hideDone ? state.cards.filter((c) => !c.isArchived) : state.cards;
@@ -175,6 +210,22 @@ export const useBoardStore = create<BoardState>()(
           const cards = state.cards.map((existing) => {
             if (existing.id !== id) return existing;
             return mergeCard(existing, incoming);
+          });
+          return { cards, workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters, state.hideDone) };
+        }),
+      reconcileCard: (id, patch) =>
+        set((state) => {
+          const cards = state.cards.map((existing) => {
+            if (existing.id !== id) return existing;
+            // Authoritative local reconcile (e.g. DnD transition result): force
+            // the provided fields, bypassing the SSE manualOverride protection.
+            const merged = { ...existing };
+            for (const key of Object.keys(patch) as Array<keyof KanbanCard>) {
+              const value = patch[key];
+              if (value === undefined) continue;
+              (merged as Record<string, unknown>)[key] = value;
+            }
+            return merged;
           });
           return { cards, workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters, state.hideDone) };
         }),

@@ -1,7 +1,7 @@
 import "server-only";
 
 import { getDb } from "@/lib/db/schema";
-import { GateStatus, Phase, PHASE_ORDER, RiskLevel } from "@/lib/types";
+import { GateStatus, Phase, PHASE_ORDER, RiskLevel, normalizeChangesetRef } from "@/lib/types";
 
 export type GateType =
   | "lint"
@@ -262,9 +262,13 @@ export function getLatestPassingRuns(
 
   return rows.map((row) => {
     const run = mapGateRun(row);
-    // Mark as stale if the changeset has changed since the gate ran,
-    // or if the run has no ref but we have a current one (legacy run)
-    if (currentChangesetRef && run.changesetRef !== currentChangesetRef) {
+    // Mark as stale if the *code* changed since the gate ran. Compare only the
+    // diff dimensions (files:additions:deletions) — the same normalized signal
+    // the UI uses — so activity-only modifiedAt ticks don't invalidate a verdict.
+    if (
+      currentChangesetRef &&
+      normalizeChangesetRef(run.changesetRef) !== normalizeChangesetRef(currentChangesetRef)
+    ) {
       run.stale = true;
     }
     return run;
@@ -314,6 +318,43 @@ export function getPersistedCardPhase(cardId: string): Phase | undefined {
   const phase = row.phase;
   if (phase === "verify") return "review";
   return phase as Phase;
+}
+
+/** Batch read of persisted phases for the given cards. Cards with no stored
+ *  transition are omitted so callers keep their AHP-derived phase. */
+export function getPersistedPhases(cardIds: string[]): Record<string, Phase> {
+  if (cardIds.length === 0) return {};
+  const db = getDb();
+  const placeholders = cardIds.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `SELECT card_id, phase FROM card_phases WHERE card_id IN (${placeholders})`
+    )
+    .all(...cardIds) as Array<{ card_id: string; phase: string }>;
+
+  const result: Record<string, Phase> = {};
+  for (const row of rows) {
+    result[row.card_id] = (row.phase === "verify" ? "review" : row.phase) as Phase;
+  }
+  return result;
+}
+
+/** Durable audit entry when a human forces a phase move past gates via DnD. */
+export function logManualOverride(
+  cardId: string,
+  fromPhase: Phase,
+  toPhase: Phase,
+  direction: "forward" | "backward"
+): void {
+  const db = getDb();
+  db.prepare(
+    "INSERT INTO heartbeat_log (detection, card_id, action_taken, detail) VALUES (?, ?, ?, ?)"
+  ).run(
+    "manual-override",
+    cardId,
+    direction === "forward" ? "phase-forced" : "phase-reworked",
+    `${fromPhase}->${toPhase}`
+  );
 }
 
 export function deriveGateStatus(

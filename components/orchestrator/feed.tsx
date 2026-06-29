@@ -4,29 +4,43 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { FeedItem } from "@/components/orchestrator/feed-item";
 import { ChatInput } from "@/components/orchestrator/chat-input";
 import { HealthBar } from "@/components/orchestrator/health-bar";
+import { ConnectionDot } from "@/components/connection/connection-dot";
 import { Separator } from "@/components/ui/separator";
-import { useBoardStore } from "@/lib/store/board-store";
+import { useShallow } from "zustand/react/shallow";
+import { useBoardStore, selectSessionCounts } from "@/lib/store/board-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import { Zap } from "lucide-react";
 
 export function OrchestratorFeed() {
   const feedItems = useOrchestratorStore((s) => s.feedItems);
-  const cards = useBoardStore((s) => s.cards);
-
-  const active = cards.filter((c) => c.runtime === "running").length;
-  const idle = cards.filter((c) => c.runtime === "idle").length;
-  const errors = cards.filter((c) => c.runtime === "error").length;
-  const needsInput = cards.filter((c) => c.runtime === "input-needed").length;
+  const monitoringStatus = useOrchestratorStore((s) => s.monitoringStatus);
+  const { total, active, idle, errors, needsInput } = useBoardStore(
+    useShallow(selectSessionCounts)
+  );
 
   return (
     <div className="flex flex-col h-full">
-      <div className="p-3 flex items-center gap-2">
-        <Zap className="h-3.5 w-3.5 text-primary" />
-        <span className="text-xs font-medium">
-          {cards.length > 0
-            ? `Active · ${cards.length} sessions`
-            : "Waiting for sessions..."}
-        </span>
+      <div className="p-3 space-y-1.5">
+        <div className="flex items-center gap-2">
+          <Zap className="h-3.5 w-3.5 text-primary" />
+          <span className="text-xs font-medium">
+            {total > 0
+              ? `${total} session${total === 1 ? "" : "s"}`
+              : "Waiting for sessions..."}
+          </span>
+        </div>
+        {/* Pinned instrument readout — connection + monitoring status, kept
+            out of the conversational feed below. */}
+        <div className="flex items-center gap-2">
+          <ConnectionDot />
+          {monitoringStatus && (
+            <span className="text-[11px] text-muted-foreground/80">
+              · {monitoringStatus.reconnected ? "reconnected · " : ""}
+              monitoring {monitoringStatus.sessionCount} session
+              {monitoringStatus.sessionCount === 1 ? "" : "s"}
+            </span>
+          )}
+        </div>
       </div>
 
       <Separator />

@@ -23,15 +23,25 @@ export interface FeedItem {
   toolName?: string;
 }
 
+/** Instrument-readout state for the connection/monitoring status. Kept out of
+ *  the conversational feed so system status never reads as CTO dialogue. */
+export interface MonitoringStatus {
+  sessionCount: number;
+  reconnected: boolean;
+  updatedAt: number;
+}
+
 interface OrchestratorState {
   feedItems: FeedItem[];
   isProcessing: boolean;
   hasConnectedOnce: boolean;
+  monitoringStatus: MonitoringStatus | null;
   addFeedItem: (item: Omit<FeedItem, "id" | "timestamp">) => void;
   /** Update the most recent response item (for streaming) */
   updateLastResponse: (message: string, done?: boolean) => void;
-  /** Coalesce repeated transition messages (e.g. "Connected") into one item */
-  upsertTransition: (message: string) => void;
+  /** Record connection/monitoring status (rendered in the pinned status line,
+   *  not the feed). */
+  setMonitoringStatus: (sessionCount: number) => void;
   sendMessage: (message: string, hostUrl?: string, cards?: unknown[]) => Promise<void>;
   clearFeed: () => void;
 }
@@ -44,6 +54,7 @@ export const useOrchestratorStore = create<OrchestratorState>()(
       feedItems: [],
       isProcessing: false,
       hasConnectedOnce: false,
+      monitoringStatus: null,
 
       addFeedItem: (item) => {
         feedCounter++;
@@ -71,25 +82,15 @@ export const useOrchestratorStore = create<OrchestratorState>()(
         });
       },
 
-      upsertTransition: (message: string) => {
-        set((state) => {
-          // Find the most recent transition item to coalesce into
-          const idx = state.feedItems.findIndex((f) => f.type === "transition");
-          if (idx !== -1) {
-            const updated = [...state.feedItems];
-            updated[idx] = { ...updated[idx], message, timestamp: Date.now() };
-            return { feedItems: updated, hasConnectedOnce: true };
-          }
-          // First transition ever — create a new one
-          feedCounter++;
-          return {
-            hasConnectedOnce: true,
-            feedItems: [
-              { id: `feed-${feedCounter}`, type: "transition" as const, message, timestamp: Date.now() },
-              ...state.feedItems,
-            ],
-          };
-        });
+      setMonitoringStatus: (sessionCount: number) => {
+        set((state) => ({
+          monitoringStatus: {
+            sessionCount,
+            reconnected: state.hasConnectedOnce,
+            updatedAt: Date.now(),
+          },
+          hasConnectedOnce: true,
+        }));
       },
 
       sendMessage: async (message: string, hostUrl?: string, cards?: unknown[]) => {
@@ -182,6 +183,13 @@ export const useOrchestratorStore = create<OrchestratorState>()(
       }),
       onRehydrateStorage: () => (state) => {
         if (!state) return;
+        // Drop legacy connection/monitoring items that older builds pushed into
+        // the feed — connection status now lives in the pinned status line, so
+        // these would violate the conversation/instrument separation.
+        const legacyMonitoring = /^(Monitoring \d+ session|Reconnected\. Monitoring \d+ session)/;
+        state.feedItems = state.feedItems.filter(
+          (item) => !(item.type === "transition" && legacyMonitoring.test(item.message))
+        );
         feedCounter = state.feedItems.reduce((max, item) => {
           const match = /^feed-(\d+)$/.exec(item.id);
           return match ? Math.max(max, Number(match[1])) : max;

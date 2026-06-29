@@ -5,6 +5,38 @@ import { useEffect, useRef } from "react";
 import { useBoardStore } from "@/lib/store/board-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
+import type { GateStatus, KanbanCard, Phase } from "@/lib/types";
+
+/** Fetch persisted phase + gate status for the given cards and reconcile any
+ *  that differ from their AHP-derived state, so the board agrees with stored
+ *  truth on load. */
+async function hydratePersistedPhases(
+  cards: KanbanCard[],
+  reconcileCard: (id: string, patch: Partial<KanbanCard>) => void
+): Promise<void> {
+  if (cards.length === 0) return;
+  try {
+    const ids = cards.map((c) => c.id).join(",");
+    const res = await fetch(`/api/gates/phases?cardIds=${encodeURIComponent(ids)}`);
+    if (!res.ok) return;
+    const { states } = (await res.json()) as {
+      states: Record<string, { phase: Phase; gateStatus: GateStatus }>;
+    };
+    for (const card of cards) {
+      const persisted = states[card.id];
+      if (persisted && persisted.phase !== card.phase) {
+        // Reconcile phase and its derived gate status together so a hydrated
+        // phase never shows a gate status from the old (AHP-derived) phase.
+        reconcileCard(card.id, {
+          phase: persisted.phase,
+          gateStatus: persisted.gateStatus,
+        });
+      }
+    }
+  } catch {
+    // Best-effort hydration; live SSE remains the source going forward.
+  }
+}
 
 export function useLiveSessions() {
   const status = useConnectionStore((s) => s.status);
@@ -15,10 +47,11 @@ export function useLiveSessions() {
 
   const setCards = useBoardStore((s) => s.setCards);
   const updateCard = useBoardStore((s) => s.updateCard);
+  const reconcileCard = useBoardStore((s) => s.reconcileCard);
   const addCard = useBoardStore((s) => s.addCard);
   const removeCard = useBoardStore((s) => s.removeCard);
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
-  const upsertTransition = useOrchestratorStore((s) => s.upsertTransition);
+  const setMonitoringStatus = useOrchestratorStore((s) => s.setMonitoringStatus);
 
   useEffect(() => {
     // Only connect when status indicates we should be connected/connecting
@@ -65,12 +98,12 @@ export function useLiveSessions() {
           console.info("[ahp:sse]", `init: ${data.cards.length} cards`);
           setCards(data.cards);
           setConnected();
-          const { hasConnectedOnce } = useOrchestratorStore.getState();
-          if (hasConnectedOnce) {
-            upsertTransition(`Reconnected. Monitoring ${data.cards.length} sessions.`);
-          } else {
-            upsertTransition(`Monitoring ${data.cards.length} sessions.`);
-          }
+          // Hydrate persisted phases from SQLite so a reload shows the stored
+          // truth (not an AHP-derived default) and matches the gate engine.
+          void hydratePersistedPhases(data.cards, reconcileCard);
+          // Connection/monitoring status goes to the pinned status line, not the
+          // conversational feed — system state is an instrument, not dialogue.
+          setMonitoringStatus(data.cards.length);
         } else if (data.type === "cardChanged") {
           const card = data.card;
           const existing = useBoardStore.getState().getCard(card.id);
@@ -143,7 +176,7 @@ export function useLiveSessions() {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [status, hostUrl, setCards, updateCard, addCard, removeCard, addFeedItem, upsertTransition, setConnected, setError]);
+  }, [status, hostUrl, setCards, updateCard, reconcileCard, addCard, removeCard, addFeedItem, setMonitoringStatus, setConnected, setError]);
 }
 
 interface HeartbeatActionData {
