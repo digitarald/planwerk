@@ -189,7 +189,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
               }}
               style={style as CSSProperties | undefined}
               className={cn(
-                "cursor-pointer rounded-lg border border-border/60 bg-card p-2 shadow-elevation-xs transition-all duration-150 hover:-translate-y-0.5 hover:shadow-elevation-sm hover:border-primary/30 focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1",
+                "cursor-pointer rounded-lg border border-border/60 bg-card p-2 shadow-elevation-xs transition-all duration-150 hover:-translate-y-0.5 hover:shadow-elevation-sm hover:border-primary/30 focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1 @min-[340px]/col:p-2.5",
                 snapshot.isDragging && "scale-[1.02] shadow-elevation-lg border-primary/30",
                 attentionStyles[card.attention],
                 card.isArchived && "opacity-60"
@@ -202,7 +202,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                 <RiskIndicator level={card.risk} />
               )}
               <div className="min-w-0 flex-1">
-                <h3 className="line-clamp-2 text-xs font-medium leading-tight">
+                <h3 className="line-clamp-2 text-xs font-medium leading-tight @min-[340px]/col:line-clamp-none @min-[340px]/col:text-[13px]">
                   <span>{card.title}</span>
                   {showWorkspaceTags && card.project && (
                     <span className="ml-1 text-[10px] font-normal text-muted-foreground/45">
@@ -224,7 +224,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                     <span title="Manual override active"><AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" /></span>
                   )}
                   {card.runtime !== "input-needed" && card.activity && (
-                    <p className="min-w-0 flex-1 truncate">{card.activity}</p>
+                    <p className="min-w-0 flex-1 truncate @min-[420px]/col:line-clamp-2 @min-[420px]/col:whitespace-normal">{card.activity}</p>
                   )}
                   {showPlanSteps && (
                     <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/75">

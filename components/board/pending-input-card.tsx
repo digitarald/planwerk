@@ -64,17 +64,24 @@ function SingleSelectQuestion({
     return match && !opt.recommended;
   });
 
+  // Only flow options into a 2-col grid when they're short and hint-free —
+  // long sentence-style options would wrap hard in a half-width cell.
+  const hasLongOptions = options.some(
+    (opt) => opt.label.length > 32 || Boolean(opt.description)
+  );
+  const canUseGrid = options.length >= 3 && !hasLongOptions && !hasHints;
+
   return (
     <div className="space-y-2">
       <div className="flex items-start gap-1">
-        <p className="flex-1 text-[11px] font-medium text-foreground/90 leading-snug">
+        <p className="flex-1 text-[11px] font-medium text-foreground/90 leading-snug @min-[340px]/col:text-xs">
           {question.message}
         </p>
         {hasHints && (
           <button
             type="button"
             className={cn(
-              "shrink-0 rounded-full p-0.5 transition-colors",
+              "shrink-0 rounded-full p-0.5 transition-colors @min-[440px]/col:hidden",
               showHints
                 ? "text-primary bg-primary/10"
                 : "text-muted-foreground/50 hover:text-muted-foreground hover:bg-muted"
@@ -89,7 +96,7 @@ function SingleSelectQuestion({
           </button>
         )}
       </div>
-      <div className="flex flex-col gap-1">
+      <div className={cn("grid gap-1", canUseGrid ? "@min-[440px]/col:grid-cols-2" : "grid-cols-1")}>
         {options.map((opt) => {
           const Icon = getOptionIcon(opt.label);
           // Clean up label: strip "(Recommended" suffix since we show it visually
@@ -126,9 +133,10 @@ function SingleSelectQuestion({
               )} />}
               <span className="flex-1 min-w-0">
                 {displayLabel}
-                {showHints && hint && (
+                {hint && (
                   <span className={cn(
                     "ml-1 text-[10px] font-normal animate-in fade-in duration-150",
+                    showHints ? "inline" : "hidden @min-[440px]/col:inline",
                     opt.recommended ? "text-primary-foreground/70" : "text-muted-foreground"
                   )}>
                     — {hint}
@@ -163,7 +171,7 @@ function TextQuestion({
 
   return (
     <div className="space-y-1.5">
-      <p className="text-[11px] font-medium text-foreground/90 leading-snug">
+      <p className="text-[11px] font-medium text-foreground/90 leading-snug @min-[340px]/col:text-xs">
         {question.message}
       </p>
       <div className="flex gap-1">
@@ -209,7 +217,7 @@ function BooleanQuestion({
 }) {
   return (
     <div className="space-y-1.5">
-      <p className="text-[11px] font-medium text-foreground/90 leading-snug">
+      <p className="text-[11px] font-medium text-foreground/90 leading-snug @min-[340px]/col:text-xs">
         {question.message}
       </p>
       <div className="flex gap-1.5">

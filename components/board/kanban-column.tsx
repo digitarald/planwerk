@@ -24,7 +24,9 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
     });
   }));
   const isOverWip = column.wipLimit ? cards.length > column.wipLimit : false;
-  const isEmpty = cards.length === 0;
+  // The define column always hosts the SessionCreator ("New task"), so it must
+  // never collapse to the 60px rail even when it has no cards.
+  const isEmpty = cards.length === 0 && column.id !== "define";
 
   return (
     <section
@@ -32,20 +34,23 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
         "flex flex-col rounded-xl transition-[min-width,max-width,flex] duration-200",
         isEmpty
           ? "min-w-[60px] max-w-[60px] flex-shrink-0"
-          : "min-w-[180px] max-w-[300px] flex-1 bg-[var(--pw-column-bg)]"
+          : "@container/col min-w-[180px] max-w-[480px] flex-1 bg-[var(--pw-column-bg)]"
       )}
       data-column-id={column.id}
     >
-      <div className={cn("flex items-start gap-3 px-3 py-2", isEmpty && "flex-col items-center gap-1 px-1")}>
+      <div className={cn(
+        "flex items-start gap-3 px-3 py-2 @min-[340px]/col:px-4 @min-[340px]/col:py-2.5",
+        isEmpty && "flex-col items-center gap-1 px-1"
+      )}>
         <div className="min-w-0 flex-1">
           <h2 className={cn(
-            "text-xs font-semibold tracking-[0.18em] text-muted-foreground uppercase",
+            "text-xs font-semibold tracking-[0.18em] text-muted-foreground uppercase @min-[340px]/col:text-[13px]",
             isEmpty && "[writing-mode:vertical-lr] rotate-180 text-center"
           )}>
             {column.title}
           </h2>
           {!isEmpty && (
-            <p className="mt-0.5 text-[11px] text-muted-foreground/80">
+            <p className="mt-0.5 text-[11px] text-muted-foreground/80 @min-[420px]/col:text-xs">
               {column.description}
             </p>
           )}
@@ -75,7 +80,7 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
               ref={provided.innerRef}
               {...provided.droppableProps}
               className={cn(
-                "min-h-full rounded-xl border border-transparent px-2 pb-2 transition-all duration-200",
+                "min-h-full rounded-xl border border-transparent px-2 pb-2 transition-all duration-200 @min-[340px]/col:px-3",
                 snapshot.isDraggingOver && "border-primary/20 bg-primary/5 shadow-[inset_0_2px_8px_oklch(0.57_0.17_251/0.06)]"
               )}
             >
