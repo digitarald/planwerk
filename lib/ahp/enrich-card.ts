@@ -9,6 +9,10 @@ import {
 } from "@/lib/orchestrator/gate-engine";
 import { getCardRisk } from "@/lib/orchestrator/risk-store";
 import { getReviewRunsForCard } from "@/lib/orchestrator/review-executor";
+import {
+  getCardStatusHistory,
+  recordCardStatus,
+} from "@/lib/orchestrator/status-history-store";
 
 import { mapSessionToCard } from "./map-session";
 import { AHPSessionSummary } from "./types";
@@ -23,9 +27,17 @@ function safeParseJson(json: string): string[] | undefined {
   }
 }
 
+export interface EnrichOptions {
+  /** When false, read/attach status history but don't record the current
+   *  activity. Used for cached rehydration so a stale cached activity can't be
+   *  written with a fresh timestamp and surface as the card's "current" status. */
+  recordStatus?: boolean;
+}
+
 export function enrichSessionToCard(
   session: AHPSessionSummary,
-  changesetData?: ChangesetEnrichment | null
+  changesetData?: ChangesetEnrichment | null,
+  options?: EnrichOptions
 ): KanbanCard {
   const persistedPhase = getPersistedCardPhase(session.resource);
   const storedRisk = getCardRisk(session.resource);
@@ -59,6 +71,23 @@ export function enrichSessionToCard(
       summary: run.verdictSummary ?? undefined,
       findings: run.findingsJson ? safeParseJson(run.findingsJson) : undefined,
     }));
+  }
+
+  // Record the current status line and attach the recent trail. Best-effort:
+  // a history failure must never break card enrichment.
+  try {
+    if (options?.recordStatus !== false && card.activity) {
+      recordCardStatus(session.resource, card.activity);
+    }
+    const history = getCardStatusHistory(session.resource, 3);
+    if (history.length > 0) {
+      card.statusHistory = history;
+    }
+  } catch (err) {
+    console.warn(
+      "[status-history] failed to record/read status:",
+      err instanceof Error ? err.message : err
+    );
   }
 
   return card;

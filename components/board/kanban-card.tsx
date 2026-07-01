@@ -32,6 +32,7 @@ import {
   RiskLevel,
   RuntimeStatus,
   GateStatus,
+  StatusEntry,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { copyDebugState } from "@/lib/utils/copy-debug-state";
@@ -145,6 +146,53 @@ function GateIndicator({ status }: { status: GateStatus }) {
   }
 }
 
+/** Split a card's status into the current (live) line and older trail entries.
+ *  The current line always comes from the live `activity` so an idle card can
+ *  never present a stale historical status as if it were current. Older entries
+ *  come from persisted history, excluding the one that mirrors the current line. */
+function getTrailStatuses(card: KanbanCardType): {
+  current?: string;
+  older: StatusEntry[];
+} {
+  const current = card.activity || undefined;
+  const history = card.statusHistory ?? [];
+
+  // Drop the trailing history entry when it just mirrors the current activity,
+  // so it isn't shown twice (once bold as current, once faded above).
+  const older =
+    current && history.length > 0 && history[history.length - 1].message === current
+      ? history.slice(0, -1)
+      : history;
+
+  return { current, older: older.slice(-2) };
+}
+
+/** Older status lines stacked above the current one, progressively dimmer and
+ *  smaller so the card reads as a fading trail of recent progress. */
+function StatusTrailHistory({ entries }: { entries: StatusEntry[] }) {
+  if (entries.length === 0) return null;
+  return (
+    <div className="mt-1 space-y-px">
+      {entries.map((entry, idx) => {
+        // Oldest entry is the most faded; the one nearest the current line least.
+        const fromTop = entries.length - idx; // 2 for oldest of two, 1 for newer
+        const opacity = fromTop >= 2 ? "opacity-35" : "opacity-55";
+        return (
+          <p
+            key={`${entry.timestamp}-${idx}-${entry.message}`}
+            className={cn(
+              "truncate text-[10px] leading-tight text-muted-foreground/80 animate-in fade-in slide-in-from-bottom-1 duration-300",
+              opacity
+            )}
+          >
+            {entry.message}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 function formatRelativeTime(timestamp: number): string {
   const diff = Math.max(0, Date.now() - timestamp);
   const seconds = Math.floor(diff / 1000);
@@ -167,6 +215,10 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
   const feedItems = useOrchestratorStore((s) => s.feedItems);
   const showPlanSteps = card.planSteps.total > 0;
   const showStats = card.filesChanged > 0;
+  const { current: currentStatus, older: olderStatuses } =
+    card.runtime === "input-needed"
+      ? { current: undefined, older: [] as StatusEntry[] }
+      : getTrailStatuses(card);
 
   return (
     <Draggable draggableId={card.id} index={index} isDragDisabled={card.isArchived}>
@@ -215,6 +267,10 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                   <InputContext card={card} />
                 )}
 
+                {olderStatuses.length > 0 && (
+                  <StatusTrailHistory entries={olderStatuses} />
+                )}
+
                 <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
                   {card.runtime !== "input-needed" && (
                     <RuntimeIndicator status={card.runtime} />
@@ -223,8 +279,13 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                   {card.manualOverride && (
                     <span title="Manual override active"><AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" /></span>
                   )}
-                  {card.runtime !== "input-needed" && card.activity && (
-                    <p className="min-w-0 flex-1 truncate @min-[420px]/col:line-clamp-2 @min-[420px]/col:whitespace-normal">{card.activity}</p>
+                  {currentStatus && (
+                    <p
+                      key={currentStatus}
+                      className="min-w-0 flex-1 truncate animate-in fade-in slide-in-from-bottom-1 duration-300 @min-[420px]/col:line-clamp-2 @min-[420px]/col:whitespace-normal"
+                    >
+                      {currentStatus}
+                    </p>
                   )}
                   {showPlanSteps && (
                     <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/75">

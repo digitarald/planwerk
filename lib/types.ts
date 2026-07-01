@@ -27,6 +27,14 @@ export interface ActivityEntry {
   message: string;
 }
 
+/** A single recorded status (activity) line for a card, used to render the
+ *  fading progress trail. Chronological order is oldest→newest; the last entry
+ *  mirrors the card's current `activity`. */
+export interface StatusEntry {
+  message: string;
+  timestamp: number;
+}
+
 export type PendingInputOptionKind = "text" | "number" | "boolean" | "single-select" | "multi-select";
 
 export interface PendingInputOption {
@@ -87,6 +95,8 @@ export interface KanbanCard {
   fileChanges?: FileChange[];
   isArchived?: boolean;
   reviewFindings?: ReviewFinding[];
+  /** Recent status lines (oldest→newest), for the fading progress trail. */
+  statusHistory?: StatusEntry[];
 }
 
 export interface ReviewFinding {

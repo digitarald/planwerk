@@ -182,7 +182,7 @@ export function KanbanBoard() {
         </div>
       </DragDropContext>
 
-      {detailCard && <CardDetailModal card={detailCard} />}
+      {detailCard && <CardDetailModal key={detailCard.id} card={detailCard} />}
     </div>
   );
 }

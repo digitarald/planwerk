@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { createAHPBridge, BridgeEvent } from "@/lib/ahp/client-bridge";
-import { enrichSessionToCard } from "@/lib/ahp/enrich-card";
+import { enrichSessionToCard, type EnrichOptions } from "@/lib/ahp/enrich-card";
 import { mapSessionToCard } from "@/lib/ahp/map-session";
 import type { ChangesetEnrichment } from "@/lib/ahp/changeset-enricher";
 import { ConnectionError } from "@/lib/ahp/connection-error";
@@ -32,10 +32,11 @@ interface TriageEvent {
 
 function safeEnrich(
   session: AHPSessionSummary,
-  changesetData?: ChangesetEnrichment | null
+  changesetData?: ChangesetEnrichment | null,
+  options?: EnrichOptions
 ): KanbanCard {
   try {
-    return enrichSessionToCard(session, changesetData);
+    return enrichSessionToCard(session, changesetData, options);
   } catch (err) {
     console.warn("[ahp:sse] enrichment failed, using base mapping:", err instanceof Error ? err.message : err);
     return mapSessionToCard(session);
@@ -194,7 +195,7 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
         try {
           const cached = getCachedSessions(hostUrl);
           if (cached.length > 0) {
-            const cards = cached.map((c) => safeEnrich(c.summary, c.enrichment));
+            const cards = cached.map((c) => safeEnrich(c.summary, c.enrichment, { recordStatus: false }));
             currentCards = cards;
             const cacheEvent: CardStreamEvent = { type: "init", cards };
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(cacheEvent)}\n\n`));

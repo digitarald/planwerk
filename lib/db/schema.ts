@@ -97,6 +97,15 @@ export function getDb(): Database.Database {
       );
 
       CREATE INDEX IF NOT EXISTS idx_heartbeat_log_card ON heartbeat_log(card_id);
+
+      CREATE TABLE IF NOT EXISTS card_status_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        card_id TEXT NOT NULL,
+        message TEXT NOT NULL,
+        recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_card_status_history_card ON card_status_history(card_id);
     `);
 
     // Mark any gate runs left running from a previous process as failed

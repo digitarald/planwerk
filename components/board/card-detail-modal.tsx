@@ -14,8 +14,7 @@ import {
   BookOpen,
   ClipboardCheck,
   Scale,
-  Wrench,
-  Bot,
+  Clock,
   Shield,
   ShieldAlert,
   Loader2,
@@ -39,7 +38,7 @@ import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import {
   KanbanCard,
   ArtifactType,
-  ActivityEntry,
+  StatusEntry,
   RiskLevel,
   RuntimeStatus,
   GateStatus,
@@ -57,12 +56,6 @@ const artifactIcons: Record<ArtifactType, typeof FileText> = {
   spec: BookOpen,
   "test-plan": ClipboardCheck,
   decision: Scale,
-};
-
-const activityIcons: Record<ActivityEntry["type"], typeof Wrench> = {
-  tool: Wrench,
-  agent: Bot,
-  gate: Shield,
 };
 
 function formatTime(timestamp: number): string {
@@ -282,7 +275,34 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   const hostUrl = useConnectionStore((s) => s.hostUrl);
   const [message, setMessage] = useState("");
   const [sendState, setSendState] = useState<"idle" | "sending" | "error">("idle");
+  const [statusHistory, setStatusHistory] = useState<StatusEntry[]>(
+    card.statusHistory ?? []
+  );
   const scrimRef = useRef<HTMLDivElement>(null);
+
+  // Signature of the newest recorded status so the timeline refetches when a new
+  // status arrives on the live card (keeps the open modal from going stale).
+  const latestStatus = card.statusHistory?.[card.statusHistory.length - 1];
+  const latestStatusKey = latestStatus
+    ? `${latestStatus.timestamp}-${latestStatus.message}`
+    : "";
+
+  // Fetch the fuller status-line history for the timeline. Falls back to the
+  // last few entries already on the card while this loads.
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/cards/status-history?cardId=${encodeURIComponent(card.id)}&limit=20`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { entries?: StatusEntry[] } | null) => {
+        if (!cancelled && data?.entries) setStatusHistory(data.entries);
+      })
+      .catch(() => {
+        // Best-effort; keep the card-provided fallback.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [card.id, latestStatusKey]);
 
   // Real gate verdicts for this card — the modal is the judgment surface where
   // the user inspects *why* gates passed/failed and how fresh those verdicts are.
@@ -345,7 +365,6 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   };
 
   const artifacts = card.artifacts ?? [];
-  const recentActivity = card.recentActivity ?? [];
   const fileChanges = card.fileChanges ?? [];
   const planArtifact = artifacts.find(
     (a) => a.type === "plan" && a.contentRef
@@ -458,27 +477,44 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 </section>
               )}
 
-              {/* Recent Activity */}
-              {recentActivity.length > 0 && (
+              {/* Status history */}
+              {statusHistory.length > 0 && (
                 <section>
                   <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-                    Recent Activity
+                    Status history
                   </h3>
-                  <div className="space-y-1">
-                    {recentActivity.map((entry, idx) => {
-                      const Icon = activityIcons[entry.type];
+                  <div className="relative space-y-0.5 pl-1">
+                    {[...statusHistory].reverse().map((entry, idx) => {
+                      const isCurrent = idx === 0;
                       return (
                         <div
-                          key={idx}
-                          className="flex items-start gap-2.5 py-1.5 text-sm"
+                          key={`${entry.timestamp}-${idx}`}
+                          className={cn(
+                            "relative flex items-start gap-2.5 py-1.5 text-sm",
+                            !isCurrent && "opacity-70"
+                          )}
                         >
-                          <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded bg-muted">
-                            <Icon className="h-3 w-3 text-muted-foreground" />
+                          <div className="mt-0.5 flex w-4 shrink-0 flex-col items-center self-stretch">
+                            <span
+                              className={cn(
+                                "mt-1 h-2 w-2 shrink-0 rounded-full",
+                                isCurrent ? "bg-primary" : "bg-muted-foreground/40"
+                              )}
+                            />
+                            {idx < statusHistory.length - 1 && (
+                              <span className="mt-0.5 w-px flex-1 bg-border" />
+                            )}
                           </div>
-                          <span className="min-w-0 flex-1 text-[13px] leading-relaxed text-foreground/80">
+                          <span
+                            className={cn(
+                              "min-w-0 flex-1 text-[13px] leading-relaxed",
+                              isCurrent ? "text-foreground/90" : "text-foreground/70"
+                            )}
+                          >
                             {entry.message}
                           </span>
-                          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground/60">
+                          <span className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums text-muted-foreground/60">
+                            <Clock className="h-3 w-3" />
                             {formatTime(entry.timestamp)}
                           </span>
                         </div>
