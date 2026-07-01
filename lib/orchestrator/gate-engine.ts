@@ -1,5 +1,8 @@
 import "server-only";
 
+import { exec } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+
 import { getDb } from "@/lib/db/schema";
 import { GateStatus, Phase, PHASE_ORDER, RiskLevel, normalizeChangesetRef } from "@/lib/types";
 
@@ -232,6 +235,56 @@ export function completeGateRun(
   db.prepare(
     "UPDATE gate_runs SET status = ?, output = ?, completed_at = datetime('now') WHERE id = ?"
   ).run(status, output || null, runId);
+}
+
+const GATE_MAX_OUTPUT = 64 * 1024;
+const GATE_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Execute a gate command asynchronously and complete the run on exit.
+ * Validates the working directory up front: a missing/invalid cwd otherwise
+ * surfaces from `exec` as a cryptic "spawn /bin/sh ENOENT", so we fail fast with
+ * a clear, actionable message instead. Shared by the heartbeat and the manual
+ * gate-run API so both behave identically.
+ */
+export function executeGateCommand(
+  runId: number,
+  command: string,
+  cwd: string
+): void {
+  let cwdOk = false;
+  try {
+    cwdOk = existsSync(cwd) && statSync(cwd).isDirectory();
+  } catch {
+    cwdOk = false;
+  }
+
+  if (!cwdOk) {
+    completeGateRun(runId, "failed", `Working directory not found: ${cwd}`);
+    return;
+  }
+
+  try {
+    exec(
+      command,
+      { cwd, timeout: GATE_TIMEOUT_MS, maxBuffer: GATE_MAX_OUTPUT },
+      (error, stdout, stderr) => {
+        if (error) {
+          const output = (stderr || stdout || error.message).slice(0, GATE_MAX_OUTPUT);
+          completeGateRun(runId, "failed", output);
+        } else {
+          const output = (stdout || "All checks passed").slice(0, GATE_MAX_OUTPUT);
+          completeGateRun(runId, "passed", output);
+        }
+      }
+    );
+  } catch (err) {
+    completeGateRun(
+      runId,
+      "failed",
+      err instanceof Error ? err.message : "Failed to start gate command"
+    );
+  }
 }
 
 export function getGateRunsForCard(cardId: string): GateRun[] {

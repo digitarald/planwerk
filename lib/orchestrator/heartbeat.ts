@@ -1,12 +1,10 @@
 import "server-only";
 
-import { exec } from "node:child_process";
-
 import { getDb } from "@/lib/db/schema";
-import { KanbanCard, Phase, RiskLevel, PendingInput } from "@/lib/types";
+import { KanbanCard, Phase, RiskLevel, PendingInput, normalizeChangesetRef } from "@/lib/types";
 import { loadConfig } from "./skill-config";
 import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills, hasPlanRubberDuck, recordPlanRubberDuck } from "./review-executor";
-import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard, completeGateRun } from "./gate-engine";
+import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard, completeGateRun, executeGateCommand } from "./gate-engine";
 import { getCardRisk } from "./risk-store";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
 import { injectMessage, answerInput, requestPlanChanges } from "@/lib/ahp/session-messenger";
@@ -310,18 +308,33 @@ async function runBuildPipeline(
     state.pipelineStage.set(card.id, "gates");
 
     const existingRuns = getGateRunsForCard(card.id);
+    const currentCodeRef = normalizeChangesetRef(changesetRef);
     for (const gate of deterministicPending) {
-      // Check if a run already exists for this gate
+      // Compare on the normalized (code-only) changeset ref: the raw ref carries
+      // a modifiedAt suffix that ticks on any activity, which would otherwise
+      // make every gate look "new" and re-run constantly.
+
+      // Skip if a run is already in flight for this code changeset.
       const alreadyRunning = existingRuns.find(
         (r) => r.gateType === gate.gateType && r.status === "running" &&
-          r.changesetRef === changesetRef
+          normalizeChangesetRef(r.changesetRef) === currentCodeRef
       );
       if (alreadyRunning) continue;
+
+      // Skip if this gate already failed for the same code changeset. Re-running
+      // a deterministic gate against unchanged code just reproduces the failure,
+      // so we wait for the code (and thus the ref) to change. Without this the
+      // heartbeat re-triggers broken gates every cycle (thousands of dead runs).
+      const alreadyFailed = existingRuns.find(
+        (r) => r.gateType === gate.gateType && r.status === "failed" &&
+          normalizeChangesetRef(r.changesetRef) === currentCodeRef
+      );
+      if (alreadyFailed) continue;
 
       // Detect stale passed gates that need re-triggering
       const staleRun = existingRuns.find(
         (r) => r.gateType === gate.gateType && r.status === "passed" &&
-          changesetRef && r.changesetRef !== changesetRef
+          changesetRef && normalizeChangesetRef(r.changesetRef) !== currentCodeRef
       );
 
       // Start (or re-start) the gate
@@ -719,30 +732,6 @@ async function runReviewPipeline(
   }
 
   return actions;
-}
-
-/**
- * Execute a gate command asynchronously. Completes the gate run on exit.
- */
-function executeGateCommand(runId: number, command: string, cwd: string): void {
-  const maxOutput = 64 * 1024;
-  try {
-    exec(
-      command,
-      { cwd, timeout: 5 * 60_000, maxBuffer: maxOutput },
-      (error, stdout, stderr) => {
-        if (error) {
-          const output = (stderr || stdout || error.message).slice(0, maxOutput);
-          completeGateRun(runId, "failed", output);
-        } else {
-          const output = (stdout || "All checks passed").slice(0, maxOutput);
-          completeGateRun(runId, "passed", output);
-        }
-      }
-    );
-  } catch (err) {
-    completeGateRun(runId, "failed", err instanceof Error ? err.message : "Failed to start gate command");
-  }
 }
 
 function buildNudgeMessage(card: KanbanCard, nudgesSent: number): string {

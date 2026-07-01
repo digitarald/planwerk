@@ -1,10 +1,9 @@
-import { exec } from "node:child_process";
-
 import { NextRequest, NextResponse } from "next/server";
 
 import {
   canAdvancePhase,
   completeGateRun,
+  executeGateCommand,
   getCardPhase,
   getGatesForTransition,
   getNextPhase,
@@ -178,30 +177,7 @@ export async function POST(request: NextRequest) {
     } else {
       // gate.command is trusted: sourced from DEFAULT_GATES or admin gate_configs table
       const cwd = body.workingDirectory || process.cwd();
-      const maxOutput = 64 * 1024;
-
-      try {
-        exec(
-          gate.command,
-          {
-            cwd,
-            timeout: 5 * 60 * 1000,
-            maxBuffer: maxOutput,
-          },
-          (error, stdout, stderr) => {
-            if (error) {
-              const output = (stderr || stdout || error.message).slice(0, maxOutput);
-              completeGateRun(runId, "failed", output);
-            } else {
-              const output = (stdout || "All checks passed").slice(0, maxOutput);
-              completeGateRun(runId, "passed", output);
-            }
-          }
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Failed to start gate command";
-        completeGateRun(runId, "failed", message);
-      }
+      executeGateCommand(runId, gate.command, cwd);
     }
 
     return NextResponse.json({ runId, status: "running" });
