@@ -35,6 +35,7 @@ import {
   StatusEntry,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { isGenericStatus } from "@/lib/utils/status-placeholders";
 import { copyDebugState } from "@/lib/utils/copy-debug-state";
 
 interface KanbanCardProps {
@@ -149,13 +150,17 @@ function GateIndicator({ status }: { status: GateStatus }) {
 /** Split a card's status into the current (live) line and older trail entries.
  *  The current line always comes from the live `activity` so an idle card can
  *  never present a stale historical status as if it were current. Older entries
- *  come from persisted history, excluding the one that mirrors the current line. */
+ *  come from persisted history, excluding the one that mirrors the current line.
+ *  Generic placeholder statuses (e.g. "Thinking") are dropped from both, since
+ *  the runtime spinner already conveys that state. */
 function getTrailStatuses(card: KanbanCardType): {
   current?: string;
   older: StatusEntry[];
 } {
-  const current = card.activity || undefined;
-  const history = card.statusHistory ?? [];
+  const current = isGenericStatus(card.activity) ? undefined : card.activity || undefined;
+  const history = (card.statusHistory ?? []).filter(
+    (entry) => !isGenericStatus(entry.message)
+  );
 
   // Drop the trailing history entry when it just mirrors the current activity,
   // so it isn't shown twice (once bold as current, once faded above).

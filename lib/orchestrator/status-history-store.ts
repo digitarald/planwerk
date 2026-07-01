@@ -2,15 +2,10 @@ import "server-only";
 
 import { getDb } from "@/lib/db/schema";
 import { StatusEntry } from "@/lib/types";
+import { isGenericStatus } from "@/lib/utils/status-placeholders";
 
 /** Keep at most this many status rows per card; older rows are pruned on write. */
 const MAX_ROWS_PER_CARD = 20;
-
-/** Generic placeholder statuses that carry no real progress signal (e.g. the
- *  "Thinking" fallback used when a running session reports no activity). These
- *  are never recorded into history so the trail stays meaningful. Compared
- *  case-insensitively against the trimmed message. */
-const IGNORED_STATUSES: ReadonlySet<string> = new Set(["thinking"]);
 
 interface StatusRow {
   message: string;
@@ -30,14 +25,14 @@ function parseRecordedAt(recordedAt: string): number {
 /**
  * Record a new status (activity) line for a card.
  * No-ops on empty/whitespace messages, on generic placeholder statuses (see
- * IGNORED_STATUSES), and when the message is identical to the card's most recent
+ * isGenericStatus), and when the message is identical to the card's most recent
  * entry (dedupes consecutive repeats). Prunes to the last MAX_ROWS_PER_CARD rows
  * after inserting.
  */
 export function recordCardStatus(cardId: string, message: string): void {
   const trimmed = message.trim();
   if (!trimmed) return;
-  if (IGNORED_STATUSES.has(trimmed.toLowerCase())) return;
+  if (isGenericStatus(trimmed)) return;
 
   const db = getDb();
 

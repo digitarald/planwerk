@@ -48,6 +48,7 @@ import {
 import { GatePipeline } from "@/components/gates/gate-pipeline";
 import { useGateRuns } from "@/lib/hooks/use-gate-runs";
 import { cn } from "@/lib/utils";
+import { isGenericStatus } from "@/lib/utils/status-placeholders";
 
 const artifactIcons: Record<ArtifactType, typeof FileText> = {
   plan: FileText,
@@ -369,6 +370,11 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   const planArtifact = artifacts.find(
     (a) => a.type === "plan" && a.contentRef
   );
+  // Drop generic placeholders (e.g. stale "Thinking" rows) from the timeline.
+  const visibleStatusHistory = statusHistory.filter(
+    (entry) => !isGenericStatus(entry.message)
+  );
+  const showCurrentActivity = card.activity && !isGenericStatus(card.activity);
   const [filesExpanded, setFilesExpanded] = useState(fileChanges.length <= 12);
 
   return (
@@ -466,7 +472,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
           <ScrollArea className="min-h-0">
             <div className="flex flex-col gap-5 p-6">
               {/* Current Activity — always visible */}
-              {card.activity && (
+              {showCurrentActivity && (
                 <section>
                   <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
                     Current Activity
@@ -478,13 +484,13 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               )}
 
               {/* Status history */}
-              {statusHistory.length > 0 && (
+              {visibleStatusHistory.length > 0 && (
                 <section>
                   <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
                     Status history
                   </h3>
                   <div className="relative space-y-0.5 pl-1">
-                    {[...statusHistory].reverse().map((entry, idx) => {
+                    {[...visibleStatusHistory].reverse().map((entry, idx) => {
                       const isCurrent = idx === 0;
                       return (
                         <div
@@ -501,7 +507,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                                 isCurrent ? "bg-primary" : "bg-muted-foreground/40"
                               )}
                             />
-                            {idx < statusHistory.length - 1 && (
+                            {idx < visibleStatusHistory.length - 1 && (
                               <span className="mt-0.5 w-px flex-1 bg-border" />
                             )}
                           </div>
