@@ -167,12 +167,12 @@ function getTrailStatuses(card: KanbanCardType): {
   return { current, older: older.slice(-2) };
 }
 
-/** Older status lines stacked above the current one, progressively dimmer and
- *  smaller so the card reads as a fading trail of recent progress. */
+/** Older status lines stacked above the current one, progressively dimmer so
+ *  the card reads as a fading trail of recent progress. */
 function StatusTrailHistory({ entries }: { entries: StatusEntry[] }) {
   if (entries.length === 0) return null;
   return (
-    <div className="mt-1 space-y-px">
+    <div className="mt-1 space-y-0">
       {entries.map((entry, idx) => {
         // Oldest entry is the most faded; the one nearest the current line least.
         const fromTop = entries.length - idx; // 2 for oldest of two, 1 for newer
@@ -282,7 +282,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                   {currentStatus && (
                     <p
                       key={currentStatus}
-                      className="min-w-0 flex-1 truncate animate-in fade-in slide-in-from-bottom-1 duration-300 @min-[420px]/col:line-clamp-2 @min-[420px]/col:whitespace-normal"
+                      className="min-w-0 flex-1 truncate text-[10px] leading-tight animate-in fade-in slide-in-from-bottom-1 duration-300 @min-[420px]/col:line-clamp-2 @min-[420px]/col:whitespace-normal"
                     >
                       {currentStatus}
                     </p>
