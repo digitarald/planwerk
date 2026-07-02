@@ -149,7 +149,17 @@ function inferPhase(
   // Archived sessions with code changes are completed work → ship
   if (isArchived && hasCodeChanges) return "ship";
 
-  if (existingPhase) return existingPhase;
+  // Persisted phases past the default 'define' are authoritative — respect
+  // deliberate/gate-driven progression and never re-infer over them.
+  if (existingPhase && existingPhase !== "define") return existingPhase;
+
+  // A card persisted as the default 'define' phase gets stranded once it gains
+  // code: the persisted-phase short-circuit above used to return 'define'
+  // before the code checks below ever ran. Let *confirmed* code changes
+  // re-promote it — the same classification a brand-new card with code would
+  // receive. Non-code diffs (codeFileCount 0/undefined, e.g. plan/notes files)
+  // keep it in Define, so plan-only work isn't mislabeled as Build.
+  if (existingPhase === "define" && !hasDefiniteCodeChanges) return "define";
 
   // Review keywords + code changes → review
   if (REVIEW_KEYWORDS.test(activity) && hasCodeChanges) return "review";
