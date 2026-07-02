@@ -15,6 +15,7 @@ import {
   XCircle,
 
   Bug,
+  RotateCcw,
 } from "lucide-react";
 
 import { PendingInputCard } from "./pending-input-card";
@@ -26,6 +27,7 @@ import {
 } from "@/components/ui/context-menu";
 import { useBoardStore, selectShowWorkspaceTags } from "@/lib/store/board-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
+import { useConnectionStore } from "@/lib/store/connection-store";
 import {
   AttentionLevel,
   KanbanCard as KanbanCardType,
@@ -216,10 +218,30 @@ function formatRelativeTime(timestamp: number): string {
 
 export function KanbanCard({ card, index }: KanbanCardProps) {
   const setDetailCard = useBoardStore((state) => state.setDetailCard);
+  const updateCard = useBoardStore((state) => state.updateCard);
   const showWorkspaceTags = useBoardStore(selectShowWorkspaceTags);
   const feedItems = useOrchestratorStore((s) => s.feedItems);
+  const hostUrl = useConnectionStore((s) => s.hostUrl);
   const showPlanSteps = card.planSteps.total > 0;
   const showStats = card.filesChanged > 0;
+
+  const setArchived = async (isArchived: boolean) => {
+    if (!hostUrl) return;
+    // Optimistic: hide/reveal immediately; the SSE bridge confirms with the real
+    // status (65) shortly after. Revert if the host never applies it.
+    updateCard(card.id, { isArchived });
+    try {
+      const res = await fetch("/api/ahp/sessions/archive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hostUrl, sessionUri: card.id, isArchived }),
+      });
+      if (!res.ok) throw new Error("archive failed");
+    } catch {
+      updateCard(card.id, { isArchived: !isArchived });
+    }
+  };
+
   const { current: currentStatus, older: olderStatuses } =
     card.runtime === "input-needed"
       ? { current: undefined, older: [] as StatusEntry[] }
@@ -316,6 +338,23 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
 
             </ContextMenuTrigger>
             <ContextMenuContent>
+              {card.isArchived ? (
+                <ContextMenuItem
+                  disabled={!hostUrl}
+                  onClick={() => void setArchived(false)}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Reopen
+                </ContextMenuItem>
+              ) : (
+                <ContextMenuItem
+                  disabled={!hostUrl}
+                  onClick={() => void setArchived(true)}
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Mark as done
+                </ContextMenuItem>
+              )}
               <ContextMenuItem
                 onClick={() => copyDebugState(card, feedItems)}
               >

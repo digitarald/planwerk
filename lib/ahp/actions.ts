@@ -4,6 +4,7 @@ import type {
   ChatInputAnswerChangedAction,
   ChatInputCompletedAction,
   ChatInputAnswer,
+  SessionIsArchivedChangedAction,
   Message,
   MessageOrigin,
 } from "@microsoft/agent-host-protocol";
@@ -73,4 +74,12 @@ export function chatInputCompleted(
     action.answers = answers as Record<string, ChatInputAnswer>;
   }
   return action;
+}
+
+/** Archive or unarchive a session (session-level action, dispatched on the session URI). */
+export function sessionIsArchivedChanged(isArchived: boolean): SessionIsArchivedChangedAction {
+  return {
+    type: "session/isArchivedChanged" as SessionIsArchivedChangedAction["type"],
+    isArchived,
+  };
 }

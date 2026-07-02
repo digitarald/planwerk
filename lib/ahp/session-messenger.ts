@@ -1,14 +1,15 @@
 import "server-only";
 
-import type { SessionState, ChatState } from "@microsoft/agent-host-protocol";
+import type { SessionState, ChatState, SessionLifecycle } from "@microsoft/agent-host-protocol";
 
 import { getAHPClient, releaseAHPClient } from "./client-manager";
-import { parseAHPStatus } from "./types";
+import { AHPStatus, parseAHPStatus } from "./types";
 import {
   chatTurnStarted,
   chatQueuedMessage,
   chatInputAnswerChanged,
   chatInputCompleted,
+  sessionIsArchivedChanged,
 } from "./actions";
 
 const debug = (...args: unknown[]) => {
@@ -313,6 +314,95 @@ export async function getSessionStatus(
       ...parsed,
     };
   } finally {
+    releaseAHPClient(hostUrl);
+  }
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Archive (or unarchive) a session via the client-dispatchable
+ * `session/isArchivedChanged` action so the change propagates to every AHP client.
+ *
+ * Copilot CLI sessions are lazily resumed by the host, and actions dispatched
+ * while a session is still "unknown" (mid-resume) are silently dropped. To avoid
+ * that race we:
+ *   1. keep the session subscribed (a single `unsubscribe` at the end) so the host
+ *      holds it resident,
+ *   2. gate the dispatch on `lifecycle === "ready"`,
+ *   3. dispatch, then *verify* by re-reading `summary.status` (a `ping` only flushes
+ *      the transport — it does not confirm the action was applied),
+ *   4. re-dispatch once and fail if the bit never appears, so callers can revert.
+ */
+export async function setSessionArchived(
+  hostUrl: string,
+  sessionUri: string,
+  isArchived: boolean,
+  options?: { readyTimeoutMs?: number; verifyTimeoutMs?: number; pollIntervalMs?: number }
+): Promise<{ success: boolean; status: number; verified: boolean }> {
+  const readyTimeoutMs = options?.readyTimeoutMs ?? 15_000;
+  const verifyTimeoutMs = options?.verifyTimeoutMs ?? 8_000;
+  const pollMs = options?.pollIntervalMs ?? 1_000;
+  const targetArchived = isArchived;
+
+  const client = await getAHPClient(hostUrl);
+
+  // Read a fresh server snapshot without dropping the subscription, so the host
+  // keeps the session resident across reads/dispatch. `unsubscribe` runs once in
+  // the finally block.
+  const read = async (): Promise<{ lifecycle: SessionLifecycle | undefined; status: number }> => {
+    const { result, subscription } = await client.subscribe(sessionUri);
+    void subscription.close();
+    const state = result.snapshot?.state as SessionState | undefined;
+    return { lifecycle: state?.lifecycle, status: state?.summary?.status ?? 0 };
+  };
+
+  const matchesTarget = (status: number) =>
+    ((status & AHPStatus.IsArchived) !== 0) === targetArchived;
+
+  try {
+    // 1. Readiness gate — wait until the host reports the session loaded.
+    let snapshot = await read();
+    const readyDeadline = Date.now() + readyTimeoutMs;
+    while (snapshot.lifecycle !== "ready" && Date.now() < readyDeadline) {
+      await sleep(pollMs);
+      snapshot = await read();
+    }
+
+    // Already in the desired state — nothing to dispatch.
+    if (matchesTarget(snapshot.status)) {
+      debug("setSessionArchived: already in target state", sessionUri, snapshot.status);
+      return { success: true, status: snapshot.status, verified: true };
+    }
+
+    // 2. Dispatch the archive/unarchive action on the session channel.
+    client.dispatch(sessionUri, sessionIsArchivedChanged(isArchived));
+    await client.ping();
+
+    // 3. Verify the summary actually reflects the change (with one re-dispatch).
+    const verifyDeadline = Date.now() + verifyTimeoutMs;
+    let redispatched = false;
+    let lastStatus = snapshot.status;
+    while (Date.now() < verifyDeadline) {
+      await sleep(pollMs);
+      const { status } = await read();
+      lastStatus = status;
+      if (matchesTarget(status)) {
+        debug("setSessionArchived: verified", sessionUri, status);
+        return { success: true, status, verified: true };
+      }
+      if (!redispatched && Date.now() > verifyDeadline - verifyTimeoutMs / 2) {
+        debug("setSessionArchived: re-dispatching", sessionUri);
+        client.dispatch(sessionUri, sessionIsArchivedChanged(isArchived));
+        await client.ping();
+        redispatched = true;
+      }
+    }
+
+    debug("setSessionArchived: unverified after timeout", sessionUri, lastStatus);
+    return { success: false, status: lastStatus, verified: false };
+  } finally {
+    await client.unsubscribe(sessionUri).catch(() => {});
     releaseAHPClient(hostUrl);
   }
 }
