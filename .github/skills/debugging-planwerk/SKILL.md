@@ -1,0 +1,157 @@
+---
+name: debugging-planwerk
+description: "High-level map of Planwerk's diagnostic sources — where the truth lives when a card shows the wrong phase, status, gate, pending input, or enrichment. Use when investigating why a card looks wrong on the board, why the orchestrator/heartbeat did or didn't act, why a session's facts (files, plan, input) are missing or stale, or any 'why is this card doing X' question. Covers the SQLite store, the live AHP host, per-session Copilot CLI files, server logs, telemetry, and static checks — not any one specific bug."
+---
+
+# Debugging Planwerk
+
+Planwerk renders AI agent sessions as kanban cards. A card's on-screen state is
+**derived** from several layered sources, so "the card looks wrong" is almost always a
+question of *which layer disagrees with which*. This skill is a map of those sources and
+how to read them. It does **not** prescribe fixes — it tells you where to look first.
+
+## Orient: the data flow
+
+```
+Live AHP host (WebSocket, copilotcli provider)
+        │  SessionSummary / SessionState / ChatState / ChangesetState
+        ▼
+lib/ahp/client-bridge.ts   ── subscribes, enriches, fetches pending input
+        │  BridgeEvent (+ enrichment, +/- pendingInput)
+        ▼
+app/api/ahp/events/route.ts (SSE)  ── maps session → KanbanCard, runs triage
+        │  CardStreamEvent
+        ▼
+lib/store/board-store.ts (Zustand)  ── client card state
+        │
+        ▼
+components/board/*  ── what you see
+
+lib/orchestrator/heartbeat.ts  ── separate loop; reads cards, runs gates/reviews,
+                                   advances phase, answers input (writes to SQLite)
+```
+
+Two invariants worth re-checking before deep debugging (see `AGENTS.md`):
+- **Phase ≠ runtime status.** SDLC phase is persisted by Planwerk (SQLite). AHP runtime
+  status (`idle`/`running`/`input-needed`/`error`) only updates card *facts*.
+- **Only the gate engine advances phase forward.** Runtime status never moves a card
+  between columns.
+
+## The sources (where the truth lives)
+
+### 1. SQLite persistence DB — Planwerk's own state
+`.planwerk/planwerk.db` (better-sqlite3; schema in `lib/db/schema.ts`). This is where
+persisted phase, gates, risk, and orchestrator decisions live. **Read-only inspect** it
+out-of-band; the running app holds a write connection.
+
+Tables: `card_phases`, `card_risk`, `card_status_history`, `coherence_conflicts`,
+`gate_configs`, `gate_runs`, `heartbeat_log`, `review_runs`, `session_cache`.
+
+```bash
+node -e '
+const db = require("better-sqlite3")(".planwerk/planwerk.db", { readonly: true });
+for (const r of db.prepare("SELECT name FROM sqlite_master WHERE type = ?").all("table")) console.log(r.name);
+'
+```
+Good first queries: `card_phases` (persisted column), `heartbeat_log`
+(what the orchestrator did/decided, newest `id` first), `gate_runs` / `review_runs`
+(gate outcomes + staleness), `card_risk` (triage verdict driving gate intensity).
+
+### 2. Session cache — the facts a card was derived from
+The `session_cache` table (`session_uri, host_url, summary_json, enrichment_json,
+updated_at`) stores the last AHP `SessionSummary` and enrichment per session. This is the
+fastest way to see **what inputs `mapSessionToCard`/`inferPhase` actually saw** (status,
+`changes`, `activity`, `annotations`, `codeFileCount`, artifacts) without a live host.
+Note `enrichment_json` may be `null` — enrichment is best-effort and async.
+
+### 3. Live AHP host — the source of truth for runtime facts
+The cache and DB can lag; the WebSocket host is authoritative. Find the port and connect
+with the SDK (mirror `scripts/ahp-smoke.ts`).
+
+```bash
+# WebSocket hosts answer HTTP with 426 Upgrade Required
+lsof -nP -iTCP -sTCP:LISTEN | grep -i node   # find candidate ports
+curl -s -i http://127.0.0.1:PORT/ | head -1  # expect: 426 Upgrade Required
+```
+The built-in smoke harness connects, lists sessions, and reads one session's
+`SessionState` (inputNeeded) + `ChatState` (turns):
+```bash
+AHP_SMOKE_HOST=ws://127.0.0.1:PORT npm run ahp:smoke
+```
+For a specific session, subscribe to its `resource` and inspect `snapshot.state`:
+`inputNeeded` (pending input / approvals), `changesets` (file changes), `defaultChat`,
+`status`, `lifecycle`. Use `lib/ahp/snapshot.ts` helpers (`readSessionState`,
+`readChatState`) to narrow the snapshot union. Standalone SDK scripts run under
+`node --experimental-strip-types` and can import `../lib/ahp/*.ts` **relatively** (the
+`@/` alias does not resolve outside Next/tsc).
+
+### 4. Copilot CLI per-session files — what the agent actually did
+`~/.copilot/session-state/<session-uuid>/` (the UUID is the tail of a `copilotcli:/<uuid>`
+card id). Contents worth reading:
+- `plan.md` — the agent's plan artifact (Planwerk reads this via
+  `lib/ahp/plan-artifact.ts` for sessions with no in-tree plan).
+- `events.jsonl` — the agent's internal event log (turns, tool calls, permission
+  requests, mode changes). Verbose; grep it.
+- `session.db`, `research/`, `files/`, `checkpoints/`, `workspace.yaml`.
+
+### 5. Server-side logs — the dev server console
+Run the app with `npm run dev` (Next.js, port 3000) and watch its terminal. Log lines are
+prefixed by subsystem: `[ahp:bridge]`, `[ahp:conn]`, `[ahp:changeset]`, `[ahp:plan]`,
+`[ahp:input]`, `[ahp:sse]`, `[heartbeat]`, `[heartbeat:card-error]`, `[orchestrator-chat]`.
+Set **`AHP_DEBUG=1`** to unlock verbose `debug()` output across the AHP layer
+(`client-bridge`, `changeset-enricher`, `plan-artifact`, `enrich-card`,
+`session-messenger`) and the heartbeat — invaluable for enrichment / input-fetch traces.
+
+### 6. Telemetry logs — the host's OTLP log stream
+`.planwerk/telemetry/logs.ndjson` (NDJSON; written by `lib/ahp/telemetry-logs.ts`, rotated
+on connect). These are **agent-host log lines** tapped off the WebSocket
+(`{ ts, level, body, scope }`) — host-side diagnostics (e.g. git/tooling errors), **not**
+AHP protocol messages. Useful for host-side failures; not for inspecting card state.
+
+### 7. Static checks — is the code even consistent?
+```bash
+npm run typecheck   # tsc --noEmit
+npm run lint        # eslint
+npm test            # node --test lib/**/*.test.ts
+```
+Harness caveat: `node --test` runs modules directly, so it **cannot import** files that
+use the `@/` path alias or `server-only` (most of `lib/ahp` and `lib/orchestrator`). Only
+dependency-light, alias-free modules (e.g. `lib/orchestrator/coherence-detect.ts`) are
+unit-tested this way. To exercise alias/`server-only` code, drive it through a live
+smoke script (source 3) or replicate the pure logic in a standalone `node -e` snippet.
+
+### 8. Git archaeology — when did this change?
+Behavior regressions often trace to a recent AHP/SDK upgrade. Use blame and the pickaxe:
+```bash
+git log --oneline -- lib/ahp/<file>.ts
+git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appeared
+```
+
+## Reference: key code + facts
+
+**Code map** (where derivation happens):
+- `lib/ahp/client-bridge.ts` — connect, session sync, enrichment + pending-input fetch.
+- `lib/ahp/snapshot.ts` — narrow `Snapshot.state` to `SessionState` / `ChatState`.
+- `lib/ahp/map-session.ts` — `SessionSummary` → `KanbanCard`, phase inference, input mapping.
+- `lib/ahp/changeset-enricher.ts`, `lib/ahp/plan-artifact.ts` — file/artifact enrichment.
+- `lib/ahp/types.ts` — `AHPStatus` bits + `parseAHPStatus`.
+- `app/api/ahp/events/route.ts` — SSE bridge + triage entry point.
+- `lib/orchestrator/{heartbeat,gate-engine,triage,risk-*}.ts` — the autonomous loop.
+- `lib/db/schema.ts` — tables + `getDb()`.
+- `scripts/ahp-smoke.ts` — reference for live-host connection.
+
+**AHP status bits** (`lib/ahp/types.ts`) — decode a raw `status` number:
+`Idle=1`, `Error=2`, `InProgress=8`, `InputNeeded=24` (**composite** `8|16`),
+`IsRead=32`, `IsArchived=64`. `InputNeeded` includes the `InProgress` bit — test it as
+`(status & 24) === 24`, not a plain AND.
+
+## A sane order of attack
+
+1. **Reproduce the claim from data**, not intuition — dump the card's `card_phases` row
+   and `session_cache` (sources 1–2) to see persisted phase + the facts it was derived from.
+2. If facts look stale/missing, go to the **live host** (source 3) and the agent's
+   **session-state files** (source 4) to get ground truth.
+3. Turn on **`AHP_DEBUG`** and watch the **dev server logs** (source 5) to see the
+   derivation/enrichment/input-fetch path execute.
+4. Confirm the exact card id: `copilotcli:/<uuid>` — the app's own dogfood session is a
+   card too, so make sure you're inspecting the *right* one before drawing conclusions.
