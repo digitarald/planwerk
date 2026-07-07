@@ -14,10 +14,20 @@ import type { ChatState, SessionState, Snapshot } from "@microsoft/agent-host-pr
  * Every caller gets a properly typed state (or `undefined` for a scheme mismatch).
  */
 
-/** Narrow a session-channel (`ahp-session:`) snapshot to {@link SessionState}. */
+/**
+ * Narrow a session-channel snapshot to {@link SessionState}.
+ *
+ * Session channels are addressed by the agent provider's scheme (copilotcli
+ * returns `copilotcli:/<uuid>`), not the canonical `ahp-session:` scheme the SDK
+ * documents — so the URI scheme is not a reliable discriminator. `chats` is
+ * unique to {@link SessionState} across the seven-member snapshot-state union
+ * (ChatState exposes `turns`, ChangesetState `files`, etc.), so narrow on shape.
+ * `chats` is a required `ChatSummary[]`, so an array check is a tight guard.
+ */
 export function asSessionState(snapshot: Snapshot | undefined): SessionState | undefined {
-  if (!snapshot?.resource.startsWith("ahp-session:")) return undefined;
-  return snapshot.state as SessionState;
+  const state = snapshot?.state;
+  if (!state || !Array.isArray((state as Partial<SessionState>).chats)) return undefined;
+  return state as SessionState;
 }
 
 /** Narrow a chat-channel (`ahp-chat:`) snapshot to {@link ChatState}. */

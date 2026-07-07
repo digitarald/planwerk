@@ -53,8 +53,12 @@ function oneLine(value: string | undefined): string {
 }
 
 function asSessionState(snapshot: Snapshot | undefined): SessionState | undefined {
-  if (!snapshot?.resource.startsWith("ahp-session:")) return undefined;
-  return snapshot.state as SessionState;
+  // Session channels use the provider scheme (e.g. `copilotcli:/…`), not the
+  // canonical `ahp-session:` scheme — narrow on shape (`chats` is unique to
+  // SessionState). Mirrors lib/ahp/snapshot.ts.
+  const state = snapshot?.state;
+  if (!state || !Array.isArray((state as Partial<SessionState>).chats)) return undefined;
+  return state as SessionState;
 }
 
 function asChatState(snapshot: Snapshot | undefined): ChatState | undefined {

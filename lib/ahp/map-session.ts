@@ -144,11 +144,8 @@ export function mapAHPRuntimeStatus(statusBits: number): RuntimeStatus {
   return "idle";
 }
 
-const PLAN_KEYWORDS = /\bplan\b|plan\.md|planning|spec|specification|drafting.*plan/i;
-const REVIEW_KEYWORDS = /\breview\b|reviewing|code review|PR review|approval/i;
-
 /**
- * Extract Artifact entries from annotations and activity signals.
+ * Extract Artifact entries from session annotations.
  */
 function inferArtifacts(session: AHPSessionSummary): Artifact[] {
   const artifacts: Artifact[] = [];
@@ -190,18 +187,6 @@ function inferArtifacts(session: AHPSessionSummary): Artifact[] {
     }
   }
 
-  // Infer a plan artifact from activity text when no explicit annotation exists
-  if (!seen.has("plan:inferred") && session.activity && PLAN_KEYWORDS.test(session.activity)) {
-    artifacts.push({
-      id: "inferred-plan",
-      type: "plan",
-      title: "plan.md",
-      createdAt: new Date(session.modifiedAt).getTime(),
-      createdBy: "agent",
-      status: "draft",
-    });
-  }
-
   return artifacts;
 }
 
@@ -217,9 +202,7 @@ function inferPhase(
 ): Phase {
   const isArchived = (session.status & AHPStatus.IsArchived) !== 0;
   const totalFiles = session.changes?.files ?? 0;
-  const activity = (session.activity ?? "").toLowerCase();
   const hasPlanArtifact = artifacts.some((a) => a.type === "plan");
-  const hasPlanSignal = hasPlanArtifact || PLAN_KEYWORDS.test(activity);
 
   // Split "code changes" into definite (enrichment-backed) vs ambiguous (raw count).
   // Without enrichment, raw file counts include plan/spec artifacts so we can't
@@ -229,7 +212,7 @@ function inferPhase(
   const hasDefiniteCodeChanges = codeFileCount !== undefined ? codeFileCount > 0 : false;
   const hasAmbiguousFileChanges = codeFileCount === undefined && totalFiles > 0;
   const hasCodeChanges = hasDefiniteCodeChanges
-    || (hasAmbiguousFileChanges && !hasPlanSignal)
+    || (hasAmbiguousFileChanges && !hasPlanArtifact)
     || (hasAmbiguousFileChanges && totalFiles > PLAN_ONLY_FILE_THRESHOLD);
 
   // Archived sessions with code changes are completed work → ship
@@ -239,22 +222,26 @@ function inferPhase(
   // deliberate/gate-driven progression and never re-infer over them.
   if (existingPhase && existingPhase !== "define") return existingPhase;
 
-  // A card persisted as the default 'define' phase gets stranded once it gains
-  // code: the persisted-phase short-circuit above used to return 'define'
-  // before the code checks below ever ran. Let *confirmed* code changes
-  // re-promote it — the same classification a brand-new card with code would
-  // receive. Non-code diffs (codeFileCount 0/undefined, e.g. plan/notes files)
-  // keep it in Define, so plan-only work isn't mislabeled as Build.
-  if (existingPhase === "define" && !hasDefiniteCodeChanges) return "define";
+  // A card persisted as the default 'define' phase only leaves Define on a
+  // genuine signal — otherwise ambiguous raw file counts (e.g. a lone plan.md
+  // with no enrichment yet) could mislabel it as Build. Two ways out:
+  //   1. A plan artifact advances it to Plan. Producing a plan is exactly what
+  //      ends the Define stage, so this must win *before* the code checks — a
+  //      plan-only card has no definite code changes and would otherwise be
+  //      pinned in Define forever.
+  //   2. *Confirmed* (enrichment-backed) code changes re-promote it to
+  //      Build/Review, the same classification a brand-new card with code gets.
+  // Without either signal it stays in Define.
+  if (existingPhase === "define" && !hasDefiniteCodeChanges) {
+    return hasPlanArtifact ? "plan" : "define";
+  }
 
-  // Review keywords + code changes → review
-  if (REVIEW_KEYWORDS.test(activity) && hasCodeChanges) return "review";
-
-  // Code changes present → build
+  // Code changes present → build. (Review is a gated phase, reached only via the
+  // gate engine or a persisted transition — never inferred from session facts.)
   if (hasCodeChanges) return "build";
 
-  // Plan artifact or plan-related activity → plan
-  if (hasPlanArtifact || PLAN_KEYWORDS.test(activity)) return "plan";
+  // Plan artifact present → plan
+  if (hasPlanArtifact) return "plan";
 
   return "define";
 }
