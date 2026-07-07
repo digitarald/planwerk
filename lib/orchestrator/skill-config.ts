@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import type { RiskLevel } from "@/lib/types";
+import type { CoherenceConfig } from "./coherence-engine";
 
 export interface SkillConfig {
   id: string;
@@ -58,6 +59,7 @@ export interface PlanwerkConfig {
   reviewPolicy: Record<RiskLevel, ReviewPolicy>;
   orchestrator: OrchestratorConfig;
   wipLimits: Record<string, number>;
+  coherence: CoherenceConfig;
 }
 
 const RISK_ORDER: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2 };
@@ -145,6 +147,12 @@ const DEFAULT_WIP_LIMITS: Record<string, number> = {
   review: 2,
 };
 
+const DEFAULT_COHERENCE: CoherenceConfig = {
+  enabled: true,
+  moduleDepth: 2,
+  blockHighRiskShip: true,
+};
+
 function parseDuration(value: string | number | undefined, defaultMs: number): number {
   if (value === undefined) return defaultMs;
   if (typeof value === "number") return value;
@@ -203,6 +211,7 @@ export function loadConfig(projectPath?: string): PlanwerkConfig {
     reviewPolicy: DEFAULT_REVIEW_POLICY,
     orchestrator: DEFAULT_ORCHESTRATOR,
     wipLimits: DEFAULT_WIP_LIMITS,
+    coherence: DEFAULT_COHERENCE,
   };
 }
 
@@ -276,7 +285,17 @@ function mergeConfig(raw: Record<string, unknown>): PlanwerkConfig {
     }
   }
 
-  return { skills, gates, reviewPolicy, orchestrator, wipLimits };
+  const rawCoh = raw.coherence as Record<string, unknown> | undefined;
+  const coherence: CoherenceConfig = {
+    enabled: typeof rawCoh?.enabled === "boolean" ? rawCoh.enabled : DEFAULT_COHERENCE.enabled,
+    moduleDepth: clampPositive(rawCoh?.module_depth, DEFAULT_COHERENCE.moduleDepth),
+    blockHighRiskShip:
+      typeof rawCoh?.block_high_risk_ship === "boolean"
+        ? rawCoh.block_high_risk_ship
+        : DEFAULT_COHERENCE.blockHighRiskShip,
+  };
+
+  return { skills, gates, reviewPolicy, orchestrator, wipLimits, coherence };
 }
 
 function parseGateRefs(raw: unknown[] | undefined): GateRef[] {

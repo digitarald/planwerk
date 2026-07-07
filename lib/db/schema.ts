@@ -106,7 +106,37 @@ export function getDb(): Database.Database {
       );
 
       CREATE INDEX IF NOT EXISTS idx_card_status_history_card ON card_status_history(card_id);
+
+      CREATE TABLE IF NOT EXISTS coherence_conflicts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        card_a TEXT NOT NULL,
+        card_b TEXT NOT NULL,
+        tier TEXT NOT NULL,
+        overlap_paths TEXT NOT NULL DEFAULT '[]',
+        signature TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'detected',
+        risk_snapshot TEXT,
+        verdict_summary TEXT,
+        findings_json TEXT,
+        dismissed_signature TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT,
+        resolved_by TEXT,
+        UNIQUE (card_a, card_b)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_coherence_status ON coherence_conflicts(status);
+      CREATE INDEX IF NOT EXISTS idx_coherence_card_a ON coherence_conflicts(card_a);
+      CREATE INDEX IF NOT EXISTS idx_coherence_card_b ON coherence_conflicts(card_b);
     `);
+
+    // Restart recovery: a pair left mid-review (async executor interrupted by a
+    // process restart) would otherwise strand in 'reviewing' forever. Reset it to
+    // 'detected' so the executor re-claims it — mirrors the gate_runs 'running' reset.
+    db.prepare(
+      "UPDATE coherence_conflicts SET status = 'detected', updated_at = datetime('now') WHERE status = 'reviewing'"
+    ).run();
 
     // Mark any gate runs left running from a previous process as failed
     db.prepare(

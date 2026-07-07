@@ -9,6 +9,7 @@ import {
 } from "@/lib/orchestrator/gate-engine";
 import { getCardRisk } from "@/lib/orchestrator/risk-store";
 import { getReviewRunsForCard } from "@/lib/orchestrator/review-executor";
+import { buildCoherenceSummary } from "@/lib/orchestrator/coherence-engine";
 import {
   getCardStatusHistory,
   recordCardStatus,
@@ -88,6 +89,25 @@ export function enrichSessionToCard(
       "[status-history] failed to record/read status:",
       err instanceof Error ? err.message : err
     );
+  }
+
+  // Board-level coherence: attach confirmed conflicts and (only if a confirmed
+  // conflict exists) raise the `conflict` attention overlay. Precedence:
+  // error/needs-human (runtime) > conflict > stale > none — so we never mask a
+  // runtime attention that already needs the human.
+  try {
+    const coherence = buildCoherenceSummary(session.resource);
+    if (coherence) {
+      card.coherence = { conflictsWith: coherence.peers, blocking: coherence.blocking };
+      const runtimeCritical = card.attention === "needs-human" || card.attention === "error";
+      if (coherence.peers.length > 0 && !runtimeCritical) {
+        card.attention = "conflict";
+      }
+    }
+  } catch (err) {
+    if (process.env.AHP_DEBUG) {
+      console.warn("[coherence] enrichment failed:", err instanceof Error ? err.message : err);
+    }
   }
 
   return card;

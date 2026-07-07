@@ -91,6 +91,15 @@ wip_limits:
   build: 3
   review: 2
 
+# Board-level coherence gate (horizontal gate across concurrent sessions).
+# When two in-flight cards touch overlapping code, an external reviewer judges
+# whether their changes cohere or clash. Conflicts block review→ship only when a
+# high-risk card is involved (pair-level); low/medium conflicts are advisory.
+coherence:
+  enabled: true
+  module_depth: 2            # dir segments (repo-relative) compared for module-tier overlap
+  block_high_risk_ship: true # hard-block ship when a high-risk card is in a conflict
+
 # Orchestrator behavior
 orchestrator:
   heartbeat_interval: 30s

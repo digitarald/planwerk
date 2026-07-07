@@ -97,6 +97,37 @@ export interface KanbanCard {
   reviewFindings?: ReviewFinding[];
   /** Recent status lines (oldest→newest), for the fading progress trail. */
   statusHistory?: StatusEntry[];
+  /** Board-level coherence: other in-flight cards this one clashes with. Set from
+   *  DB rows in enrichment; only reviewer-confirmed conflicts populate this. */
+  coherence?: CoherenceSummary;
+}
+
+export type CoherenceTier = "file" | "module";
+
+export type CoherenceStatus =
+  | "detected"
+  | "reviewing"
+  | "conflict"
+  | "coherent"
+  | "needs-human"
+  | "dismissed";
+
+/** A single peer card this card clashes with, for card/detail rendering. */
+export interface CoherenceConflictPeer {
+  cardId: string;
+  cardTitle: string;
+  tier: CoherenceTier;
+  status: CoherenceStatus;
+  summary?: string;
+  findings?: string[];
+  overlapPaths?: string[];
+}
+
+/** Card-attached coherence view. `blocking` is a display hint; enforcement always
+ *  reads the DB rows via getShipBlockingConflicts, never this field. */
+export interface CoherenceSummary {
+  conflictsWith: CoherenceConflictPeer[];
+  blocking: boolean;
 }
 
 export interface ReviewFinding {

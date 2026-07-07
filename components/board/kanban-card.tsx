@@ -12,6 +12,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   ShieldX,
+  Split,
   XCircle,
 
   Bug,
@@ -303,6 +304,24 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                     <RuntimeIndicator status={card.runtime} />
                   )}
                   <GateIndicator status={card.gateStatus} />
+                  {card.coherence && card.coherence.conflictsWith.length > 0 && (
+                    <span
+                      className={cn(
+                        "inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium",
+                        card.coherence.blocking
+                          ? "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+                          : "text-purple-500"
+                      )}
+                      title={
+                        card.coherence.blocking
+                          ? "Ship blocked: coherence conflict with another session"
+                          : "Coherence conflict with another session"
+                      }
+                    >
+                      <Split className="h-3 w-3 shrink-0" />
+                      {card.coherence.conflictsWith.length}
+                    </span>
+                  )}
                   {card.manualOverride && (
                     <span title="Manual override active"><AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" /></span>
                   )}

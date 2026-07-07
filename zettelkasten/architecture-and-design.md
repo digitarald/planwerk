@@ -73,6 +73,23 @@ Think of it as a desktop app using Next.js for its UI layer.
 
 Dragging a card forward logs a "manual override" to the orchestrator feed and marks the card with a warning. Moving backward is always allowed (rework). This preserves the gate enforcement model while still giving users escape hatches.
 
+### 8. Coherence Is a Horizontal Gate (Board-Scoped)
+
+Every other gate is **vertical** — a single card advancing its own pipeline, checked only against itself (`canAdvancePhase(cardId, …)`). The **Coherence Gate** is **horizontal**: a check *across* concurrent cards. When two in-flight cards (phase `build`/`review`) edit overlapping code, an external reviewer judges whether their changes cohere or clash.
+
+**Why it can't be a normal gate:** the vertical gate abstraction is single-card by construction. Cross-card state lives in a board-scoped subsystem (`coherence-engine.ts`) that runs a detection pass in the heartbeat (like the WIP-violation pass) and *composes* with the vertical model only at the enforcement point.
+
+Key mechanics that preserve existing invariants:
+
+- **Detection is deterministic and cheap** (inverted-index overlap, tiered file/module, same-repo guarded). It never calls an LLM and never raises attention on its own.
+- **Review is external and off-tick.** An async executor claims `detected` pairs (DB compare-and-set → `reviewing`) and runs a server-side Copilot-SDK reviewer over the *overlapping files' content* — never inline in the heartbeat tick, never the card's own agent. Verdict writes are race-guarded (`WHERE status='reviewing' AND signature=?`).
+- **Phase ≠ runtime status still holds.** Coherence never moves a card between columns. It sets the (previously unused) `conflict` attention overlay for confirmed conflicts and, for high-risk pairs, blocks `review → ship`.
+- **Risk-proportional, pair-level enforcement.** A conflict blocks ship only when *either* card in the pair is high-risk (both are then blocked, so a low-risk partner can't ship the conflicting change out from under it); low/medium conflicts are advisory. Blocking is computed live from current risk + config, not a stored flag, and high-risk pairs block *provisionally* during the detection→verdict window so a card can't slip to Ship before the reviewer answers.
+- **Single choke point.** All `review → ship` advancement routes through `advanceReviewToShip()`; no path calls `setCardPhase(id,"ship")` directly for that transition.
+- **Human override.** "Accept divergence" dismisses a pair for its current signature (audited); a materially different future overlap reopens it.
+
+Config: `coherence.{enabled, module_depth, block_high_risk_ship}` in `planwerk.yml`. Persistence: `coherence_conflicts` table (signature-keyed, restart-recovers orphaned `reviewing` rows).
+
 ---
 
 ## Architecture

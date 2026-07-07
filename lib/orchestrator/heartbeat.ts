@@ -8,6 +8,9 @@ import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, start
 import { getCardRisk } from "./risk-store";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
 import { injectMessage, answerInput, requestPlanChanges } from "@/lib/ahp/session-messenger";
+import { syncCoherence } from "./coherence-engine";
+import { runCoherenceExecutor, type ReviewCardCtx } from "./coherence-reviewer";
+import { advanceReviewToShip } from "./phase-advance";
 
 /**
  * Heartbeat action types emitted to the orchestrator feed.
@@ -23,7 +26,10 @@ export type HeartbeatAction =
   | { type: "wip-violation"; phase: Phase; count: number; limit: number }
   | { type: "auto-answered"; cardId: string; answer: string }
   | { type: "plan-approved"; cardId: string }
-  | { type: "plan-rubber-ducked"; cardId: string };
+  | { type: "plan-rubber-ducked"; cardId: string }
+  | { type: "coherence-conflict"; cardId: string; otherCardId: string; summary: string }
+  | { type: "coherence-cleared"; cardId: string; otherCardId: string }
+  | { type: "coherence-blocked"; cardId: string; reason: string };
 
 export interface HeartbeatTickResult {
   actions: HeartbeatAction[];
@@ -38,6 +44,7 @@ interface HeartbeatState {
   gateRetryCount: Map<string, number>;
   pipelineStage: Map<string, "gates" | "review" | "advancing">;
   lastWipViolations: Map<string, number>; // phase → count when last emitted
+  coherenceBlocked: Set<string>; // cards for which a ship-block was already announced
 }
 
 const state: HeartbeatState = {
@@ -48,6 +55,7 @@ const state: HeartbeatState = {
   gateRetryCount: new Map(),
   pipelineStage: new Map(),
   lastWipViolations: new Map(),
+  coherenceBlocked: new Set(),
 };
 
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -194,7 +202,59 @@ async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatT
     }
   }
 
+  // Board-level coherence pass (horizontal gate). Deterministic detection + cleanup
+  // run here; the LLM review is kicked fire-and-forget so it never blocks the tick.
+  if (config.coherence.enabled) {
+    try {
+      const escalatable = syncCoherence(cards, config.coherence);
+      if (escalatable.length > 0) {
+        const ctxById = buildCoherenceCtx(cards);
+        // Fire-and-forget: reviewer runs off-tick; verdicts are emitted when ready.
+        void runCoherenceExecutor(hostUrl, escalatable, ctxById)
+          .then((outcomes) => {
+            for (const o of outcomes) emitCoherenceOutcome(o);
+          })
+          .catch((err) => {
+            if (process.env.AHP_DEBUG) console.warn("[heartbeat:coherence]", err);
+          });
+      }
+    } catch (err) {
+      errors.push(`coherence: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   return { actions, errors };
+}
+
+/** Build per-card review context (title, plan, last message) for the executor. */
+function buildCoherenceCtx(cards: KanbanCard[]): Map<string, ReviewCardCtx> {
+  const map = new Map<string, ReviewCardCtx>();
+  for (const c of cards) {
+    const planContent = c.artifacts?.find((a) => a.type === "plan" && a.contentRef)?.contentRef;
+    map.set(c.id, {
+      id: c.id,
+      title: c.title,
+      planContent,
+      lastAgentMessage: c.lastAgentMessage,
+    });
+  }
+  return map;
+}
+
+/** Translate an executor verdict into a feed action. */
+function emitCoherenceOutcome(o: {
+  cardA: string;
+  cardB: string;
+  status: "conflict" | "coherent" | "needs-human";
+  summary: string;
+}): void {
+  if (o.status === "conflict") {
+    emit({ type: "coherence-conflict", cardId: o.cardA, otherCardId: o.cardB, summary: o.summary });
+  } else if (o.status === "coherent") {
+    emit({ type: "coherence-cleared", cardId: o.cardA, otherCardId: o.cardB });
+  } else {
+    emit({ type: "coherence-blocked", cardId: o.cardA, reason: o.summary });
+  }
 }
 
 async function processCard(
@@ -679,10 +739,25 @@ async function runReviewPipeline(
 
   if (allowed) {
     if (config.orchestrator.autoAdvancePhases && canEnterPhase("ship", allCards, config)) {
-      setCardPhase(card.id, "ship");
-      const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "review", to: "ship" };
-      emit(action);
-      actions.push(action);
+      const { advanced, blockedBy } = advanceReviewToShip(card.id, config.coherence);
+      if (advanced) {
+        state.coherenceBlocked.delete(card.id);
+        const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "review", to: "ship" };
+        emit(action);
+        actions.push(action);
+      } else if (blockedBy.length > 0 && !state.coherenceBlocked.has(card.id)) {
+        // Announce the ship-block once (not every tick) until it clears.
+        state.coherenceBlocked.add(card.id);
+        const row = blockedBy[0];
+        const other = row.cardA === card.id ? row.cardB : row.cardA;
+        const action: HeartbeatAction = {
+          type: "coherence-blocked",
+          cardId: card.id,
+          reason: `Ship blocked: unresolved coherence conflict with ${other}`,
+        };
+        emit(action);
+        actions.push(action);
+      }
     }
     return actions;
   }

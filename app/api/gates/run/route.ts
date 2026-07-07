@@ -13,6 +13,8 @@ import {
   type GateType,
 } from "@/lib/orchestrator/gate-engine";
 import { getCardRisk } from "@/lib/orchestrator/risk-store";
+import { advanceReviewToShip } from "@/lib/orchestrator/phase-advance";
+import { loadConfig } from "@/lib/orchestrator/skill-config";
 import { PHASE_ORDER, type Phase, type RiskLevel } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -127,6 +129,28 @@ export async function POST(request: NextRequest) {
         },
         { status: 403 }
       );
+    }
+
+    // Coherence choke point: a review→ship advance must clear board-level
+    // coherence blocking (high-risk conflicts), not just the vertical gates.
+    if (currentPhase === "review" && nextPhase === "ship") {
+      const coherenceConfig = loadConfig(body.projectPath).coherence;
+      const { advanced, blockedBy } = advanceReviewToShip(cardId, coherenceConfig);
+      if (!advanced) {
+        return NextResponse.json(
+          {
+            error: "Blocked by unresolved coherence conflict",
+            coherenceConflicts: blockedBy.map((c) => ({
+              with: c.cardA === cardId ? c.cardB : c.cardA,
+              tier: c.tier,
+              status: c.status,
+              summary: c.verdictSummary,
+            })),
+          },
+          { status: 409 }
+        );
+      }
+      return NextResponse.json({ cardId, previousPhase: currentPhase, newPhase: nextPhase });
     }
 
     setCardPhase(cardId, nextPhase);

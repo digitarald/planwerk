@@ -189,6 +189,8 @@ interface HeartbeatActionData {
   reason?: string;
   gateType?: string;
   iteration?: number;
+  otherCardId?: string;
+  summary?: string;
 }
 
 function formatHeartbeatAction(action: HeartbeatActionData): { type: "intervention" | "suggestion" | "alert"; message: string } | null {
@@ -242,6 +244,21 @@ function formatHeartbeatAction(action: HeartbeatActionData): { type: "interventi
       return {
         type: "intervention",
         message: `Re-triggered stale ${action.gateType} gate (code changed since last run).`,
+      };
+    case "coherence-conflict":
+      return {
+        type: "alert",
+        message: `Coherence conflict detected with another session${action.summary ? `: ${action.summary}` : "."}`,
+      };
+    case "coherence-blocked":
+      return {
+        type: "alert",
+        message: action.reason ?? "Ship blocked by an unresolved coherence conflict.",
+      };
+    case "coherence-cleared":
+      return {
+        type: "suggestion",
+        message: "Coherence check passed — no clash with the overlapping session ✓",
       };
     case "wip-violation":
       return {

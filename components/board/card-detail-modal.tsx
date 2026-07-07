@@ -25,6 +25,7 @@ import {
   MessageCircleWarning,
   XCircle,
   ChevronDown,
+  Split,
 } from "lucide-react";
 
 import { PendingInputCard } from "./pending-input-card";
@@ -276,6 +277,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   const hostUrl = useConnectionStore((s) => s.hostUrl);
   const [message, setMessage] = useState("");
   const [sendState, setSendState] = useState<"idle" | "sending" | "error">("idle");
+  const [dismissingPeer, setDismissingPeer] = useState<string | null>(null);
   const [statusHistory, setStatusHistory] = useState<StatusEntry[]>(
     card.statusHistory ?? []
   );
@@ -322,6 +324,22 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [setDetailCard]);
+
+  const handleAcceptDivergence = async (peerCardId: string) => {
+    if (dismissingPeer) return;
+    setDismissingPeer(peerCardId);
+    try {
+      await fetch("/api/coherence/dismiss", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cardId: card.id, otherCardId: peerCardId }),
+      });
+    } catch {
+      // Best-effort; the heartbeat will re-detect if it wasn't dismissed.
+    } finally {
+      setDismissingPeer(null);
+    }
+  };
 
   const handleInject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -592,6 +610,70 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                         {card.lastAgentMessage}
                       </ReactMarkdown>
                     </article>
+                  </div>
+                </section>
+              )}
+
+              {/* Coherence — board-level conflicts with other in-flight sessions */}
+              {card.coherence && card.coherence.conflictsWith.length > 0 && (
+                <section>
+                  <h3 className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                    <Split className="h-3 w-3 text-purple-500" />
+                    Coherence
+                    {card.coherence.blocking && (
+                      <span className="rounded bg-purple-100 px-1.5 py-0.5 text-[9px] font-medium text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+                        blocking ship
+                      </span>
+                    )}
+                  </h3>
+                  <div className="space-y-2">
+                    {card.coherence.conflictsWith.map((peer) => (
+                      <div
+                        key={peer.cardId}
+                        className="rounded-lg border border-purple-200 bg-purple-50/50 p-3 dark:border-purple-800 dark:bg-purple-950/20"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <button
+                            onClick={() => setDetailCard(peer.cardId)}
+                            className="truncate text-left text-xs font-medium text-foreground hover:text-primary hover:underline"
+                          >
+                            {peer.cardTitle}
+                          </button>
+                          <span className="shrink-0 rounded bg-purple-100 px-1.5 py-0.5 text-[9px] font-medium text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+                            {peer.tier === "file" ? "same file" : "same module"}
+                          </span>
+                        </div>
+                        {peer.summary && (
+                          <p className="mt-1 text-[11px] text-muted-foreground">{peer.summary}</p>
+                        )}
+                        {peer.findings && peer.findings.length > 0 && (
+                          <ul className="mt-1.5 space-y-0.5">
+                            {peer.findings.slice(0, 5).map((f, i) => (
+                              <li key={i} className="flex gap-1 text-[11px] text-muted-foreground">
+                                <span className="shrink-0">•</span>
+                                <span>{f}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {peer.overlapPaths && peer.overlapPaths.length > 0 && (
+                          <p className="mt-1.5 truncate font-mono text-[10px] text-muted-foreground/70">
+                            {peer.overlapPaths.slice(0, 3).join(", ")}
+                          </p>
+                        )}
+                        <div className="mt-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-6 text-[10px]"
+                            disabled={dismissingPeer === peer.cardId}
+                            onClick={() => void handleAcceptDivergence(peer.cardId)}
+                          >
+                            {dismissingPeer === peer.cardId ? "Accepting…" : "Accept divergence"}
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </section>
               )}
