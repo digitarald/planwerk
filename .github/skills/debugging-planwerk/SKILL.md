@@ -10,6 +10,14 @@ Planwerk renders AI agent sessions as kanban cards. A card's on-screen state is
 question of *which layer disagrees with which*. This skill is a map of those sources and
 how to read them. It does **not** prescribe fixes — it tells you where to look first.
 
+> **⚠️ Keep this skill current.** This is living documentation of Planwerk's debugging
+> flow. Whenever you change *where* diagnostic truth lives or *how* to read it — a new/
+> moved data source, a renamed log prefix or env flag, a changed DB path/table or telemetry
+> format, a new debug command or subsystem, an altered data-flow path, or an invalidated
+> caveat — **update this SKILL.md in the same change.** If a debugging session reveals a
+> source or step that was missing or wrong here, fix it here too. A stale map sends the
+> next investigator down the wrong path.
+
 ## Orient: the data flow
 
 ```
