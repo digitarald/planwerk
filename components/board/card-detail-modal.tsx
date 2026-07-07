@@ -26,6 +26,7 @@ import {
   XCircle,
   ChevronDown,
   Split,
+  Cpu,
 } from "lucide-react";
 
 import { PendingInputCard } from "./pending-input-card";
@@ -448,6 +449,16 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 >
                   <GitBranch className="h-2.5 w-2.5" />
                   {card.branch}
+                </Badge>
+              )}
+              {card.model && (
+                <Badge
+                  variant="secondary"
+                  className="h-5 gap-1 px-2 text-[11px]"
+                  title="Selected model"
+                >
+                  <Cpu className="h-2.5 w-2.5" />
+                  {card.model}
                 </Badge>
               )}
               {card.filesChanged > 0 && (

@@ -2,14 +2,14 @@ import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import type {
   ChangesetState,
   ChangesetFile,
-  SessionState,
-  ChatState,
   Changeset,
   Turn,
   ResponsePart,
 } from "@microsoft/agent-host-protocol";
 
 import { Artifact, ArtifactType, FileChange } from "@/lib/types";
+
+import { readChatState, readSessionState } from "./snapshot";
 
 const LOG_PREFIX = "[ahp:changeset]";
 const debug = (...args: unknown[]) => {
@@ -157,43 +157,23 @@ export async function enrichFromChangeset(
   sessionUri: string
 ): Promise<ChangesetEnrichment | null> {
   try {
-    // Subscribe to the session to get its changeset catalogue
-    const { result: sessionResult, subscription: sessionSub } =
-      await client.subscribe(sessionUri);
-    // Close the local iterator and release server-side subscription
-    sessionSub.close();
-    await client.unsubscribe(sessionUri).catch(() => {});
+    // Read the session snapshot to get its changeset catalogue.
+    const sessionState = await readSessionState(client, sessionUri);
 
-    const sessionState = sessionResult.snapshot?.state as SessionState | undefined;
-
-    // Extract last agent message. In AHP 0.4.0 turns live on the chat channel,
-    // so read from the session's defaultChat, then fall back to fetchTurns.
+    // Extract last agent message. Turns live on the chat channel, so read from
+    // the session's defaultChat. `ChatState.turns` is a tail window that already
+    // contains the most recent turns (older turns page in via `turnsNextCursor`),
+    // which is all we need for the latest agent message.
     let lastAgentMessage: string | undefined;
     const defaultChatUri = sessionState?.defaultChat;
     if (defaultChatUri) {
       try {
-        const { result: chatResult, subscription: chatSub } = await client.subscribe(defaultChatUri);
-        chatSub.close();
-        await client.unsubscribe(defaultChatUri).catch(() => {});
-        const chatState = chatResult.snapshot?.state as ChatState | undefined;
+        const chatState = await readChatState(client, defaultChatUri);
         if (chatState?.turns?.length) {
           lastAgentMessage = extractLastAgentMessage(chatState.turns);
         }
       } catch {
         debug("chat subscribe failed for agent message extraction:", sessionUri);
-      }
-    }
-    if (!lastAgentMessage) {
-      try {
-        const fetchResult = await client.request("fetchTurns", {
-          channel: defaultChatUri ?? sessionUri,
-          limit: 1,
-        });
-        if (fetchResult.turns?.length) {
-          lastAgentMessage = extractLastAgentMessage(fetchResult.turns);
-        }
-      } catch {
-        debug("fetchTurns failed for", sessionUri);
       }
     }
 

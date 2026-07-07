@@ -1,5 +1,7 @@
 import "server-only";
 
+import type { Turn } from "@microsoft/agent-host-protocol";
+
 /**
  * Verdict from a review skill execution.
  */
@@ -8,25 +10,6 @@ export interface ReviewVerdict {
   summary: string;
   findings: string[];
   madeEdits: boolean;
-}
-
-/**
- * A turn from AHP's fetchTurns response.
- * Real shape uses `responseParts[]` with `kind: "markdown" | "toolCall"`.
- */
-interface ResponsePart {
-  kind: string;
-  content?: string;
-  name?: string; // for toolCall parts
-}
-
-interface TurnData {
-  id: string;
-  message?: { text: string; origin?: { kind: string } };
-  responseParts?: ResponsePart[];
-  // Legacy shape (fallback)
-  response?: { parts?: Array<{ type: string; content?: string }> };
-  toolCalls?: Array<{ name: string; result?: { content?: unknown[] } }>;
 }
 
 const PASS_SIGNALS = [
@@ -69,46 +52,25 @@ const EDIT_TOOL_PATTERNS = [
  * 5. If negative language → failed
  * 6. Ambiguous → needs-human
  */
-export function extractVerdict(turns: unknown[]): ReviewVerdict {
-  const typedTurns = turns as TurnData[];
-
-  // Walk turns from newest to oldest to find the review response
-  const recentTurns = typedTurns.slice(-5);
+export function extractVerdict(turns: Turn[]): ReviewVerdict {
+  // Walk the most recent turns to find the review response. Turns carry
+  // `responseParts` in stream order: markdown text and tool calls (whose name
+  // lives at `part.toolCall.toolName`).
+  const recentTurns = turns.slice(-5);
 
   let madeEdits = false;
   let responseText = "";
   const findings: string[] = [];
 
   for (const turn of recentTurns) {
-    // Check responseParts for tool calls (real AHP shape)
-    if (turn.responseParts) {
-      for (const part of turn.responseParts) {
-        if (part.kind === "toolCall" && part.name) {
-          if (EDIT_TOOL_PATTERNS.some((p) => p.test(part.name!))) {
-            madeEdits = true;
-          }
+    for (const part of turn.responseParts ?? []) {
+      if (part.kind === "toolCall") {
+        const toolName = part.toolCall.toolName;
+        if (toolName && EDIT_TOOL_PATTERNS.some((p) => p.test(toolName))) {
+          madeEdits = true;
         }
-        if (part.kind === "markdown" && part.content) {
-          responseText += part.content + "\n";
-        }
-      }
-    }
-
-    // Fallback: legacy shape (turn.toolCalls + turn.response.parts)
-    if (!turn.responseParts) {
-      if (turn.toolCalls) {
-        for (const call of turn.toolCalls) {
-          if (EDIT_TOOL_PATTERNS.some((p) => p.test(call.name))) {
-            madeEdits = true;
-          }
-        }
-      }
-      if (turn.response?.parts) {
-        for (const part of turn.response.parts) {
-          if (part.type === "markdown" && part.content) {
-            responseText += part.content + "\n";
-          }
-        }
+      } else if (part.kind === "markdown") {
+        responseText += part.content + "\n";
       }
     }
   }

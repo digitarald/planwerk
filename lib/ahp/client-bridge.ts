@@ -1,12 +1,14 @@
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
 import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
-import type { SessionSummary, SessionState, ChatState, ChatInputRequestedAction } from "@microsoft/agent-host-protocol";
+import type { SessionSummary } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
 import { enrichFromChangeset, ChangesetEnrichment } from "./changeset-enricher";
 import { fetchCopilotCliPlan, clearPlanCache } from "./plan-artifact";
-import { mapInputRequests } from "./map-session";
+import { fetchSessionModel } from "./session-config";
+import { mapSessionInputNeeded } from "./map-session";
+import { asSessionState, readSessionState } from "./snapshot";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT } from "@/lib/db/session-cache";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
@@ -59,12 +61,6 @@ function mapSdkSession(summary: SessionSummary): AHPSessionSummary {
   }
   if (summary.project) {
     mapped.project = { name: summary.project.displayName, path: summary.project.uri };
-  }
-  if (summary.model) {
-    mapped.model = summary.model.id;
-  }
-  if (summary.agent) {
-    mapped.agent = summary.agent.uri;
   }
   if (summary.workingDirectory) {
     mapped.workingDirectory = summary.workingDirectory;
@@ -145,10 +141,20 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       ? enrichFromChangeset(client!, sessionUri)
       : Promise.resolve(null);
     const planPromise = fetchCopilotCliPlan(client!, sessionUri, session.modifiedAt);
+    // The selected model is provider config on SessionState (not the summary), so
+    // derive it once per session and cache it on the summary entry.
+    const modelPromise: Promise<string | undefined> = session.model
+      ? Promise.resolve(session.model)
+      : fetchSessionModel(client!, sessionUri).catch(() => undefined);
 
-    Promise.all([changesetPromise, planPromise])
-      .then(([changesetResult, planArtifact]) => {
+    Promise.all([changesetPromise, planPromise, modelPromise])
+      .then(([changesetResult, planArtifact, model]) => {
         if (disposed || !sessions.has(sessionUri)) return;
+
+        if (model) {
+          const current = sessions.get(sessionUri);
+          if (current && !current.model) current.model = model;
+        }
 
         let enrichment = changesetResult ?? enrichments.get(sessionUri) ?? null;
 
@@ -217,44 +223,12 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     pendingInputFetches.add(sessionUri);
     debug("fetchInput: subscribing", sessionUri);
 
-    client.subscribe(sessionUri)
-      .then(async ({ result, subscription }) => {
-        // Close session subscription immediately — we only need the snapshot
-        void subscription.close();
-        client?.unsubscribe(sessionUri).catch(() => {});
+    pendingInputFetches.add(sessionUri);
+    debug("fetchInput: reading session inputNeeded", sessionUri);
 
-        if (disposed) return;
-
-        // Re-check: status may have changed while the request was in-flight
-        const currentSession = sessions.get(sessionUri);
-        const stillNeeded = currentSession
-          && (currentSession.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
-
-        if (!stillNeeded) {
-          debug("fetchInput: no longer needed (status changed)", sessionUri);
-          return;
-        }
-
-        const sessionState = result.snapshot?.state as SessionState | undefined;
-        if (!sessionState) {
-          warn("fetchInput: subscribe returned no snapshot", sessionUri);
-          return;
-        }
-
-        // Input requests live on the chat channel; read the session's
-        // defaultChat. (We only inspect defaultChat, not other chats in the
-        // session.)
-        const defaultChatUri = sessionState.defaultChat;
-        if (!defaultChatUri) {
-          warn("fetchInput: no inputRequests and no defaultChat URI", sessionUri);
-          emitNoPendingInput(sessionUri);
-          return;
-        }
-
-        await fetchInputFromChat(sessionUri, defaultChatUri);
-      })
+    fetchInputFromSession(sessionUri)
       .catch((err) => {
-        warn("fetchInput: subscribe failed", sessionUri, err instanceof Error ? err.message : err);
+        warn("fetchInput: failed", sessionUri, err instanceof Error ? err.message : err);
       })
       .finally(() => {
         pendingInputFetches.delete(sessionUri);
@@ -269,69 +243,83 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       });
   }
 
-  /** Subscribe to a chat channel to extract inputRequests. */
-  async function fetchInputFromChat(sessionUri: string, chatUri: string) {
+  const stillInputNeeded = (sessionUri: string): boolean => {
+    const s = sessions.get(sessionUri);
+    return Boolean(s) && (s!.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
+  };
+
+  /**
+   * Read a session's aggregated `SessionState.inputNeeded` (the AHP 0.5 session-level
+   * input surface) and emit the most actionable pending input — an elicitation, a tool
+   * confirmation, or a read-only client-execution blocker — across every chat.
+   *
+   * If the session reports InputNeeded but the snapshot's `inputNeeded` hasn't populated
+   * yet (a race between the status flag and `session/inputNeededSet`), briefly wait for
+   * that action, then re-read.
+   */
+  async function fetchInputFromSession(sessionUri: string) {
     if (disposed || !client) return;
 
-    let chatSub: Awaited<ReturnType<typeof client.subscribe>> | undefined;
+    let sub: Awaited<ReturnType<typeof client.subscribe>> | undefined;
     try {
-      chatSub = await client.subscribe(chatUri);
+      sub = await client.subscribe(sessionUri);
     } catch (err) {
-      warn("fetchInput: chat subscribe failed", sessionUri, err instanceof Error ? err.message : err);
+      warn("fetchInput: session subscribe failed", sessionUri, err instanceof Error ? err.message : err);
       emitNoPendingInput(sessionUri);
       return;
     }
 
-    const { result, subscription } = chatSub;
-
-    const chatState = result.snapshot?.state as ChatState | undefined;
-    if (chatState) {
-      // Check for inputRequests directly in chat state
-      if (chatState.inputRequests && chatState.inputRequests.length > 0) {
-        void subscription.close();
-        client?.unsubscribe(chatUri).catch(() => {});
-        const mapped = mapInputRequests(chatState.inputRequests);
-        if (mapped) {
-          emitPendingInput(sessionUri, mapped);
-        } else {
-          emitNoPendingInput(sessionUri);
-        }
-        return;
-      }
-    }
-
-    // inputRequests not yet in snapshot — wait for the action to arrive
-    debug("fetchInput: chat has no inputRequests yet, waiting…", sessionUri);
-    const timer = setTimeout(() => {
-      debug("fetchInput: timed out waiting for chat inputRequested", sessionUri);
+    const { result, subscription } = sub;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
       void subscription.close();
-    }, 5_000);
+      client?.unsubscribe(sessionUri).catch(() => {});
+    };
 
     try {
-      for await (const event of subscription) {
-        if (disposed) break;
-        // The subscription stream yields SubscriptionEvent envelopes; the
-        // mutation actions arrive as `{ type: "action", params: ActionEnvelope }`.
-        if (event.type !== "action") continue;
-        const action = event.params.action;
-        if ((action.type as string) === "chat/inputRequested") {
-          const request = (action as ChatInputRequestedAction).request;
-          if (request) {
-            debug("fetchInput: got inputRequested from chat stream", sessionUri);
-            const mapped = mapInputRequests([request]);
-            if (mapped) {
-              emitPendingInput(sessionUri, mapped);
-            }
+      if (disposed) return;
+
+      // Re-check: status may have changed while the subscribe was in-flight.
+      if (!stillInputNeeded(sessionUri)) {
+        debug("fetchInput: no longer needed (status changed)", sessionUri);
+        return;
+      }
+
+      const initial = mapSessionInputNeeded(asSessionState(result.snapshot)?.inputNeeded);
+      if (initial) {
+        emitPendingInput(sessionUri, initial);
+        return;
+      }
+
+      // inputNeeded not populated yet — wait briefly for session/inputNeededSet.
+      debug("fetchInput: no inputNeeded yet, waiting…", sessionUri);
+      let sawSet = false;
+      const timer = setTimeout(() => void subscription.close(), 5_000);
+      try {
+        for await (const event of subscription) {
+          if (disposed) break;
+          if (event.type !== "action") continue;
+          if ((event.params.action.type as string) === "session/inputNeededSet") {
+            sawSet = true;
             break;
           }
         }
+      } finally {
+        clearTimeout(timer);
       }
-    } catch {
-      // subscription closed or errored
+
+      // Close our streaming subscription before re-reading a fresh snapshot.
+      release();
+      if (sawSet && !disposed && stillInputNeeded(sessionUri)) {
+        const fresh = await readSessionState(client!, sessionUri);
+        const mapped = mapSessionInputNeeded(fresh?.inputNeeded);
+        if (mapped) emitPendingInput(sessionUri, mapped);
+        else emitNoPendingInput(sessionUri);
+      }
     } finally {
-      clearTimeout(timer);
-      void subscription.close();
-      client?.unsubscribe(chatUri).catch(() => {});
+      release();
     }
   }
 
@@ -540,8 +528,6 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
             if (changes.status !== undefined) existing.status = changes.status;
             if (changes.activity !== undefined) existing.activity = changes.activity;
             if (changes.modifiedAt !== undefined) existing.modifiedAt = new Date(changes.modifiedAt).toISOString();
-            if (changes.model !== undefined) existing.model = changes.model?.id;
-            if (changes.agent !== undefined) existing.agent = changes.agent?.uri;
             if (changes.workingDirectory !== undefined) existing.workingDirectory = changes.workingDirectory;
             if (changes.project !== undefined) {
               existing.project = changes.project

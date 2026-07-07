@@ -351,6 +351,14 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                     </>
                   )}
                   <span>{formatRelativeTime(card.modifiedAt)}</span>
+                  {card.model && (
+                    <>
+                      <span className="text-muted-foreground/45"> · </span>
+                      <span className="text-muted-foreground/55" title={`Model: ${card.model}`}>
+                        {card.model}
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
             </div>

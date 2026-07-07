@@ -57,8 +57,6 @@ export async function GET(request: NextRequest) {
         };
         if (s.activity) mapped.activity = s.activity;
         if (s.project) mapped.project = { name: s.project.displayName, path: s.project.uri };
-        if (s.model) mapped.model = s.model.id;
-        if (s.agent) mapped.agent = s.agent.uri;
         if (s.workingDirectory) mapped.workingDirectory = s.workingDirectory;
         if (s.changes) {
           mapped.changes = {
@@ -80,13 +78,12 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const { hostUrl, title, prompt, provider, model, workingDirectory } =
+  const { hostUrl, title, prompt, provider, workingDirectory } =
     (await request.json()) as {
       hostUrl?: string;
       title?: string;
       prompt?: string;
       provider?: string;
-      model?: string;
       workingDirectory?: string;
     };
 
@@ -113,12 +110,14 @@ export async function POST(request: NextRequest) {
     const channel = `${agentProvider}:/${sessionId}`;
 
     try {
+      // Model selection is provider-defined session config in AHP 0.5 (no longer a
+      // top-level createSession field); the provider applies its default here and
+      // the selection is surfaced from SessionState.config afterwards.
       await client.request("createSession", {
         channel,
         provider: agentProvider,
         workingDirectory: workingDirectory || undefined,
         config: NEW_SESSION_CONFIG,
-        ...(model ? { model: { id: model } } : {}),
       });
     } finally {
       releaseAHPClient(hostUrl);

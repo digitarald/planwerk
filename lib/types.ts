@@ -55,11 +55,49 @@ export interface PendingInputQuestion {
   defaultValue?: string | number | boolean;
 }
 
+/**
+ * Discriminates the kind of outstanding input surfaced from a session's
+ * aggregated `SessionState.inputNeeded`:
+ * - `elicitation` — a user-facing question (the default; answered via inputCompleted).
+ * - `toolConfirmation` — a tool call awaiting approve/deny (before or after running).
+ * - `toolExecution` — a running tool delegated to an active client. Planwerk provides
+ *   no tools, so these are surfaced read-only as a blocker.
+ */
+export type PendingInputKind = "elicitation" | "toolConfirmation" | "toolExecution";
+
+/** An approve/deny confirmation option offered by the host for a tool call. */
+export interface ToolConfirmationOption {
+  id: string;
+  label: string;
+  /** Whether choosing this option approves or denies the tool call. */
+  intent: "approve" | "deny";
+}
+
+/** Details needed to render and answer a tool-call confirmation. */
+export interface ToolConfirmationDetails {
+  /** Owning chat channel URI the confirmation is dispatched to (server-derived). */
+  chatUri: string;
+  turnId: string;
+  toolCallId: string;
+  /** "param" confirms before execution; "result" confirms the produced result. */
+  confirmKind: "param" | "result";
+  /** Human-readable tool name, e.g. "Run in terminal". */
+  toolName?: string;
+  /** What the tool intends to do / what it produced. */
+  intention?: string;
+  /** Server-provided options; when present, render these instead of plain approve/deny. */
+  options?: ToolConfirmationOption[];
+}
+
 export interface PendingInput {
   requestId: string;
   /** Top-level message for the input request (e.g. plan summary or question context) */
   message?: string;
   questions: PendingInputQuestion[];
+  /** Discriminates elicitations from tool confirmations / execution blockers. Absent = elicitation. */
+  kind?: PendingInputKind;
+  /** Present when `kind === "toolConfirmation"`. */
+  toolConfirmation?: ToolConfirmationDetails;
 }
 
 export interface FileChange {

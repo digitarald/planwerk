@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "ahp:smoke": "node --experimental-strip-types scripts/ahp-smoke.ts",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
@@ -14,13 +15,13 @@
     "@base-ui/react": "^1.5.0",
     "@github/copilot-sdk": "^1.0.4",
     "@hello-pangea/dnd": "^18.0.1",
-    "@microsoft/agent-host-protocol": "^0.4.0",
+    "@microsoft/agent-host-protocol": "^0.5.1",
     "better-sqlite3": "^12.11.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "lucide-react": "^1.18.0",
-    "next": "16.2.9",
+    "next": "16.2.10",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",
@@ -35,12 +36,12 @@
     "@tailwindcss/postcss": "^4",
     "@tailwindcss/typography": "^0.5.20",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^20",
+    "@types/node": "^24",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.9",
+    "eslint-config-next": "16.2.10",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^6"
   }
 }

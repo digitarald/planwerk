@@ -1,8 +1,94 @@
-import { Artifact, KanbanCard, PendingInput, PendingInputQuestion, PendingInputOptionKind, Phase, RiskLevel, RuntimeStatus } from "@/lib/types";
-import type { ChatInputRequest, ChatInputQuestion } from "@microsoft/agent-host-protocol";
+import { Artifact, KanbanCard, PendingInput, PendingInputQuestion, PendingInputOptionKind, Phase, RiskLevel, RuntimeStatus, ToolConfirmationDetails, ToolConfirmationOption } from "@/lib/types";
+import type {
+  ChatInputRequest,
+  ChatInputQuestion,
+  SessionState,
+  SessionChatInputRequest,
+  SessionToolConfirmationRequest,
+  SessionToolClientExecutionRequest,
+} from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPStatus, parseAHPStatus } from "./types";
 import type { ChangesetEnrichment } from "./changeset-enricher";
+
+/**
+ * Convert a session's aggregated `SessionState.inputNeeded` into the single most
+ * actionable {@link PendingInput}. This is the AHP 0.5 session-level input surface,
+ * covering elicitations, tool confirmations, and client-execution across every chat.
+ *
+ * Priority (most actionable first): user elicitation → tool confirmation →
+ * read-only client-execution blocker.
+ *
+ * `SessionInputRequestKind` / `ToolCallStatus` are ambient `const enum`s, which
+ * cannot be referenced as values under `isolatedModules`; we compare their string
+ * wire values and narrow the discriminated union with a documented cast.
+ */
+export function mapSessionInputNeeded(
+  entries: SessionState["inputNeeded"],
+): PendingInput | undefined {
+  if (!entries || entries.length === 0) return undefined;
+
+  const chatInput = entries.find((e) => (e.kind as string) === "chatInput");
+  if (chatInput) {
+    const mapped = mapInputRequests([(chatInput as SessionChatInputRequest).request]);
+    if (mapped) return mapped;
+  }
+
+  const toolConfirm = entries.find((e) => (e.kind as string) === "toolConfirmation");
+  if (toolConfirm) {
+    return mapToolConfirmation(toolConfirm as SessionToolConfirmationRequest);
+  }
+
+  const toolExec = entries.find((e) => (e.kind as string) === "toolClientExecution");
+  if (toolExec) {
+    const entry = toolExec as SessionToolClientExecutionRequest;
+    const name = entry.toolCall?.displayName ?? entry.toolCall?.toolName;
+    return {
+      requestId: entry.id,
+      kind: "toolExecution",
+      message: name ? `Waiting on client tool: ${name}` : "Waiting on a client-provided tool",
+      questions: [],
+    };
+  }
+
+  return undefined;
+}
+
+function mapToolConfirmation(entry: SessionToolConfirmationRequest): PendingInput {
+  const tc = entry.toolCall;
+  const confirmKind: "param" | "result" =
+    (tc.status as string) === "pending-result-confirmation" ? "result" : "param";
+
+  let options: ToolConfirmationOption[] | undefined;
+  if ("options" in tc && Array.isArray(tc.options)) {
+    options = tc.options.map((o) => ({
+      id: o.id,
+      label: o.label,
+      intent: (o.kind as string) === "deny" ? "deny" : "approve",
+    }));
+  }
+
+  const rawTitle = "confirmationTitle" in tc ? tc.confirmationTitle : undefined;
+  const title = typeof rawTitle === "string" && rawTitle.trim() ? rawTitle : (tc.displayName ?? tc.toolName);
+
+  const details: ToolConfirmationDetails = {
+    chatUri: entry.chat,
+    turnId: entry.turnId,
+    toolCallId: tc.toolCallId,
+    confirmKind,
+    toolName: tc.displayName ?? tc.toolName,
+    intention: tc.intention,
+    options,
+  };
+
+  return {
+    requestId: entry.id,
+    kind: "toolConfirmation",
+    message: title ? `Confirm: ${title}` : "Confirm tool call",
+    questions: [],
+    toolConfirmation: details,
+  };
+}
 
 /**
  * Convert SDK ChatInputRequest[] into the first actionable PendingInput.

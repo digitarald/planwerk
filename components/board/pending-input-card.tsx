@@ -35,6 +35,25 @@ async function submitInputResponse(
   return res.json();
 }
 
+async function submitToolConfirmation(
+  hostUrl: string,
+  sessionUri: string,
+  requestId: string,
+  approved: boolean,
+  optionId?: string
+): Promise<{ inputRemoved: boolean }> {
+  const res = await fetch("/api/ahp/sessions/input", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hostUrl, sessionUri, requestId, approved, optionId }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "Failed to submit");
+  }
+  return res.json();
+}
+
 /** Map common option labels to icons for the plan approval picker */
 function getOptionIcon(label: string): typeof Play | null {
   const lower = label.toLowerCase();
@@ -306,6 +325,18 @@ export function PendingInputCard({ cardId, input }: PendingInputCardProps) {
     });
   };
 
+  const handleToolConfirm = async (approved: boolean, optionId?: string) => {
+    if (!hostUrl) return;
+    setSubmitState("submitting");
+    try {
+      const result = await submitToolConfirmation(hostUrl, cardId, input.requestId, approved, optionId);
+      setSubmitState(result.inputRemoved ? "done" : "stale");
+    } catch {
+      setSubmitState("error");
+      setTimeout(() => setSubmitState("idle"), 3000);
+    }
+  };
+
   if (submitState === "submitting") {
     return (
       <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/5 px-2.5 py-2 dark:bg-primary/10">
@@ -346,6 +377,86 @@ export function PendingInputCard({ cardId, input }: PendingInputCardProps) {
         <p className="text-[11px] font-medium text-destructive">
           Failed — try again
         </p>
+      </div>
+    );
+  }
+
+  // Tool execution delegated to a client. Planwerk provides no tools, so this is
+  // surfaced read-only as a blocker — it must be handled in the agent's editor.
+  if (input.kind === "toolExecution") {
+    return (
+      <div className="mt-1.5 space-y-1 rounded-lg border border-amber-200/80 bg-gradient-to-b from-amber-50/80 to-amber-50/40 px-2.5 py-2 dark:border-amber-800/30 dark:from-amber-950/20 dark:to-amber-950/10">
+        <p className="text-[11px] font-medium text-amber-900 dark:text-amber-200 leading-snug">
+          {input.message || "Waiting on a client-provided tool"}
+        </p>
+        <p className="text-[10px] text-muted-foreground">Handle in the agent&apos;s editor.</p>
+      </div>
+    );
+  }
+
+  // Tool-call confirmation — approve/deny (or host-provided options). Approving or
+  // denying a tool call is a management decision, so Planwerk surfaces it inline.
+  if (input.kind === "toolConfirmation" && input.toolConfirmation) {
+    const tc = input.toolConfirmation;
+    const options = tc.options ?? [];
+    return (
+      <div className="mt-1.5 space-y-2 rounded-lg border border-amber-200/80 bg-gradient-to-b from-amber-50/80 to-amber-50/40 px-2.5 py-2 dark:border-amber-800/30 dark:from-amber-950/20 dark:to-amber-950/10">
+        <div className="space-y-0.5">
+          <p className="text-[11px] font-medium text-amber-900 dark:text-amber-200 leading-snug">
+            {input.message}
+          </p>
+          {tc.intention && (
+            <p className="text-[10px] text-muted-foreground leading-snug">{tc.intention}</p>
+          )}
+          {tc.confirmKind === "result" && (
+            <p className="text-[10px] text-muted-foreground">Review the result before it is used.</p>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {options.length > 0 ? (
+            options.map((opt) => (
+              <button
+                key={opt.id}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-[10px] font-medium shadow-sm transition-all",
+                  opt.intent === "approve"
+                    ? "border-primary/40 bg-primary text-primary-foreground hover:bg-primary/90 hover:shadow-md"
+                    : "border-border bg-background text-foreground hover:border-primary/30 hover:bg-primary/5 hover:shadow-md"
+                )}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleToolConfirm(opt.intent === "approve", opt.id);
+                }}
+              >
+                {opt.intent === "approve" ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
+                {opt.label}
+              </button>
+            ))
+          ) : (
+            <>
+              <button
+                className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary px-2.5 py-1 text-[10px] font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90 hover:shadow-md"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleToolConfirm(true);
+                }}
+              >
+                <Check className="h-3 w-3" />
+                Approve
+              </button>
+              <button
+                className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-1 text-[10px] font-medium text-foreground shadow-sm transition-all hover:border-primary/30 hover:bg-primary/5 hover:shadow-md"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleToolConfirm(false);
+                }}
+              >
+                <X className="h-3 w-3" />
+                Deny
+              </button>
+            </>
+          )}
+        </div>
       </div>
     );
   }

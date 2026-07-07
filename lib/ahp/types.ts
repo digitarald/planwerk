@@ -11,7 +11,6 @@ export interface AHPSessionSummary {
     path: string;
   };
   model?: string;
-  agent?: string;
   workingDirectory?: string;
   changes?: {
     additions: number;

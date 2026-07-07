@@ -1,8 +1,9 @@
 import "server-only";
 
-import type { SessionState, ChatState, SessionLifecycle } from "@microsoft/agent-host-protocol";
+import type { ChatState, SessionLifecycle, Turn } from "@microsoft/agent-host-protocol";
 
 import { getAHPClient, releaseAHPClient } from "./client-manager";
+import { asSessionState, readChatState, readSessionState } from "./snapshot";
 import { AHPStatus, parseAHPStatus } from "./types";
 import {
   chatTurnStarted,
@@ -23,12 +24,8 @@ async function getSessionContext(
   client: Awaited<ReturnType<typeof getAHPClient>>,
   sessionUri: string
 ): Promise<{ chatUri: string | null; status: number; isInProgress: boolean }> {
-  const { result, subscription } = await client.subscribe(sessionUri);
-  void subscription.close();
-  await client.unsubscribe(sessionUri).catch(() => {});
-
-  const sessionState = result.snapshot?.state as SessionState | undefined;
-  const status = sessionState?.summary?.status ?? 0;
+  const sessionState = await readSessionState(client, sessionUri);
+  const status = sessionState?.status ?? 0;
   const parsed = parseAHPStatus(status);
 
   const chatUri = sessionState?.defaultChat ?? null;
@@ -106,12 +103,7 @@ export async function answerInput(
     }
 
     // Verify input request still exists
-    const { result: chatResult, subscription: chatSub } =
-      await client.subscribe(chatUri);
-    void chatSub.close();
-    await client.unsubscribe(chatUri).catch(() => {});
-
-    const chatState = chatResult.snapshot?.state as ChatState | undefined;
+    const chatState = await readChatState(client, chatUri);
     const chatInputRequests = chatState?.inputRequests;
 
     if (!chatInputRequests?.some((r) => r.id === requestId)) {
@@ -173,10 +165,8 @@ export async function requestPlanChanges(
     }
 
     const readInputs = async (): Promise<ChatState["inputRequests"]> => {
-      const { result, subscription } = await client.subscribe(chatUri);
-      void subscription.close();
-      await client.unsubscribe(chatUri).catch(() => {});
-      return (result.snapshot?.state as ChatState | undefined)?.inputRequests;
+      const chatState = await readChatState(client, chatUri);
+      return chatState?.inputRequests;
     };
 
     // The plan-approval input must still be present.
@@ -234,12 +224,8 @@ export async function waitForIdle(
   while (Date.now() < deadline) {
     const client = await getAHPClient(hostUrl);
     try {
-      const { result, subscription } = await client.subscribe(sessionUri);
-      void subscription.close();
-      await client.unsubscribe(sessionUri).catch(() => {});
-
-      const sessionState = result.snapshot?.state as SessionState | undefined;
-      const status = sessionState?.summary?.status ?? 0;
+      const sessionState = await readSessionState(client, sessionUri);
+      const status = sessionState?.status ?? 0;
       const parsed = parseAHPStatus(status);
 
       if (parsed.isIdle && !parsed.isInProgress && !parsed.isInputNeeded) {
@@ -265,22 +251,25 @@ export async function waitForIdle(
 /**
  * Fetch the last N turns from a session to read agent output.
  *
- * In AHP 0.4.0 turns live on the chat channel, so resolve the session's
- * defaultChat and fetch from there, falling back to the session URI.
+ * Turns live on the chat channel, so resolve the session's defaultChat and read
+ * its `ChatState.turns` (a tail window of the most recent turns, oldest-first).
+ * As of AHP 0.5.x `fetchTurns` no longer returns turns directly; it asks the
+ * host to page older turns into `ChatState.turns` via `turnsNextCursor`. Since
+ * we only need the most recent turns, the subscription snapshot already carries
+ * them, so we read them directly and derive `hasMore` from `turnsNextCursor`.
  */
 export async function fetchLastTurns(
   hostUrl: string,
   sessionUri: string,
   limit: number = 5
-): Promise<{ turns: unknown[]; hasMore: boolean }> {
+): Promise<{ turns: Turn[]; hasMore: boolean }> {
   const client = await getAHPClient(hostUrl);
   try {
     const { chatUri } = await getSessionContext(client, sessionUri);
-    const result = await client.request("fetchTurns", {
-      channel: chatUri ?? sessionUri,
-      limit,
-    });
-    return { turns: result.turns, hasMore: result.hasMore };
+    const chatState = await readChatState(client, chatUri ?? sessionUri);
+    const allTurns = chatState?.turns ?? [];
+    const turns = limit > 0 ? allTurns.slice(-limit) : allTurns;
+    return { turns, hasMore: Boolean(chatState?.turnsNextCursor) };
   } finally {
     releaseAHPClient(hostUrl);
   }
@@ -301,12 +290,8 @@ export async function getSessionStatus(
 } | null> {
   const client = await getAHPClient(hostUrl);
   try {
-    const { result, subscription } = await client.subscribe(sessionUri);
-    void subscription.close();
-    await client.unsubscribe(sessionUri).catch(() => {});
-
-    const sessionState = result.snapshot?.state as SessionState | undefined;
-    const status = sessionState?.summary?.status ?? 0;
+    const sessionState = await readSessionState(client, sessionUri);
+    const status = sessionState?.status ?? 0;
     const parsed = parseAHPStatus(status);
 
     return {
@@ -353,8 +338,8 @@ export async function setSessionArchived(
   const read = async (): Promise<{ lifecycle: SessionLifecycle | undefined; status: number }> => {
     const { result, subscription } = await client.subscribe(sessionUri);
     void subscription.close();
-    const state = result.snapshot?.state as SessionState | undefined;
-    return { lifecycle: state?.lifecycle, status: state?.summary?.status ?? 0 };
+    const state = asSessionState(result.snapshot);
+    return { lifecycle: state?.lifecycle, status: state?.status ?? 0 };
   };
 
   const matchesTarget = (status: number) =>

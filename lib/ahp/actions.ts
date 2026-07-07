@@ -4,6 +4,10 @@ import type {
   ChatInputAnswerChangedAction,
   ChatInputCompletedAction,
   ChatInputAnswer,
+  ChatToolCallConfirmedAction,
+  ChatToolCallApprovedAction,
+  ChatToolCallDeniedAction,
+  ChatToolCallResultConfirmedAction,
   SessionIsArchivedChangedAction,
   Message,
   MessageOrigin,
@@ -81,5 +85,56 @@ export function sessionIsArchivedChanged(isArchived: boolean): SessionIsArchived
   return {
     type: "session/isArchivedChanged" as SessionIsArchivedChangedAction["type"],
     isArchived,
+  };
+}
+
+/**
+ * Approve or deny a tool call awaiting *parameter* confirmation (before it runs).
+ * Dispatched to the owning chat channel. `selectedOptionId` is set when the host
+ * offered explicit confirmation options.
+ */
+export function chatToolCallConfirmed(params: {
+  turnId: string;
+  toolCallId: string;
+  approved: boolean;
+  selectedOptionId?: string;
+}): ChatToolCallConfirmedAction {
+  const { turnId, toolCallId, approved, selectedOptionId } = params;
+  if (approved) {
+    const action: ChatToolCallApprovedAction = {
+      type: "chat/toolCallConfirmed" as ChatToolCallApprovedAction["type"],
+      turnId,
+      toolCallId,
+      approved: true,
+      confirmed: "user-action" as ChatToolCallApprovedAction["confirmed"],
+    };
+    if (selectedOptionId) action.selectedOptionId = selectedOptionId;
+    return action;
+  }
+  const action: ChatToolCallDeniedAction = {
+    type: "chat/toolCallConfirmed" as ChatToolCallDeniedAction["type"],
+    turnId,
+    toolCallId,
+    approved: false,
+    reason: "denied" as ChatToolCallDeniedAction["reason"],
+  };
+  if (selectedOptionId) action.selectedOptionId = selectedOptionId;
+  return action;
+}
+
+/**
+ * Approve or deny a tool call awaiting *result* confirmation (after it ran).
+ * Dispatched to the owning chat channel.
+ */
+export function chatToolCallResultConfirmed(params: {
+  turnId: string;
+  toolCallId: string;
+  approved: boolean;
+}): ChatToolCallResultConfirmedAction {
+  return {
+    type: "chat/toolCallResultConfirmed" as ChatToolCallResultConfirmedAction["type"],
+    turnId: params.turnId,
+    toolCallId: params.toolCallId,
+    approved: params.approved,
   };
 }
