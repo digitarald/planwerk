@@ -304,6 +304,15 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                     <RuntimeIndicator status={card.runtime} />
                   )}
                   <GateIndicator status={card.gateStatus} />
+                  {card.gateStatus === "pending" && card.gateBlocker && (
+                    <span
+                      className="inline-flex min-w-0 shrink items-center gap-0.5 text-[9px] font-medium text-muted-foreground/80"
+                      title={`Not yet advancing: ${card.gateBlocker}`}
+                    >
+                      <ShieldAlert className="h-2.5 w-2.5 shrink-0" />
+                      <span className="truncate">{card.gateBlocker}</span>
+                    </span>
+                  )}
                   {card.coherence && card.coherence.conflictsWith.length > 0 && (
                     <span
                       className={cn(

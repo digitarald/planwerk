@@ -112,6 +112,11 @@ export interface KanbanCard {
   phase: Phase;
   runtime: RuntimeStatus;
   gateStatus: GateStatus;
+  /** Human-readable reason the card can't yet advance to the next phase, when
+   *  `gateStatus` is otherwise silent (`pending`). Derived from the pending
+   *  required gates + latest review-run state — e.g. "Plan review not started".
+   *  Legibility only; never moves the card. */
+  gateBlocker?: string;
   manualOverride?: boolean;
   attention: AttentionLevel;
   risk: RiskLevel;

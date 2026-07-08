@@ -431,6 +431,15 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 </span>
               )}
               <GateBadge status={card.gateStatus} />
+              {card.gateStatus === "pending" && card.gateBlocker && (
+                <span
+                  className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+                  title="Reason this card hasn't advanced to the next phase"
+                >
+                  <ShieldAlert className="h-3 w-3" />
+                  {card.gateBlocker}
+                </span>
+              )}
               {card.manualOverride && (
                 <span className="inline-flex items-center gap-1 text-xs text-amber-600">
                   <AlertTriangle className="h-3 w-3" />

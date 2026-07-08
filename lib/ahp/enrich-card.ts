@@ -1,14 +1,17 @@
 import "server-only";
 
-import { KanbanCard, ReviewFinding } from "@/lib/types";
+import { KanbanCard, ReviewFinding, RiskLevel, Phase } from "@/lib/types";
 import {
+  canAdvancePhase,
+  computeChangesetRef,
   deriveGateStatus,
   getNextPhase,
   getPersistedCardPhase,
   setCardPhase,
+  type GateConfig,
 } from "@/lib/orchestrator/gate-engine";
 import { getCardRisk } from "@/lib/orchestrator/risk-store";
-import { getReviewRunsForCard } from "@/lib/orchestrator/review-executor";
+import { getReviewRunsForCard, type ReviewRun } from "@/lib/orchestrator/review-executor";
 import { buildCoherenceSummary } from "@/lib/orchestrator/coherence-engine";
 import {
   getCardStatusHistory,
@@ -26,6 +29,79 @@ function safeParseJson(json: string): string[] | undefined {
   } catch {
     return undefined;
   }
+}
+
+const GATE_LABELS: Record<string, string> = {
+  "plan-review": "Plan review",
+  "architecture-review": "Architecture review",
+  "code-review": "Code review",
+  "security-review": "Security review",
+};
+
+function gateLabel(gate: GateConfig): string {
+  if (gate.gateName && GATE_LABELS[gate.gateName]) return GATE_LABELS[gate.gateName];
+  switch (gate.gateType) {
+    case "lint":
+      return "Lint";
+    case "typecheck":
+      return "Typecheck";
+    case "test":
+      return "Tests";
+    case "human-approval":
+      return "Human approval";
+    default:
+      return gate.gateName ?? gate.gateType;
+  }
+}
+
+/**
+ * Human-readable reason a card can't yet advance, for the legibility surface.
+ * Returns undefined when the transition is already satisfied (nothing to show).
+ * Annotates review gates with their latest run state so a card that has *started*
+ * a review reads differently from one that never began. Escalated reviews are
+ * intentionally left to the `needs-human` attention overlay, not duplicated here.
+ */
+function computeGateBlocker(
+  cardId: string,
+  fromPhase: Phase,
+  toPhase: Phase,
+  riskLevel: RiskLevel | undefined,
+  reviewRuns: ReviewRun[],
+  transition: string,
+  changesetRef?: string
+): string | undefined {
+  const { allowed, pendingGates } = canAdvancePhase(
+    cardId,
+    fromPhase,
+    toPhase,
+    undefined,
+    riskLevel,
+    changesetRef
+  );
+  if (allowed || pendingGates.length === 0) return undefined;
+
+  const latestBySkill = new Map<string, string>();
+  for (const run of reviewRuns) {
+    if (run.phaseTransition !== transition) continue;
+    if (!latestBySkill.has(run.skillId)) latestBySkill.set(run.skillId, run.status);
+  }
+
+  if (pendingGates.length === 1) {
+    const gate = pendingGates[0];
+    const label = gateLabel(gate);
+    if (gate.gateType === "review" && gate.gateName) {
+      const status = latestBySkill.get(gate.gateName);
+      if (!status) return `${label} not started`;
+      if (status === "failed") return `${label} failed — retrying`;
+      if (status === "injected" || status === "pending" || status === "extracting") {
+        return `${label} in progress`;
+      }
+    }
+    return `${label} pending`;
+  }
+
+  const labels = pendingGates.map(gateLabel);
+  return `Blocked on ${labels.length} gates: ${labels.join(", ")}`;
 }
 
 export interface EnrichOptions {
@@ -54,8 +130,17 @@ export function enrichSessionToCard(
   }
 
   const nextPhase = getNextPhase(card.phase);
+  // Diff-based changeset ref (matches the heartbeat's staleness signal) so the
+  // rendered gate status/blocker agree with what the orchestrator will actually
+  // do — a passing gate that's since gone stale must not read as "passed".
+  const changesetRef = computeChangesetRef(
+    card.filesChanged,
+    card.additions,
+    card.deletions,
+    card.modifiedAt
+  );
   if (nextPhase) {
-    card.gateStatus = deriveGateStatus(session.resource, card.phase, nextPhase, storedRisk?.level);
+    card.gateStatus = deriveGateStatus(session.resource, card.phase, nextPhase, storedRisk?.level, changesetRef);
   }
 
   // Attach review findings from DB
@@ -72,6 +157,21 @@ export function enrichSessionToCard(
       summary: run.verdictSummary ?? undefined,
       findings: run.findingsJson ? safeParseJson(run.findingsJson) : undefined,
     }));
+  }
+
+  // Legibility: when the gate is silently `pending` (no badge/spinner), surface
+  // *why* the card can't advance so a busy card producing work doesn't look
+  // mysteriously stuck. Purely informational — does not move the card.
+  if (nextPhase && card.gateStatus === "pending") {
+    card.gateBlocker = computeGateBlocker(
+      session.resource,
+      card.phase,
+      nextPhase,
+      storedRisk?.level,
+      reviewRuns,
+      `${card.phase}->${nextPhase}`,
+      changesetRef
+    );
   }
 
   // Parked-on-escalation overlay: when the *latest* review run for a skill on the

@@ -141,10 +141,19 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
 - `lib/ahp/client-bridge.ts` — connect, session sync, enrichment + pending-input fetch.
 - `lib/ahp/snapshot.ts` — narrow `Snapshot.state` to `SessionState` / `ChatState`.
 - `lib/ahp/map-session.ts` — `SessionSummary` → `KanbanCard`, phase inference, input mapping.
+- `lib/ahp/enrich-card.ts` — assembles DB-backed card facts: gate status, review
+  findings, escalation/coherence overlays, and `card.gateBlocker` (the
+  human-readable "why isn't this advancing" reason shown when `gateStatus` is a
+  silent `pending`, e.g. "Plan review not started").
 - `lib/ahp/changeset-enricher.ts`, `lib/ahp/plan-artifact.ts` — file/artifact enrichment.
 - `lib/ahp/types.ts` — `AHPStatus` bits + `parseAHPStatus`.
 - `app/api/ahp/events/route.ts` — SSE bridge + triage entry point.
 - `lib/orchestrator/{heartbeat,gate-engine,triage,risk-*}.ts` — the autonomous loop.
+  Note: a plain plan-phase card only gets its `plan-review` gate injected when
+  **idle**. A card that stays `running` (heads-down coding) won't advance until it
+  idles — unless the opt-in `orchestrator.inject_reviews_while_busy` config is on
+  (default off), which lets the heartbeat queue the review after
+  `plan_busy_threshold` of continuous running. The gate still grades before advance.
 - `lib/db/schema.ts` — tables + `getDb()`.
 - `scripts/ahp-smoke.ts` — reference for live-host connection.
 

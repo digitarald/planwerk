@@ -50,6 +50,16 @@ export interface OrchestratorConfig {
   autoAdvancePhases: boolean;
   autoTriggerGates: boolean;
   autoInjectReviews: boolean;
+  /** Opt-in: inject the plan-review gate for a plan-phase card that has been
+   *  continuously *running* (never idle) past `planBusyThreshold`, via a queued
+   *  message. Off by default so a busy agent is never interrupted unless an
+   *  operator enables it. Still gated by `autoInjectReviews`; the gate grades
+   *  before any advance (invariant preserved). */
+  injectReviewsWhileBusy: boolean;
+  /** How long a plan-phase card must stay continuously running before an
+   *  opt-in busy plan-review injection fires. Only used when
+   *  `injectReviewsWhileBusy` is true. */
+  planBusyThreshold: number; // in ms
   maxRetryOnFailure: number;
 }
 
@@ -112,6 +122,8 @@ const DEFAULT_ORCHESTRATOR: OrchestratorConfig = {
   autoAdvancePhases: true,
   autoTriggerGates: true,
   autoInjectReviews: true,
+  injectReviewsWhileBusy: false,
+  planBusyThreshold: 300_000, // 5 minutes
   maxRetryOnFailure: 2,
 };
 
@@ -274,6 +286,8 @@ function mergeConfig(raw: Record<string, unknown>): PlanwerkConfig {
     autoAdvancePhases: typeof rawOrch?.auto_advance_phases === "boolean" ? rawOrch.auto_advance_phases : DEFAULT_ORCHESTRATOR.autoAdvancePhases,
     autoTriggerGates: typeof rawOrch?.auto_trigger_gates === "boolean" ? rawOrch.auto_trigger_gates : DEFAULT_ORCHESTRATOR.autoTriggerGates,
     autoInjectReviews: typeof rawOrch?.auto_inject_reviews === "boolean" ? rawOrch.auto_inject_reviews : DEFAULT_ORCHESTRATOR.autoInjectReviews,
+    injectReviewsWhileBusy: typeof rawOrch?.inject_reviews_while_busy === "boolean" ? rawOrch.inject_reviews_while_busy : DEFAULT_ORCHESTRATOR.injectReviewsWhileBusy,
+    planBusyThreshold: parseDuration(rawOrch?.plan_busy_threshold as string | undefined, DEFAULT_ORCHESTRATOR.planBusyThreshold),
     maxRetryOnFailure: clampPositive(rawOrch?.max_retry_on_failure, DEFAULT_ORCHESTRATOR.maxRetryOnFailure),
   };
 

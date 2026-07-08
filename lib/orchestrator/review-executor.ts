@@ -376,6 +376,19 @@ export async function processReviewResult(
     reviewRunId
   );
 
+  // Keep the linked gate_run's changeset_ref in lockstep with the review_run's.
+  // The verdict was rendered against the code state at *processing* time, not at
+  // injection time — recording the injection-time ref (from startGateRun) would
+  // leave the gate looking stale while shouldStartReview sees the review as fresh,
+  // deadlocking the card in its current phase. This matters most for the opt-in
+  // busy plan-review path, where the agent keeps editing during the review.
+  if (run.gateRunId) {
+    db.prepare("UPDATE gate_runs SET changeset_ref = ? WHERE id = ?").run(
+      currentChangesetRef ?? null,
+      run.gateRunId
+    );
+  }
+
   // Decide action based on verdict
   if (verdict.status === "passed") {
     // Even an explicit pass respects the follow-edits policy: at risk levels that

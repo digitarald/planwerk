@@ -46,6 +46,7 @@ interface HeartbeatState {
   pipelineStage: Map<string, "gates" | "review" | "advancing">;
   lastWipViolations: Map<string, number>; // phase → count when last emitted
   coherenceBlocked: Set<string>; // cards for which a ship-block was already announced
+  planBusySince: Map<string, number>; // plan-phase card → first tick seen continuously running
 }
 
 const state: HeartbeatState = {
@@ -57,6 +58,7 @@ const state: HeartbeatState = {
   pipelineStage: new Map(),
   lastWipViolations: new Map(),
   coherenceBlocked: new Set(),
+  planBusySince: new Map(),
 };
 
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -184,6 +186,22 @@ async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatT
     }
   }
 
+  // Track how long a plan-phase card has been continuously *running*. Feeds the
+  // opt-in busy plan-review injection (see maybeInjectBusyPlanReview): the
+  // timestamp is set the first tick a plan card is seen running and cleared the
+  // moment it idles or leaves the plan phase, so the elapsed check only fires
+  // for genuinely heads-down plan work. Iterates the full card list (not just
+  // activeCards) so archived/shipped cards don't retain a stale timestamp.
+  for (const card of cards) {
+    if (card.phase === "plan" && card.runtime === "running") {
+      if (!state.planBusySince.has(card.id)) {
+        state.planBusySince.set(card.id, Date.now());
+      }
+    } else {
+      state.planBusySince.delete(card.id);
+    }
+  }
+
   // WIP violation detection (board-level, only emit on state change)
   const wipLimits = config.wipLimits;
   const phaseCount: Record<string, number> = {};
@@ -291,6 +309,13 @@ async function processCard(
           actions.push(action);
         }
       }
+    } else if (card.runtime === "running" && card.phase === "plan") {
+      // Opt-in: a plan card that's been heads-down coding never idles, so the
+      // idle-only plan-review gate would never run. When enabled, inject it via
+      // a queued message so the gate still grades before any advance.
+      const changesetRef = computeChangesetRef(card.filesChanged, card.additions, card.deletions, card.modifiedAt);
+      const busyActions = await maybeInjectBusyPlanReview(hostUrl, card, riskLevel, changesetRef, config);
+      actions.push(...busyActions);
     }
     return actions;
   }
@@ -657,6 +682,55 @@ async function runPlanApprovalPipeline(
     actions.push(action);
   }
   return actions;
+}
+
+/**
+ * Opt-in busy plan-review injection. A plan-phase card that keeps *running* never
+ * hits the idle-only plan pipeline, so its plan-review gate would never fire and
+ * it sits in Plan while visibly building. When `injectReviewsWhileBusy` is on and
+ * the card has been continuously running past `planBusyThreshold`, inject the
+ * pending plan-review via a queued message (processed when the agent's turn ends).
+ * De-duped through active-run + `shouldStartReview` checks; the gate still grades
+ * before any advance, so the "only the gate engine advances phase" invariant holds.
+ */
+async function maybeInjectBusyPlanReview(
+  hostUrl: string,
+  card: KanbanCard,
+  riskLevel: RiskLevel,
+  changesetRef: string,
+  config: ReturnType<typeof loadConfig>
+): Promise<HeartbeatAction[]> {
+  if (!config.orchestrator.injectReviewsWhileBusy) return [];
+  if (!config.orchestrator.autoInjectReviews) return [];
+
+  // Only act once the card has been continuously running long enough that this
+  // is clearly sustained plan work, not a brief burst.
+  const busySince = state.planBusySince.get(card.id);
+  if (!busySince || Date.now() - busySince < config.orchestrator.planBusyThreshold) {
+    return [];
+  }
+
+  const { allowed, pendingGates } = canAdvancePhase(
+    card.id,
+    "plan",
+    "build",
+    card.workingDirectory,
+    riskLevel,
+    changesetRef
+  );
+  // Already advanceable, or nothing review-shaped is pending → leave it to the
+  // normal idle path; don't interrupt the agent.
+  if (allowed) return [];
+  if (!pendingGates.some((g) => g.gateType === "review")) return [];
+
+  // A review is already in flight (pending/injected/extracting) for this card —
+  // don't double-inject. A `failed` run is intentionally *not* treated as in
+  // flight: it should re-iterate, which startPendingReviews handles below.
+  if (getActiveReviewRuns(card.id).some((r) => r.status !== "failed")) return [];
+
+  // startPendingReviews de-dups per changeset via shouldStartReview and emits
+  // review-injected actions for anything it starts.
+  return startPendingReviews(hostUrl, card, "plan->build", riskLevel, changesetRef);
 }
 
 /**

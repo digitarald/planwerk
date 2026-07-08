@@ -414,7 +414,8 @@ export function deriveGateStatus(
   cardId: string,
   fromPhase: Phase,
   toPhase: Phase,
-  riskLevel?: RiskLevel
+  riskLevel?: RiskLevel,
+  changesetRef?: string
 ): GateStatus {
   const gates = getGatesForTransition(fromPhase, toPhase, undefined, riskLevel);
   const requiredGates = gates.filter((g) => g.required);
@@ -426,7 +427,7 @@ export function deriveGateStatus(
   if (relevantRuns.some((r) => r.status === "failed")) return "failed";
   if (relevantRuns.some((r) => r.status === "running")) return "evaluating";
 
-  const { allowed } = canAdvancePhase(cardId, fromPhase, toPhase, undefined, riskLevel);
+  const { allowed } = canAdvancePhase(cardId, fromPhase, toPhase, undefined, riskLevel, changesetRef);
   return allowed ? "passed" : "pending";
 }
 
