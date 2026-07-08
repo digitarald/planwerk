@@ -6,6 +6,7 @@ import { answerInput } from "@/lib/ahp/session-messenger";
 import { canAutoAnswer } from "./skill-config";
 import { getCardRisk } from "./risk-store";
 import type { KanbanCard, PendingInputQuestion } from "@/lib/types";
+import { ORCHESTRATOR_MODEL } from "./model";
 
 /**
  * A typed AHP answer value (mirrors `ChatInputAnswerValue` from the protocol).
@@ -157,7 +158,7 @@ export async function autoAnswer(
   try {
     const client = await getClient();
     const session = await client.createSession({
-      model: "gpt-4.1",
+      model: ORCHESTRATOR_MODEL,
       systemMessage: { content: SYSTEM_PROMPT },
     });
 

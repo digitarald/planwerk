@@ -11,6 +11,7 @@ import {
   type CoherenceRow,
 } from "./coherence-engine";
 import { fetchOverlapContent, type CardOverlapContent } from "./coherence-content";
+import { ORCHESTRATOR_MODEL } from "./model";
 
 /** Per-card context the reviewer needs beyond what the DB row carries. */
 export interface ReviewCardCtx {
@@ -164,7 +165,7 @@ async function reviewPair(
   try {
     const client = await getClient();
     const session = await client.createSession({
-      model: "gpt-4.1",
+      model: ORCHESTRATOR_MODEL,
       systemMessage: { content: SYSTEM_PROMPT },
     });
     try {

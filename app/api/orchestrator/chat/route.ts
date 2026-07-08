@@ -7,6 +7,7 @@ import { getDb } from "@/lib/db/schema";
 import { buildSystemPrompt } from "@/lib/orchestrator/orchestrator-agent";
 import { executeToolCall } from "@/lib/orchestrator/tool-executor";
 import type { OrchestratorToolName } from "@/lib/orchestrator/orchestrator-agent";
+import { ORCHESTRATOR_MODEL } from "@/lib/orchestrator/model";
 import type { KanbanCard } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -44,7 +45,7 @@ async function ensureSession(): Promise<CopilotSession | null> {
       copilotClient = new CopilotClient();
       await copilotClient.start();
       copilotSession = await copilotClient.createSession({
-        model: "gpt-4.1",
+        model: ORCHESTRATOR_MODEL,
         systemMessage: {
           content:
             "You are the CTO agent for Planwerk — an autonomous SDLC orchestrator. You help manage AI agent sessions flowing through a kanban pipeline. Be concise and actionable.",

@@ -3,6 +3,7 @@ import "server-only";
 import { CopilotClient } from "@github/copilot-sdk";
 
 import { RiskLevel } from "@/lib/types";
+import { ORCHESTRATOR_MODEL } from "./model";
 
 export interface RiskInput {
   title: string;
@@ -146,7 +147,7 @@ export async function assessRisk(input: RiskInput): Promise<RiskAssessment> {
   try {
     const client = await getClient();
     const session = await client.createSession({
-      model: "gpt-4.1",
+      model: ORCHESTRATOR_MODEL,
       systemMessage: { content: SYSTEM_PROMPT },
     });
 
