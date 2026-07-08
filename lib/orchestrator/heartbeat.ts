@@ -3,7 +3,7 @@ import "server-only";
 import { getDb } from "@/lib/db/schema";
 import { KanbanCard, Phase, RiskLevel, PendingInput, normalizeChangesetRef } from "@/lib/types";
 import { loadConfig } from "./skill-config";
-import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills, hasPlanRubberDuck, recordPlanRubberDuck, hasEscalatedReview } from "./review-executor";
+import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills, hasPlanRubberDuck, recordPlanRubberDuck, shouldStartReview } from "./review-executor";
 import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard, completeGateRun, executeGateCommand } from "./gate-engine";
 import { getCardRisk } from "./risk-store";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
@@ -334,11 +334,12 @@ async function processCard(
 }
 
 /**
- * Inject any not-yet-started review skills for a transition, skipping skills that
- * have already escalated to a human. An escalation is a terminal human-handoff, so
- * re-injecting its skill would restart the review-injected → escalated churn. When
- * every required skill is escalated the card is *parked*: nothing is injected and it
- * waits for a human (surfaced as `needs-human` via card enrichment).
+ * Inject any not-yet-started review skills for a transition. A skill is skipped
+ * when its latest run is a *fresh* terminal outcome — `passed` (gate already
+ * satisfied for this changeset) or `escalated` (parked for a human; re-injecting
+ * would restart the churn). A terminal run against a stale changeset re-opens, so
+ * genuinely new changes still get reviewed. When every skill is satisfied or
+ * parked, nothing is injected and the card waits (surfaced as `needs-human`).
  */
 async function startPendingReviews(
   hostUrl: string,
@@ -349,7 +350,7 @@ async function startPendingReviews(
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
   const skills = getRequiredReviewSkills(transition, riskLevel).filter(
-    (skill) => !hasEscalatedReview(card.id, skill.id, transition)
+    (skill) => shouldStartReview(card.id, skill.id, transition, changesetRef)
   );
   for (const skill of skills) {
     const { success } = await startReview(

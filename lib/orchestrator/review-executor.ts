@@ -15,6 +15,7 @@ import {
   completeGateRun,
 } from "./gate-engine";
 import type { Phase, RiskLevel } from "@/lib/types";
+import { normalizeChangesetRef } from "@/lib/types";
 
 export type ReviewRunStatus =
   | "pending"
@@ -99,23 +100,45 @@ export function getReviewRunsForCard(cardId: string): ReviewRun[] {
 }
 
 /**
- * Whether a review for this (card, skill, transition) has already escalated to a
- * human. An escalation is a terminal human-handoff: the automated loop must NOT
- * re-inject the same review, otherwise the heartbeat churns (review-injected →
- * escalated → review-injected …). Mirrors the `hasPlanRubberDuck` short-circuit.
+ * The most recent review run for a (card, skill, transition), or null. Rows are
+ * keyed by ascending id, so the highest id is the latest attempt.
  */
-export function hasEscalatedReview(
+export function getLatestReviewRun(
   cardId: string,
   skillId: string,
   phaseTransition: string
-): boolean {
+): ReviewRun | null {
   const db = getDb();
   const row = db
     .prepare(
-      "SELECT 1 FROM review_runs WHERE card_id = ? AND skill_id = ? AND phase_transition = ? AND status = 'escalated' LIMIT 1"
+      "SELECT * FROM review_runs WHERE card_id = ? AND skill_id = ? AND phase_transition = ? ORDER BY id DESC LIMIT 1"
     )
-    .get(cardId, skillId, phaseTransition) as { 1: number } | undefined;
-  return row !== undefined;
+    .get(cardId, skillId, phaseTransition) as ReviewRunRow | undefined;
+  return row ? mapRow(row) : null;
+}
+
+/**
+ * Whether a review skill should be (re)started for a transition.
+ *
+ * Skips a skill whose latest run is a *fresh* terminal outcome:
+ *  - `passed`    → the gate is already satisfied for this changeset.
+ *  - `escalated` → parked for a human; re-injecting would restart the churn.
+ * A terminal run recorded against a *different* changeset (the reviewed diff has
+ * since changed) is stale, so we return `true` to re-review the new changes.
+ * When no run exists yet, returns `true` (first review).
+ */
+export function shouldStartReview(
+  cardId: string,
+  skillId: string,
+  phaseTransition: string,
+  currentChangesetRef?: string
+): boolean {
+  const latest = getLatestReviewRun(cardId, skillId, phaseTransition);
+  if (!latest) return true;
+  const terminal = latest.status === "passed" || latest.status === "escalated";
+  if (!terminal) return true;
+  const fresh = normalizeChangesetRef(latest.changesetRef ?? undefined) === normalizeChangesetRef(currentChangesetRef);
+  return !fresh;
 }
 
 /** Skill ID used to record a forced plan rubber-duck pass. */
@@ -323,6 +346,23 @@ export async function processReviewResult(
 
   // Decide action based on verdict
   if (verdict.status === "passed") {
+    // Even an explicit pass respects the follow-edits policy: at risk levels that
+    // require re-review after auto-fixes (high risk), a pass that also made edits
+    // is re-iterated once (budget permitting) rather than trusting a self-verified
+    // pass. Low/medium (followEdits=false) pass immediately.
+    const cfgPass = loadConfig();
+    const riskPass = guessRiskFromPhaseTransition(run.cardId);
+    if (
+      verdict.madeEdits &&
+      shouldFollowEdits(riskPass, cfgPass) &&
+      run.iteration < getEffectiveMaxIterations(run.skillId, riskPass, cfgPass)
+    ) {
+      db.prepare("UPDATE review_runs SET status = 'failed' WHERE id = ?").run(reviewRunId);
+      if (run.gateRunId) {
+        completeGateRun(run.gateRunId, "failed", "Fixes applied — re-review required at this risk level.");
+      }
+      return { ...verdict, status: "failed", action: "re-iterate" };
+    }
     db.prepare("UPDATE review_runs SET status = 'passed' WHERE id = ?").run(reviewRunId);
     if (run.gateRunId) {
       completeGateRun(run.gateRunId, "passed", verdict.summary);

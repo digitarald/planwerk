@@ -18,9 +18,11 @@ test("parseVerdictToken: case-insensitive and tolerant of markdown/punctuation",
   assert.equal(parseVerdictToken("verdict = FAILED"), "fail");
   assert.equal(parseVerdictToken("Verdict - needs human"), "needs-human");
   assert.equal(parseVerdictToken("VERDICT: passed"), "pass");
+  assert.equal(parseVerdictToken("VERDICT: pass."), "pass"); // trailing period
+  assert.equal(parseVerdictToken("- VERDICT: fail"), "fail"); // list marker
 });
 
-test("parseVerdictToken: takes the LAST occurrence (the concluding verdict)", () => {
+test("parseVerdictToken: takes the LAST standalone verdict line", () => {
   const text = "Initially I thought VERDICT: fail, but after review\nVERDICT: pass";
   assert.equal(parseVerdictToken(text), "pass");
 });
@@ -28,6 +30,25 @@ test("parseVerdictToken: takes the LAST occurrence (the concluding verdict)", ()
 test("parseVerdictToken: returns null when no token present", () => {
   assert.equal(parseVerdictToken("The plan looks reasonable to me."), null);
   assert.equal(parseVerdictToken(""), null);
+});
+
+test("parseVerdictToken: ignores inline mentions and quoted examples (no false positives)", () => {
+  // Only a standalone verdict line counts — prose that quotes/discusses the
+  // contract must not be parsed as the machine verdict.
+  assert.equal(parseVerdictToken("Use VERDICT: pass, VERDICT: fail, or VERDICT: needs-human"), null);
+  assert.equal(parseVerdictToken("It is not safe to say VERDICT: pass"), null);
+  assert.equal(parseVerdictToken("No final token, just discussing VERDICT: pass tokens."), null);
+});
+
+test("parseVerdictToken: real reviewer output — findings then a concluding line", () => {
+  const text = [
+    "I reviewed the plan.",
+    "- The angle input could exceed 359 degrees.",
+    "The plan is otherwise solid.",
+    "",
+    "VERDICT: pass",
+  ].join("\n");
+  assert.equal(parseVerdictToken(text), "pass");
 });
 
 test("parseFindings: extracts bullet and numbered items, dedupes", () => {

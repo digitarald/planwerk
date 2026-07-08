@@ -74,15 +74,20 @@ export function enrichSessionToCard(
     }));
   }
 
-  // Parked-on-escalation overlay: a review that escalated for the card's current
-  // transition is a terminal human-handoff — the heartbeat stops re-injecting it,
-  // so surface `needs-human` or the card would sit here looking idle. Precedence:
-  // runtime error/needs-human already wins; escalation outranks coherence/stale.
+  // Parked-on-escalation overlay: when the *latest* review run for a skill on the
+  // card's current transition is escalated, the heartbeat has parked it for a human
+  // — surface `needs-human` or the card would sit here looking idle. Using the
+  // latest-per-skill run (reviewRuns are id-DESC) avoids a stale escalation that a
+  // later pass already superseded. Precedence: runtime error/needs-human already
+  // wins; escalation outranks coherence/stale.
   if (nextPhase && card.attention !== "error" && card.attention !== "needs-human") {
     const transition = `${card.phase}->${nextPhase}`;
-    const parked = reviewRuns.some(
-      (run) => run.status === "escalated" && run.phaseTransition === transition
-    );
+    const latestStatusBySkill = new Map<string, string>();
+    for (const run of reviewRuns) {
+      if (run.phaseTransition !== transition) continue;
+      if (!latestStatusBySkill.has(run.skillId)) latestStatusBySkill.set(run.skillId, run.status);
+    }
+    const parked = [...latestStatusBySkill.values()].some((status) => status === "escalated");
     if (parked) {
       card.attention = "needs-human";
     }

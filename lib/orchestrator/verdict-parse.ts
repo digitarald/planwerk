@@ -35,13 +35,16 @@ export const FAIL_SIGNALS = [
 ];
 
 // Matches the review-prompt contract line, e.g. "VERDICT: pass", "**Verdict:**
-// needs-human", "verdict = FAILED". Global so we can take the LAST occurrence,
-// since the contract asks the reviewer to end its reply with the verdict.
-const VERDICT_TOKEN = /\bverdict\b\s*[:=-]?\s*\*{0,2}\s*(pass(?:ed)?|fail(?:ed)?|needs[\s-]?human|human)/gi;
+// needs-human", "verdict = FAILED". Anchored to a standalone line (per the prompt
+// contract: "end your reply with exactly one line …") with a mandatory separator,
+// so inline mentions or quoted examples ("say VERDICT: pass") don't misfire. Global
+// + multiline so we can take the LAST matching line (the concluding verdict).
+const VERDICT_TOKEN = /^[\s>*\-]*\**\s*verdict\s*\**\s*[:=-]\s*\**\s*(pass(?:ed)?|fail(?:ed)?|needs[\s-]?human)\**\s*\.?\s*$/gim;
 
 /**
  * Extract the explicit verdict token from the reviewer's text, if present.
- * Returns the LAST match (the concluding verdict), or `null` when absent.
+ * Only a standalone verdict line counts; the LAST such line wins (the concluding
+ * verdict). Returns `null` when absent.
  */
 export function parseVerdictToken(text: string): VerdictToken | null {
   let match: RegExpExecArray | null;
@@ -53,7 +56,7 @@ export function parseVerdictToken(text: string): VerdictToken | null {
   if (last === null) return null;
   if (last.startsWith("pass")) return "pass";
   if (last.startsWith("fail")) return "fail";
-  return "needs-human"; // "needs-human", "needs human", or "human"
+  return "needs-human"; // "needs-human" or "needs human"
 }
 
 /** Extract findings from markdown bullet points and numbered items. */
