@@ -12,14 +12,16 @@ import {
   CommandSeparator,
 } from "@/components/ui/command"
 import { useShallow } from "zustand/react/shallow"
-import { Plus, Columns3, Zap, ArrowRight } from "lucide-react"
+import { Plus, Columns3, Zap, ArrowRight, Sparkles } from "lucide-react"
 import { useBoardStore, selectFilteredCards } from "@/lib/store/board-store"
+import { useUIStore } from "@/lib/store/ui-store"
 import { COLUMNS } from "@/lib/types"
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false)
   const cards = useBoardStore(useShallow(selectFilteredCards))
   const setDetailCard = useBoardStore((s) => s.setDetailCard)
+  const openWelcome = useUIStore((s) => s.openWelcome)
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -76,6 +78,18 @@ export function CommandPalette() {
               <span>Ask orchestrator</span>
               <span className="ml-auto text-xs text-muted-foreground">
                 Focus chat
+              </span>
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                setOpen(false)
+                openWelcome()
+              }}
+            >
+              <Sparkles className="mr-2 h-4 w-4" />
+              <span>Welcome to Planwerk</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                What is this?
               </span>
             </CommandItem>
           </CommandGroup>

@@ -6,6 +6,7 @@ import { CommandPalette } from "@/components/command-palette";
 import { Onboarding } from "@/components/connection/onboarding";
 import { LiveSessionProvider } from "@/components/live-session-provider";
 import { NotificationProvider } from "@/components/notification-provider";
+import { WelcomeModal } from "@/components/welcome-modal";
 import { useConnectionStore } from "@/lib/store/connection-store";
 
 export default function Home() {
@@ -24,7 +25,12 @@ export default function Home() {
       <LiveSessionProvider>
         <AppShell>
           {status === "reconnecting" ? <Onboarding /> : <KanbanBoard />}
-          {status === "connected" && <CommandPalette />}
+          {status === "connected" && (
+            <>
+              <CommandPalette />
+              <WelcomeModal />
+            </>
+          )}
         </AppShell>
       </LiveSessionProvider>
     </NotificationProvider>
