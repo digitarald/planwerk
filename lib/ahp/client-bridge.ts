@@ -489,26 +489,29 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       }
 
       const cached = cacheByUri.get(mapped.resource);
+      const unchanged =
+        cached && sessionSignature(cached.summary) === sessionSignature(mapped);
 
-      // Hydrate the derived model from cache so unchanged sessions don't trigger
-      // fetchSessionModel (a resume-causing subscribe).
-      if (cached?.summary.model && !mapped.model) {
-        mapped.model = cached.summary.model;
-      }
-      // Seed enrichment (changeset artifacts, plan, last agent message) from cache
-      // so the board renders immediately without re-reading the session.
-      if (cached?.enrichment) {
-        enrichments.set(mapped.resource, cached.enrichment);
-      }
-
-      // Change detection. When the content signature matches the cache, the session
-      // has not meaningfully changed and a moved modifiedAt is a spurious resume
-      // bump — so (a) keep the cached, stable modifiedAt so the card doesn't jump,
-      // and (b) skip enrichment so we never resume it. New or genuinely-changed
-      // sessions are marked stale and enriched once below.
-      if (cached && sessionSignature(cached.summary) === sessionSignature(mapped)) {
+      if (unchanged) {
+        // Session hasn't meaningfully changed since we cached it. A moved
+        // modifiedAt is a spurious resume bump, so keep the stable cached value
+        // (prevents the card from jumping), and hydrate derived data from cache
+        // so we don't re-read — and thus resume — the session.
         mapped.modifiedAt = cached.summary.modifiedAt;
+        if (cached.summary.model && !mapped.model) mapped.model = cached.summary.model;
+        if (cached.enrichment) enrichments.set(mapped.resource, cached.enrichment);
+
+        // Recover from a previously incomplete enrichment: if the session has file
+        // changes but we never cached enrichment for it (enrichment failed, or the
+        // process exited before it finished), re-enrich once so the card isn't left
+        // permanently missing its changeset/plan/model.
+        const hasFiles = (mapped.changes?.files ?? 0) > 0;
+        if (hasFiles && !cached.enrichment) staleUris.add(mapped.resource);
       } else {
+        // New or genuinely changed. Enrich once (this also fetches the model). Do
+        // NOT seed cached enrichment here: triggerEnrichment must compute it fresh
+        // so it can also *clear* enrichment when the session no longer has file
+        // changes (seeding a stale value would defeat that clear path).
         staleUris.add(mapped.resource);
       }
 
