@@ -9,7 +9,7 @@ import { fetchCopilotCliPlan, clearPlanCache } from "./plan-artifact";
 import { fetchSessionModel } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
 import { asSessionState, readSessionState } from "./snapshot";
-import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT } from "@/lib/db/session-cache";
+import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT, type CachedSession } from "@/lib/db/session-cache";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
 import { OFFERED_PROTOCOL_VERSIONS } from "./protocol";
@@ -74,6 +74,27 @@ function mapSdkSession(summary: SessionSummary): AHPSessionSummary {
   }
 
   return mapped;
+}
+
+/**
+ * A stable fingerprint of a session summary, used to decide whether a session has
+ * *meaningfully* changed since it was last cached.
+ *
+ * Deliberately excludes `modifiedAt`: Copilot CLI bumps `modifiedAt` whenever a
+ * session is merely resumed — including by our own reads (subscribing to a session
+ * resumes it). So `modifiedAt` is not a reliable "did real work happen" signal.
+ * Status and change counts are. When two signatures match, a moved `modifiedAt` is
+ * a spurious resume bump we should ignore.
+ */
+function sessionSignature(summary: AHPSessionSummary): string {
+  const c = summary.changes;
+  return [
+    summary.status,
+    summary.title ?? "",
+    c?.files ?? 0,
+    c?.additions ?? 0,
+    c?.deletions ?? 0,
+  ].join("|");
 }
 
 export interface AHPBridgeOptions {
@@ -442,14 +463,22 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
   // Fetch initial session list
   try {
-    // Build a lookup of cached modifiedAt values so we can preserve stable
-    // timestamps for archived sessions (AHP host may refresh modifiedAt on restart)
-    const cachedModifiedAt = new Map<string, string>();
+    // Load the persisted cache so unchanged sessions can be hydrated from it
+    // rather than re-read from the host. Reading a session over AHP *subscribes*
+    // to it, which makes Copilot CLI lazily resume the session and bump its
+    // modifiedAt — surfaced in VS Code as a reset "last modified" time. Reusing
+    // the cache lets us resume each session at most once (on first sight or a real
+    // change), eliminating the bulk timestamp thrash on every Planwerk restart.
+    const cacheByUri = new Map<string, CachedSession>();
     try {
       for (const cached of getCachedSessions(hostUrl)) {
-        cachedModifiedAt.set(cached.sessionUri, cached.summary.modifiedAt);
+        cacheByUri.set(cached.sessionUri, cached);
       }
     } catch { /* cache read failure is non-fatal */ }
+
+    // Sessions that are new or genuinely changed — only these get resume-causing
+    // enrichment reads below. Unchanged sessions are served entirely from cache.
+    const staleUris = new Set<string>();
 
     const result = await client.request("listSessions", { channel: "ahp-root://" });
     for (const summary of result.items) {
@@ -458,17 +487,34 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         if (summary.status & AHPStatus.IsArchived) skippedArchived.set(summary.resource, mapped);
         continue;
       }
-      // For archived sessions, preserve the original modifiedAt from cache
-      // to prevent timestamp thrashing when AHP host restarts
-      if ((mapped.status & AHPStatus.IsArchived) !== 0) {
-        const cachedTs = cachedModifiedAt.get(mapped.resource);
-        if (cachedTs && new Date(cachedTs).getTime() < new Date(mapped.modifiedAt).getTime()) {
-          mapped.modifiedAt = cachedTs;
-        }
+
+      const cached = cacheByUri.get(mapped.resource);
+
+      // Hydrate the derived model from cache so unchanged sessions don't trigger
+      // fetchSessionModel (a resume-causing subscribe).
+      if (cached?.summary.model && !mapped.model) {
+        mapped.model = cached.summary.model;
       }
+      // Seed enrichment (changeset artifacts, plan, last agent message) from cache
+      // so the board renders immediately without re-reading the session.
+      if (cached?.enrichment) {
+        enrichments.set(mapped.resource, cached.enrichment);
+      }
+
+      // Change detection. When the content signature matches the cache, the session
+      // has not meaningfully changed and a moved modifiedAt is a spurious resume
+      // bump — so (a) keep the cached, stable modifiedAt so the card doesn't jump,
+      // and (b) skip enrichment so we never resume it. New or genuinely-changed
+      // sessions are marked stale and enriched once below.
+      if (cached && sessionSignature(cached.summary) === sessionSignature(mapped)) {
+        mapped.modifiedAt = cached.summary.modifiedAt;
+      } else {
+        staleUris.add(mapped.resource);
+      }
+
       sessions.set(summary.resource, mapped);
     }
-    info(`loaded ${sessions.size} sessions (${result.items.length} total, archived without changes filtered)`);
+    info(`loaded ${sessions.size} sessions (${result.items.length} total, archived without changes filtered); ${staleUris.size} new/changed`);
     onEvent({ type: "init", sessions: Array.from(sessions.values()), enrichments, pendingInputs });
 
     // Cache all sessions and remove stale entries
@@ -477,10 +523,13 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }
     reconcileSessionCache(hostUrl, new Set(sessions.keys()));
 
-    // Trigger async enrichment (changeset + plan artifact) for all sessions
+    // Trigger async enrichment (changeset + plan artifact) only for new/changed
+    // sessions — enrichment subscribes to the session and would resume it.
+    // syncInputState runs for every session but only subscribes when InputNeeded,
+    // which is a hot session the user is actively resolving (its timestamp moving
+    // is expected).
     for (const [uri, session] of sessions) {
-      triggerEnrichment(uri);
-      // Fetch input for input-needed sessions
+      if (staleUris.has(uri)) triggerEnrichment(uri);
       syncInputState(uri, session.status);
     }
   } catch (err) {
