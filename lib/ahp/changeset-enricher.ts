@@ -6,6 +6,7 @@ import type {
   Turn,
   ResponsePart,
 } from "@microsoft/agent-host-protocol";
+import { createHash } from "node:crypto";
 
 import { Artifact, ArtifactType, FileChange } from "@/lib/types";
 
@@ -50,8 +51,27 @@ export interface ChangesetEnrichment {
   codeFileCount: number;
   totalFileCount: number;
   fileChanges: FileChange[];
+  /** Session-scoped diff totals, summed from the `changeKind: "session"` changeset
+   *  (isolated per agent). Present only when `changesetVerified` is true. */
+  additions: number;
+  deletions: number;
+  /** True when the counts above came from a *ready* session-scoped changeset (not
+   *  computing/error, and the session actually exposes a changeset). Callers use
+   *  this to decide whether the counts are trustworthy vs. the shared summary. */
+  changesetVerified: boolean;
+  /** Opaque freshness ref for the plan artifact content (`plan:<hash>`), when a
+   *  plan with content is present. */
+  planContentHash?: string;
   lastAgentMessage?: string;
   planContent?: string;
+}
+
+/** Stable, short freshness ref for plan content. Whitespace-insensitive so
+ *  cosmetic reflows don't invalidate a passed plan review. */
+export function hashPlanContent(content: string): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  const digest = createHash("sha1").update(normalized).digest("hex").slice(0, 12);
+  return `plan:${digest}`;
 }
 
 const MAX_AGENT_MESSAGE_LENGTH = 2000;
@@ -180,8 +200,11 @@ export async function enrichFromChangeset(
 
     if (!sessionState?.changesets?.length) {
       debug("no changesets for", sessionUri);
-      // Return agent message even without changeset data
-      return lastAgentMessage ? { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], lastAgentMessage } : null;
+      // No changeset catalogue — counts are unknown (not a verified zero).
+      // Return agent message even without changeset data.
+      return lastAgentMessage
+        ? { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], additions: 0, deletions: 0, changesetVerified: false, lastAgentMessage }
+        : null;
     }
 
     const changeset = findSessionChangeset(sessionState.changesets);
@@ -206,7 +229,8 @@ export async function enrichFromChangeset(
     const csState = csResult.snapshot?.state as ChangesetState | undefined;
     if (!csState?.files) {
       debug("changeset has no files:", changesetUri);
-      return { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], lastAgentMessage };
+      // Files not readable — treat as unknown, not a verified zero.
+      return { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], additions: 0, deletions: 0, changesetVerified: false, lastAgentMessage };
     }
 
     // If changeset is still computing, or failed, return null to retry later.
@@ -221,14 +245,20 @@ export async function enrichFromChangeset(
     const artifacts: Artifact[] = [];
     const fileChanges: FileChange[] = [];
     let codeFileCount = 0;
+    let additions = 0;
+    let deletions = 0;
     const artifactFiles: Array<{ file: ChangesetFile; path: string; type: ArtifactType }> = [];
 
     for (const file of csState.files) {
       const filePath = extractFilePath(file);
+      const added = file.edit.diff?.added ?? 0;
+      const removed = file.edit.diff?.removed ?? 0;
+      additions += added;
+      deletions += removed;
       fileChanges.push({
         path: filePath,
-        added: file.edit.diff?.added ?? 0,
-        removed: file.edit.diff?.removed ?? 0,
+        added,
+        removed,
       });
       const artifactType = classifyArtifactFile(filePath);
 
@@ -273,12 +303,17 @@ export async function enrichFromChangeset(
 
     // Extract plan content from the first plan artifact that has it
     const planContent = artifacts.find((a) => a.type === "plan" && a.contentRef)?.contentRef;
+    const planContentHash = planContent ? hashPlanContent(planContent) : undefined;
 
     return {
       artifacts,
       codeFileCount,
       totalFileCount: csState.files.length,
       fileChanges,
+      additions,
+      deletions,
+      changesetVerified: true,
+      planContentHash,
       lastAgentMessage,
       planContent,
     };

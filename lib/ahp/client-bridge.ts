@@ -5,7 +5,7 @@ import type { SessionSummary } from "@microsoft/agent-host-protocol";
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
 import { classifyAhpError } from "./rpc-error";
-import { enrichFromChangeset, ChangesetEnrichment } from "./changeset-enricher";
+import { enrichFromChangeset, ChangesetEnrichment, hashPlanContent } from "./changeset-enricher";
 import { fetchCopilotCliPlan, clearPlanCache } from "./plan-artifact";
 import { fetchSessionModel } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
@@ -184,10 +184,28 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         if (planArtifact) {
           const hasPlan = enrichment?.artifacts.some((a) => a.type === "plan");
           if (!hasPlan) {
+            // Derive the plan freshness ref from the on-disk plan content so the
+            // plan->build review keys on the plan, not the code diff.
+            const planContentHash = planArtifact.contentRef
+              ? hashPlanContent(planArtifact.contentRef)
+              : undefined;
             if (enrichment) {
-              enrichment = { ...enrichment, artifacts: [...enrichment.artifacts, planArtifact] };
+              enrichment = {
+                ...enrichment,
+                artifacts: [...enrichment.artifacts, planArtifact],
+                planContentHash: enrichment.planContentHash ?? planContentHash,
+              };
             } else {
-              enrichment = { artifacts: [planArtifact], codeFileCount: 0, totalFileCount: 0, fileChanges: [] };
+              enrichment = {
+                artifacts: [planArtifact],
+                codeFileCount: 0,
+                totalFileCount: 0,
+                fileChanges: [],
+                additions: 0,
+                deletions: 0,
+                changesetVerified: false,
+                planContentHash,
+              };
             }
           }
         }

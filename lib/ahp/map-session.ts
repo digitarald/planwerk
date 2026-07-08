@@ -257,9 +257,15 @@ export function mapSessionToCard(
   const codeFileCount = enrichment?.codeFileCount;
   const phase = inferPhase(session, existingPhase, artifacts, codeFileCount);
   const isArchived = (session.status & AHPStatus.IsArchived) !== 0;
-  const additions = session.changes?.additions || 0;
-  const deletions = session.changes?.deletions || 0;
-  const filesChanged = session.changes?.files || 0;
+
+  // Prefer session-scoped diff totals (isolated per agent) when the changeset was
+  // actually read. Fall back to the host's shared working-tree summary otherwise —
+  // but flag it unverified so the gate engine won't trust those counts as a
+  // freshness signal (they accumulate across every agent sharing the dir).
+  const changesetVerified = enrichment?.changesetVerified === true;
+  const additions = changesetVerified ? enrichment!.additions : (session.changes?.additions || 0);
+  const deletions = changesetVerified ? enrichment!.deletions : (session.changes?.deletions || 0);
+  const filesChanged = changesetVerified ? enrichment!.totalFileCount : (session.changes?.files || 0);
 
   return {
     id: session.resource,
@@ -278,6 +284,8 @@ export function mapSessionToCard(
     additions,
     deletions,
     filesChanged,
+    changesetVerified,
+    planContentHash: enrichment?.planContentHash,
     planSteps: { total: 0, done: 0 },
     modifiedAt: new Date(session.modifiedAt).getTime(),
     model: session.model,

@@ -313,14 +313,19 @@ export function getLatestPassingRuns(
     )
     .all(cardId, fromPhase, toPhase) as GateRunRow[];
 
+  const normalizedCurrent = normalizeChangesetRef(currentChangesetRef);
+
   return rows.map((row) => {
     const run = mapGateRun(row);
-    // Mark as stale if the *code* changed since the gate ran. Compare only the
-    // diff dimensions (files:additions:deletions) — the same normalized signal
-    // the UI uses — so activity-only modifiedAt ticks don't invalidate a verdict.
+    // Mark as stale only when we have a real current changeset ref that differs
+    // from the one the gate ran against. An empty/unknown current ref (unverified
+    // shared-diff counts, or plan content not yet loaded) carries no freshness
+    // signal — never invalidate a passed verdict on missing info, or the gate
+    // re-triggers forever. `normalizeChangesetRef` keeps `plan:` refs opaque and
+    // reduces code refs to their diff dimensions (ignoring activity-only ticks).
     if (
-      currentChangesetRef &&
-      normalizeChangesetRef(run.changesetRef) !== normalizeChangesetRef(currentChangesetRef)
+      normalizedCurrent !== "" &&
+      normalizeChangesetRef(run.changesetRef) !== normalizedCurrent
     ) {
       run.stale = true;
     }

@@ -130,15 +130,23 @@ export function enrichSessionToCard(
   }
 
   const nextPhase = getNextPhase(card.phase);
-  // Diff-based changeset ref (matches the heartbeat's staleness signal) so the
-  // rendered gate status/blocker agree with what the orchestrator will actually
-  // do — a passing gate that's since gone stale must not read as "passed".
-  const changesetRef = computeChangesetRef(
-    card.filesChanged,
-    card.additions,
-    card.deletions,
-    card.modifiedAt
-  );
+  // Freshness ref for the *display* gate status/blocker — must match what the
+  // heartbeat uses so the rendered verdict agrees with what the orchestrator will
+  // do. Plan→build gates key on the plan content; other transitions key on the
+  // code diff, but only when it's session-scoped (verified). An unverified diff
+  // (shared working-tree summary) → undefined ("unknown"), which never reads a
+  // passing gate as stale.
+  const changesetRef =
+    card.phase === "plan"
+      ? card.planContentHash
+      : card.changesetVerified
+        ? computeChangesetRef(
+            card.filesChanged,
+            card.additions,
+            card.deletions,
+            card.modifiedAt
+          )
+        : undefined;
   if (nextPhase) {
     card.gateStatus = deriveGateStatus(session.resource, card.phase, nextPhase, storedRisk?.level, changesetRef);
   }

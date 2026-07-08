@@ -162,6 +162,30 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
 `IsRead=32`, `IsArchived=64`. `InputNeeded` includes the `InProgress` bit — test it as
 `(status & 24) === 24`, not a plain AND.
 
+**Changeset freshness / gate staleness** — why a *passed* gate can re-trigger.
+A gate/review verdict is invalidated ("stale") when the card's current changeset ref
+differs from the ref the gate ran against (`gate_runs.changeset_ref`,
+`review_runs.changeset_ref`). Two ref shapes, both compared via
+`normalizeChangesetRef` (`lib/types.ts`):
+- **Code ref** `files:additions:deletions:modifiedAt` (modifiedAt dropped when normalized).
+  Used for `build->review` and `review->ship`. Derived from the card's diff counts —
+  which now come from the **session-scoped** changeset (`changeKind:"session"`, isolated
+  per agent) via `changeset-enricher.ts`, **not** the host's shared working-tree summary
+  (`SessionSummary.changes`, which accumulates across every agent in a shared dir/`main`).
+  `card.changesetVerified` is `true` only when the counts are session-scoped; when `false`
+  the ref is treated as **unknown** (`undefined`) and never marks a verdict stale.
+- **Plan ref** `plan:<hash>` (opaque identity of `plan.md` content, hashed in
+  `changeset-enricher.ts` / merged in `client-bridge.ts`). Used for `plan->build` reviews
+  (`plan-review` = `/rubber-duck`) so unrelated code churn — or another agent's edits —
+  can't re-trigger a passed plan review. Carried on `card.planContentHash`.
+
+Empty/unknown current ref ⇒ **never stale** (guarded in `gate-engine.getLatestPassingRuns`,
+`review-executor.shouldStartReview`, `types.isGateRunStale`). If a passed gate keeps
+re-injecting, check: (a) is `changeset_ref` flapping between a real value and `0:0:0`
+(unverified summary leaking in)? (b) for a plan gate, is `changeset_ref` a `plan:` ref on
+both the run and the card? Pure-logic tests live in
+`lib/orchestrator/changeset-freshness.test.ts`.
+
 ## A sane order of attack
 
 1. **Reproduce the claim from data**, not intuition — dump the card's `card_phases` row

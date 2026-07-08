@@ -175,7 +175,13 @@ function GateRunRow({
   cardDiff,
 }: {
   run: GateRunView;
-  cardDiff: { filesChanged: number; additions: number; deletions: number };
+  cardDiff: {
+    filesChanged: number;
+    additions: number;
+    deletions: number;
+    changesetVerified?: boolean;
+    planContentHash?: string;
+  };
 }) {
   const stale = run.status === "passed" && isGateRunStale(run, cardDiff);
 
@@ -315,6 +321,8 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
     filesChanged: card.filesChanged,
     additions: card.additions,
     deletions: card.deletions,
+    changesetVerified: card.changesetVerified,
+    planContentHash: card.planContentHash,
   };
 
   // Close on Escape

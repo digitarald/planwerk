@@ -34,6 +34,11 @@ interface CardDiff {
   filesChanged: number;
   additions: number;
   deletions: number;
+  /** True only when the diff counts are session-scoped; unverified counts (shared
+   *  working-tree summary) must not flag a code-diff verdict stale. */
+  changesetVerified?: boolean;
+  /** Plan-content freshness ref (`plan:<hash>`) for plan→build verdicts. */
+  planContentHash?: string;
 }
 
 interface GatePipelineProps {

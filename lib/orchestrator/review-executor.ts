@@ -146,7 +146,12 @@ export function shouldStartReview(
   if (!latest) return true;
   const terminal = latest.status === "passed" || latest.status === "escalated";
   if (!terminal) return true;
-  const fresh = normalizeChangesetRef(latest.changesetRef ?? undefined) === normalizeChangesetRef(currentChangesetRef);
+  // Unknown current ref (e.g. unverified/shared diff counts, or plan content not
+  // loaded yet) carries no freshness signal — never invalidate a terminal run on
+  // missing info, or the review re-injects forever. Treat as fresh.
+  const current = normalizeChangesetRef(currentChangesetRef);
+  if (current === "") return false;
+  const fresh = normalizeChangesetRef(latest.changesetRef ?? undefined) === current;
   return !fresh;
 }
 

@@ -125,6 +125,17 @@ export interface KanbanCard {
   additions: number;
   deletions: number;
   filesChanged: number;
+  /** True only when `additions`/`deletions`/`filesChanged` were derived from the
+   *  session-scoped changeset (isolated per agent). False/undefined means they
+   *  fell back to the host's shared working-tree summary, which accumulates
+   *  changes across every agent sharing the working directory — so those counts
+   *  (and any changeset ref built from them) are NOT a reliable freshness signal. */
+  changesetVerified?: boolean;
+  /** Opaque freshness ref for the plan artifact (`plan:<hash>`), when a plan is
+   *  present. Plan-phase reviews (`plan->build`) key their staleness on this, not
+   *  the code diff — a plan review reviews the plan, and unrelated code churn (or
+   *  another agent's edits) must never re-trigger a passed plan review. */
+  planContentHash?: string;
   planSteps: { total: number; done: number };
   modifiedAt: number;
   model?: string;
@@ -209,22 +220,57 @@ export function changesetCodeRef(card: {
   return `${card.filesChanged}:${card.additions}:${card.deletions}`;
 }
 
-/** Normalize a stored changeset ref to its code-diff portion
- *  (files:additions:deletions), dropping the trailing modifiedAt. Used as the
- *  single freshness signal shared by the UI and the gate engine. */
+/** A `plan:`-prefixed ref is an opaque identity for a plan artifact's content,
+ *  not a code diff. It is compared whole (never sliced into diff dimensions). */
+export function isPlanChangesetRef(ref?: string): boolean {
+  return typeof ref === "string" && ref.startsWith("plan:");
+}
+
+/** Normalize a stored changeset ref to its comparable identity.
+ *  - Empty/absent → "" (unknown; callers treat this as "no info", never stale).
+ *  - `plan:<hash>` → returned whole (opaque plan-content identity).
+ *  - otherwise the code-diff portion (files:additions:deletions), dropping the
+ *    trailing modifiedAt so activity-only ticks don't read as a code change.
+ *  Used as the single freshness signal shared by the UI and the gate engine. */
 export function normalizeChangesetRef(ref?: string): string {
   if (!ref) return "";
+  if (isPlanChangesetRef(ref)) return ref;
   return ref.split(":").slice(0, 3).join(":");
 }
 
-/** A gate verdict is stale when it was recorded against a different code diff
- *  than the card currently shows. Compares only the diff dimensions. */
+/** A gate verdict is stale when it was recorded against a different changeset
+ *  than the card currently shows.
+ *
+ *  - Plan-content refs (`plan:<hash>`) compare against the card's `planContentHash`.
+ *    An unknown current plan hash reads as "not stale" (best-effort enrichment
+ *    may not have loaded the plan yet — never invalidate on missing info).
+ *  - Code-diff refs compare the diff dimensions, but ONLY when the card's counts
+ *    are `changesetVerified` (session-scoped). Unverified counts come from the
+ *    shared working-tree summary and must not be trusted to invalidate a verdict. */
 export function isGateRunStale(
   run: GateRunView,
-  card: { filesChanged: number; additions: number; deletions: number }
+  card: {
+    filesChanged: number;
+    additions: number;
+    deletions: number;
+    changesetVerified?: boolean;
+    planContentHash?: string;
+  }
 ): boolean {
   if (!run.changesetRef) return false;
-  return normalizeChangesetRef(run.changesetRef) !== changesetCodeRef(card);
+  const stored = normalizeChangesetRef(run.changesetRef);
+  if (stored === "") return false;
+
+  if (isPlanChangesetRef(run.changesetRef)) {
+    const current = normalizeChangesetRef(card.planContentHash);
+    if (current === "") return false;
+    return stored !== current;
+  }
+
+  // Code-diff ref: only a verified (session-scoped) diff is trustworthy enough
+  // to mark a verdict stale. Unverified counts (shared working tree) → not stale.
+  if (card.changesetVerified === false) return false;
+  return stored !== changesetCodeRef(card);
 }
 
 export interface Column {

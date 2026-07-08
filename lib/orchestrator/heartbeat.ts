@@ -312,32 +312,42 @@ async function processCard(
     } else if (card.runtime === "running" && card.phase === "plan") {
       // Opt-in: a plan card that's been heads-down coding never idles, so the
       // idle-only plan-review gate would never run. When enabled, inject it via
-      // a queued message so the gate still grades before any advance.
-      const changesetRef = computeChangesetRef(card.filesChanged, card.additions, card.deletions, card.modifiedAt);
-      const busyActions = await maybeInjectBusyPlanReview(hostUrl, card, riskLevel, changesetRef, config);
+      // a queued message so the gate still grades before any advance. Key on the
+      // plan content, not the code diff (this is a plan review).
+      const planRef = card.planContentHash;
+      const busyActions = await maybeInjectBusyPlanReview(hostUrl, card, riskLevel, planRef, config);
       actions.push(...busyActions);
     }
     return actions;
   }
 
   const phase = card.phase;
-  const changesetRef = computeChangesetRef(card.filesChanged, card.additions, card.deletions, card.modifiedAt);
+  // Code-diff freshness ref for build/review→ship gates. Only trust it when the
+  // card's diff counts are session-scoped (verified); otherwise pass `undefined`
+  // ("unknown") so a flapping shared working-tree summary can't invalidate a
+  // passed gate. Plan→build gates use the plan-content ref instead (see below).
+  const codeChangesetRef = card.changesetVerified
+    ? computeChangesetRef(card.filesChanged, card.additions, card.deletions, card.modifiedAt)
+    : undefined;
+  // Plan→build reviews review the plan artifact, so key their freshness on the
+  // plan content, never the code diff. `undefined` when no plan is loaded yet.
+  const planChangesetRef = card.planContentHash;
 
   // Build phase pipeline: deterministic gates → review skills → auto-advance
   if (phase === "build") {
-    const buildActions = await runBuildPipeline(hostUrl, card, riskLevel, changesetRef, config, allCards);
+    const buildActions = await runBuildPipeline(hostUrl, card, riskLevel, codeChangesetRef, config, allCards);
     actions.push(...buildActions);
   }
 
   // Plan phase: check for plan review gates
   if (phase === "plan") {
-    const planActions = await runPlanPipeline(hostUrl, card, riskLevel, changesetRef, allCards);
+    const planActions = await runPlanPipeline(hostUrl, card, riskLevel, planChangesetRef, allCards);
     actions.push(...planActions);
   }
 
   // Review phase: check for review skills
   if (phase === "review") {
-    const reviewActions = await runReviewPipeline(hostUrl, card, riskLevel, changesetRef, allCards);
+    const reviewActions = await runReviewPipeline(hostUrl, card, riskLevel, codeChangesetRef, allCards);
     actions.push(...reviewActions);
   }
 
@@ -372,7 +382,7 @@ async function startPendingReviews(
   card: KanbanCard,
   transition: string,
   riskLevel: RiskLevel,
-  changesetRef: string
+  changesetRef?: string
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
   const skills = getRequiredReviewSkills(transition, riskLevel).filter(
@@ -404,7 +414,7 @@ async function runBuildPipeline(
   hostUrl: string,
   card: KanbanCard,
   riskLevel: RiskLevel,
-  changesetRef: string,
+  changesetRef: string | undefined,
   config: ReturnType<typeof loadConfig>,
   allCards: KanbanCard[]
 ): Promise<HeartbeatAction[]> {
@@ -697,7 +707,7 @@ async function maybeInjectBusyPlanReview(
   hostUrl: string,
   card: KanbanCard,
   riskLevel: RiskLevel,
-  changesetRef: string,
+  changesetRef: string | undefined,
   config: ReturnType<typeof loadConfig>
 ): Promise<HeartbeatAction[]> {
   if (!config.orchestrator.injectReviewsWhileBusy) return [];
@@ -740,7 +750,7 @@ async function runPlanPipeline(
   hostUrl: string,
   card: KanbanCard,
   riskLevel: RiskLevel,
-  changesetRef: string,
+  changesetRef: string | undefined,
   allCards: KanbanCard[]
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
@@ -784,6 +794,22 @@ async function runPlanPipeline(
           if (verdict.action === "passed") {
             emit({ type: "review-passed", cardId: card.id, skillId: review.skillId });
             actions.push({ type: "review-passed", cardId: card.id, skillId: review.skillId });
+            // Same-tick advance: the review just satisfied the last pending gate,
+            // so advance plan->build now instead of waiting a full tick. Waiting
+            // let a flapping changeset ref re-invalidate the fresh pass and
+            // re-inject the review -- the loop this whole change fixes. Re-check
+            // gates freshly (other required gates may still be pending).
+            const recheck = canAdvancePhase(card.id, "plan", "build", card.workingDirectory, riskLevel, changesetRef);
+            if (
+              recheck.allowed &&
+              config.orchestrator.autoAdvancePhases &&
+              canEnterPhase("build", allCards, config)
+            ) {
+              setCardPhase(card.id, "build");
+              const advanced: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "plan", to: "build" };
+              emit(advanced);
+              actions.push(advanced);
+            }
           } else if (verdict.action === "escalated") {
             emit({ type: "escalated", cardId: card.id, reason: verdict.summary });
             actions.push({ type: "escalated", cardId: card.id, reason: verdict.summary });
@@ -811,7 +837,7 @@ async function runReviewPipeline(
   hostUrl: string,
   card: KanbanCard,
   riskLevel: RiskLevel,
-  changesetRef: string,
+  changesetRef: string | undefined,
   allCards: KanbanCard[]
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
