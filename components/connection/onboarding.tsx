@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { AlertTriangle, Monitor, ShieldAlert, Unplug, Wifi } from "lucide-react";
+import { AlertTriangle, Ban, Monitor, RefreshCw, SearchX, ShieldAlert, Unplug, Wifi } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,6 +25,9 @@ const errorIcons: Record<ConnectionErrorCode, typeof AlertTriangle> = {
   auth_failed: ShieldAlert,
   protocol_error: AlertTriangle,
   disconnected: Unplug,
+  unsupported_protocol_version: RefreshCw,
+  permission_denied: Ban,
+  session_not_found: SearchX,
   unknown: AlertTriangle,
 };
 

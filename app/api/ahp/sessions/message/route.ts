@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { injectMessage } from "@/lib/ahp/session-messenger";
+import { ahpErrorResponse } from "@/lib/ahp/api-error";
 
 const debug = (...args: unknown[]) => {
   if (process.env.AHP_DEBUG) console.info("[ahp:message]", ...args);
@@ -41,7 +42,6 @@ export async function POST(request: NextRequest) {
     });
   } catch (err) {
     console.error("[ahp:message] error:", err instanceof Error ? err.message : err);
-    const errMessage = err instanceof Error ? err.message : "Failed to send message";
-    return NextResponse.json({ error: errMessage }, { status: 502 });
+    return ahpErrorResponse(err, "Failed to send message");
   }
 }

@@ -3,70 +3,11 @@ import "server-only";
 import { CopilotClient } from "@github/copilot-sdk";
 
 import { answerInput } from "@/lib/ahp/session-messenger";
+import { buildAnswer } from "@/lib/ahp/answer-value";
 import { canAutoAnswer } from "./skill-config";
 import { getCardRisk } from "./risk-store";
-import type { KanbanCard, PendingInputQuestion } from "@/lib/types";
+import type { KanbanCard } from "@/lib/types";
 import { ORCHESTRATOR_MODEL } from "./model";
-
-/**
- * A typed AHP answer value (mirrors `ChatInputAnswerValue` from the protocol).
- * Built locally as plain literals to avoid depending on ambient SDK enums.
- */
-type AnswerValue =
-  | { kind: "selected"; value: string }
-  | { kind: "text"; value: string }
-  | { kind: "boolean"; value: boolean }
-  | { kind: "number"; value: number };
-
-function parseBoolean(s: string): boolean | null {
-  const v = s.trim().toLowerCase();
-  if (/^(yes|y|true|enabled?|on|ok|sure|affirmative|approve)\b/.test(v)) return true;
-  if (/^(no|n|false|disabled?|off|never|decline|reject)\b/.test(v)) return false;
-  return null;
-}
-
-/**
- * Map a free-form LLM answer onto the typed, question-specific answer value the
- * AHP host expects. Returns the value plus a human-readable label for the feed,
- * or `null` when the answer can't be confidently mapped (so the caller escalates
- * instead of submitting a malformed answer).
- */
-function buildAnswer(
-  question: PendingInputQuestion,
-  llmAnswer: string,
-): { value: AnswerValue; display: string } | null {
-  switch (question.kind) {
-    case "single-select": {
-      const options = question.options ?? [];
-      const lower = llmAnswer.toLowerCase();
-      const matched =
-        options.find((o) => o.label.toLowerCase() === lower || o.id.toLowerCase() === lower) ??
-        options.find(
-          (o) =>
-            o.label.toLowerCase().includes(lower) || lower.includes(o.label.toLowerCase()),
-        ) ??
-        options.find((o) => o.recommended);
-      if (!matched) return null;
-      return { value: { kind: "selected", value: matched.id }, display: matched.label };
-    }
-    case "boolean": {
-      const b = parseBoolean(llmAnswer);
-      if (b === null) return null;
-      return { value: { kind: "boolean", value: b }, display: b ? "Yes" : "No" };
-    }
-    case "number": {
-      const n = Number(llmAnswer.replace(/[^0-9.+-]/g, ""));
-      if (!Number.isFinite(n)) return null;
-      return { value: { kind: "number", value: n }, display: String(n) };
-    }
-    case "text": {
-      return { value: { kind: "text", value: llmAnswer }, display: llmAnswer };
-    }
-    default:
-      // multi-select (or unknown) — let a human handle it.
-      return null;
-  }
-}
 
 // Reuse the singleton pattern from risk-assessor
 let clientInstance: CopilotClient | null = null;

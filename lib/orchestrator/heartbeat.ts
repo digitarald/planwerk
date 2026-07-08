@@ -27,6 +27,7 @@ export type HeartbeatAction =
   | { type: "auto-answered"; cardId: string; answer: string }
   | { type: "plan-approved"; cardId: string }
   | { type: "plan-rubber-ducked"; cardId: string }
+  | { type: "plan-rubber-duck-failed"; cardId: string; reason: string }
   | { type: "coherence-conflict"; cardId: string; otherCardId: string; summary: string }
   | { type: "coherence-cleared"; cardId: string; otherCardId: string }
   | { type: "coherence-blocked"; cardId: string; reason: string };
@@ -633,7 +634,7 @@ async function runPlanApprovalPipeline(
     return actions;
   }
 
-  const { success } = await requestPlanChanges(
+  const { success, stale } = await requestPlanChanges(
     hostUrl,
     card.id,
     input.requestId,
@@ -642,6 +643,16 @@ async function runPlanApprovalPipeline(
   if (success) {
     recordPlanRubberDuck(card.id);
     const action: HeartbeatAction = { type: "plan-rubber-ducked", cardId: card.id };
+    emit(action);
+    actions.push(action);
+  } else {
+    // The decline landed but the follow-up critique never reached the agent
+    // (e.g. it surfaced a shape we couldn't answer, or timed out). Surface it —
+    // otherwise the card sits blocked on an unanswerable question with no trace.
+    const reason = stale
+      ? "Plan-approval input went stale before feedback could be delivered."
+      : "Declined the plan but could not deliver the review feedback to the agent.";
+    const action: HeartbeatAction = { type: "plan-rubber-duck-failed", cardId: card.id, reason };
     emit(action);
     actions.push(action);
   }

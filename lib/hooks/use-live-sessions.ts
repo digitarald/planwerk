@@ -44,6 +44,11 @@ export function useLiveSessions() {
   const setConnected = useConnectionStore((s) => s.setConnected);
   const setError = useConnectionStore((s) => s.setError);
   const eventSourceRef = useRef<EventSource | null>(null);
+  // Tracks whether *this* stream has completed its initial handshake, updated
+  // in real time (not tied to re-renders) so `es.onerror` can tell an initial
+  // connection failure apart from a mid-stream drop without depending on the
+  // `status` transition below.
+  const hasHandshakedRef = useRef(false);
 
   const setCards = useBoardStore((s) => s.setCards);
   const updateCard = useBoardStore((s) => s.updateCard);
@@ -53,15 +58,25 @@ export function useLiveSessions() {
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
   const setMonitoringStatus = useOrchestratorStore((s) => s.setMonitoringStatus);
 
+  // Both "connected" and "reconnecting" mean "should have a stream open".
+  // Using this boolean (rather than raw `status`) as the effect dependency
+  // means the reconnecting→connected transition — which `setConnected()`
+  // triggers on every `init` message — doesn't tear down and reopen the
+  // EventSource right after the handshake. Root-channel notifications are
+  // ephemeral and not replayed, so that reopen was dropping anything the host
+  // emitted in the gap.
+  const shouldConnect = status === "connected" || status === "reconnecting";
+
   useEffect(() => {
-    // Only connect when status indicates we should be connected/connecting
-    if (status !== "connected" && status !== "reconnecting") {
+    if (!shouldConnect) {
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
       }
       return;
     }
+
+    hasHandshakedRef.current = false;
 
     // Build the SSE URL — pass host when available
     let sseUrl = "/api/ahp/events";
@@ -97,6 +112,7 @@ export function useLiveSessions() {
         if (data.type === "init") {
           console.info("[ahp:sse]", `init: ${data.cards.length} cards`);
           setCards(data.cards);
+          hasHandshakedRef.current = true;
           setConnected();
           // Hydrate persisted phases from SQLite so a reload shows the stored
           // truth (not an AHP-derived default) and matches the gate engine.
@@ -157,7 +173,7 @@ export function useLiveSessions() {
     };
 
     es.onerror = () => {
-      if (status === "reconnecting") {
+      if (!hasHandshakedRef.current) {
         // Failed during initial connection attempt
         console.error("[ahp:sse]", "connection failed during handshake");
         setError({
@@ -176,7 +192,7 @@ export function useLiveSessions() {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [status, hostUrl, setCards, updateCard, reconcileCard, addCard, removeCard, addFeedItem, setMonitoringStatus, setConnected, setError]);
+  }, [shouldConnect, hostUrl, setCards, updateCard, reconcileCard, addCard, removeCard, addFeedItem, setMonitoringStatus, setConnected, setError]);
 }
 
 interface HeartbeatActionData {
@@ -239,6 +255,11 @@ function formatHeartbeatAction(action: HeartbeatActionData): { type: "interventi
       return {
         type: "intervention",
         message: "Sent plan back for a rubber-duck review before approval.",
+      };
+    case "plan-rubber-duck-failed":
+      return {
+        type: "alert",
+        message: `Plan feedback not delivered: ${action.reason ?? "the agent may be stuck awaiting input."}`,
       };
     case "stale-gate-invalidated":
       return {

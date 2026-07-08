@@ -103,7 +103,10 @@ export async function fetchOverlapContent(
     await client.unsubscribe(changeset.uriTemplate).catch(() => {});
 
     const csState = csResult.snapshot?.state as ChangesetState | undefined;
-    if (!csState?.files || csState.status === "computing") {
+    // "computing" isn't done yet; "error" means `files` may be stale/partial
+    // (see ChangesetState.error, only present in that status) — neither is
+    // safe to treat as a final, trustworthy file list.
+    if (!csState?.files || csState.status === "computing" || csState.status === "error") {
       return { sessionUri, files: [], failed: true };
     }
 

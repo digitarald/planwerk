@@ -5,34 +5,36 @@ import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 
 import { OFFERED_PROTOCOL_VERSIONS } from "./protocol";
 
-let activeClient: { hostUrl: string; client: AhpClient; refs: number } | null = null;
-let pendingInit: Promise<AhpClient> | null = null;
+interface ClientEntry {
+  client: AhpClient;
+  refs: number;
+}
+
+// Keyed by hostUrl so concurrent callers on *different* hosts never contend
+// for the same slot — switching hosts used to unconditionally shut down
+// whatever client was active, even mid-use by another caller with refs > 0.
+const clients = new Map<string, ClientEntry>();
+const pendingInits = new Map<string, Promise<AhpClient>>();
 
 export async function getAHPClient(hostUrl: string): Promise<AhpClient> {
-  // Fast path: reuse existing connection to same host
-  if (activeClient && activeClient.hostUrl === hostUrl) {
-    activeClient.refs++;
-    return activeClient.client;
+  // Fast path: reuse existing connection to this host
+  const existing = clients.get(hostUrl);
+  if (existing) {
+    existing.refs++;
+    return existing.client;
   }
 
-  // If another call is already initializing, wait for it
-  if (pendingInit) {
-    const client = await pendingInit;
-    if (activeClient && activeClient.hostUrl === hostUrl) {
-      activeClient.refs++;
-      return client;
-    }
-    // Host changed while we were waiting — fall through to create new
+  // If another call is already initializing this same host, wait for it
+  const pending = pendingInits.get(hostUrl);
+  if (pending) {
+    const client = await pending;
+    const entry = clients.get(hostUrl);
+    if (entry) entry.refs++;
+    return client;
   }
 
-  // Close existing if switching hosts
-  if (activeClient) {
-    await activeClient.client.shutdown().catch(() => {});
-    activeClient = null;
-  }
-
-  // Create with mutex via promise
-  pendingInit = (async () => {
+  // Create with mutex via promise, scoped per host
+  const init = (async () => {
     const transport = await WebSocketTransport.connect(hostUrl);
     const client = new AhpClient(transport);
     client.connect();
@@ -43,25 +45,26 @@ export async function getAHPClient(hostUrl: string): Promise<AhpClient> {
       initialSubscriptions: [],
     });
 
-    activeClient = { hostUrl, client, refs: 1 };
-    pendingInit = null;
+    clients.set(hostUrl, { client, refs: 1 });
+    pendingInits.delete(hostUrl);
     return client;
   })();
+  pendingInits.set(hostUrl, init);
 
   try {
-    return await pendingInit;
+    return await init;
   } catch (err) {
-    pendingInit = null;
+    pendingInits.delete(hostUrl);
     throw err;
   }
 }
 
 export function releaseAHPClient(hostUrl: string): void {
-  if (activeClient && activeClient.hostUrl === hostUrl) {
-    activeClient.refs--;
-    if (activeClient.refs <= 0) {
-      activeClient.client.shutdown().catch(() => {});
-      activeClient = null;
-    }
+  const entry = clients.get(hostUrl);
+  if (!entry) return;
+  entry.refs--;
+  if (entry.refs <= 0) {
+    clients.delete(hostUrl);
+    entry.client.shutdown().catch(() => {});
   }
 }

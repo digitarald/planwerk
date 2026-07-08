@@ -1,7 +1,9 @@
 import "server-only";
 
+import type { Turn } from "@microsoft/agent-host-protocol";
+
 import { getDb } from "@/lib/db/schema";
-import { injectMessage, fetchLastTurns } from "@/lib/ahp/session-messenger";
+import { injectMessage, fetchLastTurns, fetchTurnById } from "@/lib/ahp/session-messenger";
 import {
   loadConfig,
   getApplicableSkills,
@@ -16,6 +18,10 @@ import {
 } from "./gate-engine";
 import type { Phase, RiskLevel } from "@/lib/types";
 import { normalizeChangesetRef } from "@/lib/types";
+
+const debug = (...args: unknown[]) => {
+  if (process.env.AHP_DEBUG) console.info("[review-executor]", ...args);
+};
 
 export type ReviewRunStatus =
   | "pending"
@@ -39,6 +45,7 @@ export interface ReviewRun {
   findingsJson: string | null;
   gateRunId: number | null;
   changesetRef: string | null;
+  turnId: string | null;
 }
 
 interface ReviewRunRow {
@@ -55,6 +62,7 @@ interface ReviewRunRow {
   findings_json: string | null;
   gate_run_id: number | null;
   changeset_ref: string | null;
+  turn_id: string | null;
 }
 
 function mapRow(row: ReviewRunRow): ReviewRun {
@@ -72,6 +80,7 @@ function mapRow(row: ReviewRunRow): ReviewRun {
     findingsJson: row.findings_json,
     gateRunId: row.gate_run_id,
     changesetRef: row.changeset_ref,
+    turnId: row.turn_id,
   };
 }
 
@@ -272,12 +281,18 @@ export async function startReview(
   // Inject the review prompt into the session (failure-safe: always terminalize on error)
   const prompt = buildReviewPrompt(skill, iteration, maxIterations);
   try {
-    const { success } = await injectMessage(hostUrl, sessionUri, prompt);
+    const { success, turnId, queued } = await injectMessage(hostUrl, sessionUri, prompt);
 
     if (success) {
+      // Persist turnId only when the prompt started a turn immediately —
+      // a queued message's id isn't guaranteed by the protocol to become the
+      // eventual Turn.id (see fetchTurnById's docs), so recording it would
+      // create a false sense of precision. NULL routes processReviewResult
+      // to the existing tail-scan fallback instead.
+      const persistedTurnId = queued ? null : turnId;
       db.prepare(
-        "UPDATE review_runs SET status = 'injected', prompt_injected_at = datetime('now') WHERE id = ?"
-      ).run(reviewRunId);
+        "UPDATE review_runs SET status = 'injected', prompt_injected_at = datetime('now'), turn_id = ? WHERE id = ?"
+      ).run(persistedTurnId, reviewRunId);
     } else {
       db.prepare("UPDATE review_runs SET status = 'failed', verdict_summary = 'Failed to inject prompt' WHERE id = ?").run(reviewRunId);
       completeGateRun(gateRunId, "failed", "Failed to inject review prompt into session");
@@ -325,8 +340,25 @@ export async function processReviewResult(
   // Mark as extracting
   db.prepare("UPDATE review_runs SET status = 'extracting' WHERE id = ?").run(reviewRunId);
 
-  // Fetch recent turns to extract verdict
-  const { turns } = await fetchLastTurns(hostUrl, sessionUri, 5);
+  // Extract the verdict from the exact turn the review prompt started, when we
+  // recorded one (see startReview: only set for a turn started immediately,
+  // not a queued message). This avoids binding to the wrong transcript when
+  // other turns happen between injection and processing (concurrent skills,
+  // user chatting, retries). Falls back to the previous tail-scan heuristic
+  // when there's no persisted turn_id, or the turn isn't found in the current
+  // tail window (e.g. paged out — rare, since we process promptly).
+  let turns: Turn[];
+  if (run.turnId) {
+    const turn = await fetchTurnById(hostUrl, sessionUri, run.turnId);
+    if (turn) {
+      turns = [turn];
+    } else {
+      debug(`turn ${run.turnId} not found for run ${reviewRunId}, falling back to last-5 scan`);
+      turns = (await fetchLastTurns(hostUrl, sessionUri, 5)).turns;
+    }
+  } else {
+    turns = (await fetchLastTurns(hostUrl, sessionUri, 5)).turns;
+  }
   const verdict = extractVerdict(turns);
 
   // Store verdict

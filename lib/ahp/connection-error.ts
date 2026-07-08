@@ -3,6 +3,9 @@ export type ConnectionErrorCode =
   | "auth_failed"
   | "protocol_error"
   | "disconnected"
+  | "unsupported_protocol_version"
+  | "permission_denied"
+  | "session_not_found"
   | "unknown";
 
 export interface ConnectionError {
@@ -16,7 +19,7 @@ export interface ConnectionError {
  * Classifies a raw error message into a structured ConnectionError
  * with a user-friendly hint.
  */
-export function classifyError(rawMessage: string, context: "connect" | "protocol" | "stream"): ConnectionError {
+export function classifyError(rawMessage: string, context: "connect" | "protocol" | "stream" | "request"): ConnectionError {
   const lower = rawMessage.toLowerCase();
 
   if (

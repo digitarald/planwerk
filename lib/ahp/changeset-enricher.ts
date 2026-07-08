@@ -10,6 +10,7 @@ import type {
 import { Artifact, ArtifactType, FileChange } from "@/lib/types";
 
 import { readChatState, readSessionState } from "./snapshot";
+import { readTextResource } from "./resource-read";
 
 const LOG_PREFIX = "[ahp:changeset]";
 const debug = (...args: unknown[]) => {
@@ -208,9 +209,11 @@ export async function enrichFromChangeset(
       return { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], lastAgentMessage };
     }
 
-    // If changeset is still computing, return null to retry later
-    if (csState.status === "computing") {
-      debug("changeset still computing:", changesetUri);
+    // If changeset is still computing, or failed, return null to retry later.
+    // Files may be stale/partial in either status (error's cause is in
+    // ChangesetState.error, not usable here).
+    if (csState.status === "computing" || csState.status === "error") {
+      debug("changeset not ready (status:", csState.status, "):", changesetUri);
       return null;
     }
 
@@ -242,11 +245,7 @@ export async function enrichFromChangeset(
 
       if (file.edit.after?.content?.uri) {
         try {
-          const result = await client.request("resourceRead", {
-            channel: "ahp-root://" as const,
-            uri: file.edit.after.content.uri,
-          });
-          contentRef = result.data;
+          contentRef = await readTextResource(client, file.edit.after.content.uri);
         } catch (err) {
           debug("failed to read content for", path, err);
         }

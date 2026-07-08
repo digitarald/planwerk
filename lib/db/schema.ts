@@ -81,6 +81,7 @@ export function getDb(): Database.Database {
         findings_json TEXT,
         gate_run_id INTEGER,
         changeset_ref TEXT,
+        turn_id TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
 
@@ -153,6 +154,18 @@ export function getDb(): Database.Database {
 
     if (!gateRunsColumns.some((column) => column.name === "changeset_ref")) {
       db.exec("ALTER TABLE gate_runs ADD COLUMN changeset_ref TEXT;");
+    }
+
+    // review_runs.turn_id: the exact Turn.id the review prompt started (when
+    // injectMessage started a turn immediately rather than queuing it), so
+    // processReviewResult can extract the verdict from that precise turn
+    // instead of guessing from the last few turns in the chat.
+    const reviewRunsColumns = db
+      .prepare("PRAGMA table_info(review_runs)")
+      .all() as Array<{ name: string }>;
+
+    if (!reviewRunsColumns.some((column) => column.name === "turn_id")) {
+      db.exec("ALTER TABLE review_runs ADD COLUMN turn_id TEXT;");
     }
 
     // Migrate card_risk: remove legacy FK constraint on card_id → card_phases

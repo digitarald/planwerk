@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { setSessionArchived } from "@/lib/ahp/session-messenger";
+import { ahpErrorResponse } from "@/lib/ahp/api-error";
 
 const debug = (...args: unknown[]) => {
   if (process.env.AHP_DEBUG) console.info("[ahp:archive]", ...args);
@@ -38,7 +39,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true, status: result.status });
   } catch (err) {
     console.error("[ahp:archive] error:", err instanceof Error ? err.message : err);
-    const errMessage = err instanceof Error ? err.message : "Failed to archive session";
-    return NextResponse.json({ error: errMessage }, { status: 502 });
+    return ahpErrorResponse(err, "Failed to archive session");
   }
 }

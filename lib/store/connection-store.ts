@@ -47,8 +47,11 @@ export const useConnectionStore = create<ConnectionState>()(
         set({ status: "disconnected", hostUrl: null, error: null });
       },
       setConnected: () => {
-        console.info("[ahp:conn]", "connected");
-        set({ status: "connected", error: null });
+        set((state) => {
+          if (state.status === "connected" && state.error === null) return state;
+          console.info("[ahp:conn]", "connected");
+          return { status: "connected", error: null };
+        });
       },
       setError: (error: ConnectionErrorInfo) => {
         console.error("[ahp:conn]", `error [${error.code}]:`, error.message);

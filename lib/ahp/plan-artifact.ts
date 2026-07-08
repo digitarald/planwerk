@@ -5,8 +5,11 @@ import { join } from "path";
 import { pathToFileURL } from "url";
 
 import type { AhpClient } from "@microsoft/agent-host-protocol/client";
+import { RpcError } from "@microsoft/agent-host-protocol/client";
+import { AhpErrorCodes } from "@microsoft/agent-host-protocol";
 
 import type { Artifact } from "@/lib/types";
+import { readTextResource } from "./resource-read";
 
 const LOG_PREFIX = "[ahp:plan]";
 const debug = (...args: unknown[]) => {
@@ -17,6 +20,7 @@ const UUID_RE = /^copilotcli:\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-
 
 // Negative cache: sessionUri → modifiedAt when plan.md was confirmed missing
 const missingPlanCache = new Map<string, string>();
+
 
 /**
  * Extract the root session UUID from a copilotcli:/ URI.
@@ -50,26 +54,25 @@ export async function fetchCopilotCliPlan(
   const planUri = pathToFileURL(planPath).toString();
 
   try {
-    const result = await client.request("resourceRead", {
-      channel: "ahp-root://" as const,
-      uri: planUri,
-    });
+    const content = await readTextResource(client, planUri);
 
-    debug("found plan.md for", sessionUri, `(${result.data.length} chars)`);
+    debug("found plan.md for", sessionUri, `(${content.length} chars)`);
     missingPlanCache.delete(sessionUri);
 
     return {
       id: "session-state-plan",
       type: "plan",
       title: "Plan",
-      contentRef: result.data,
+      contentRef: content,
       createdAt: Date.now(),
       createdBy: "agent",
       status: "draft",
     };
   } catch (err) {
-    // NotFound (-32008) is expected — most sessions don't have a plan.md
-    const isNotFound = err instanceof Error && err.message.includes("-32008");
+    // NotFound (-32008) is expected — most sessions don't have a plan.md.
+    // Checked via the SDK's structured RpcError.code rather than sniffing
+    // err.message for the numeric code as a substring.
+    const isNotFound = err instanceof RpcError && err.code === AhpErrorCodes.NotFound;
     if (isNotFound) {
       missingPlanCache.set(sessionUri, modifiedAt);
     } else {

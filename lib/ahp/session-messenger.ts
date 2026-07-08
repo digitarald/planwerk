@@ -1,10 +1,11 @@
 import "server-only";
 
-import type { ChatState, SessionLifecycle, Turn } from "@microsoft/agent-host-protocol";
+import type { ChatState, SessionChatInputRequest, SessionLifecycle, Turn } from "@microsoft/agent-host-protocol";
 
 import { getAHPClient, releaseAHPClient } from "./client-manager";
 import { asSessionState, readChatState, readSessionState } from "./snapshot";
 import { AHPStatus, parseAHPStatus } from "./types";
+import { buildFreeformAnswer } from "./answer-value";
 import {
   chatTurnStarted,
   chatQueuedMessage,
@@ -82,8 +83,20 @@ export async function injectMessage(
 }
 
 /**
- * Answer a pending input request on an AHP session.
- * Dispatches inputAnswerChanged + inputCompleted.
+ * Answer a pending *elicitation* (chatInput-kind) request on an AHP session.
+ * Dispatches inputAnswerChanged + inputCompleted to the request's owning chat.
+ *
+ * Resolves the target chat and validates staleness from the session-level
+ * `SessionState.inputNeeded` aggregate (AHP 0.5+) — the authoritative source,
+ * since `defaultChat` is documented as only a UI routing hint and may not be
+ * the chat the request actually lives on. Mirrors the logic in
+ * `app/api/ahp/sessions/input/route.ts`. Falls back to `defaultChat` +
+ * `ChatState.inputRequests` only when a host doesn't populate `inputNeeded`.
+ *
+ * This function only handles `chatInput`-kind entries. Tool-call
+ * confirmations (`toolConfirmation` / `toolClientExecution`) are a different
+ * wire shape (`chat/toolCallConfirmed` etc., see `actions.ts`) and are not
+ * answered here — see `app/api/ahp/sessions/input/route.ts` for that path.
  */
 export async function answerInput(
   hostUrl: string,
@@ -95,20 +108,35 @@ export async function answerInput(
   const client = await getAHPClient(hostUrl);
 
   try {
-    const { chatUri } = await getSessionContext(client, sessionUri);
+    const sessionState = await readSessionState(client, sessionUri);
+    const inputNeeded = sessionState?.inputNeeded;
 
+    const chatEntry = inputNeeded?.find(
+      (e) => (e.kind as string) === "chatInput" && (e as SessionChatInputRequest).request.id === requestId,
+    ) as SessionChatInputRequest | undefined;
+
+    const chatUri = chatEntry?.chat ?? sessionState?.defaultChat;
     if (!chatUri) {
       debug("No chat channel found for", sessionUri);
       return { success: false };
     }
 
-    // Verify input request still exists
-    const chatState = await readChatState(client, chatUri);
-    const chatInputRequests = chatState?.inputRequests;
-
-    if (!chatInputRequests?.some((r) => r.id === requestId)) {
+    if (inputNeeded && inputNeeded.length > 0 && !chatEntry) {
+      // Aggregate is populated but doesn't contain this request (either it
+      // already resolved, or it's a non-chatInput kind this function can't
+      // answer) — treat as stale either way so the caller re-reads state.
       debug("Input request not found (stale):", requestId);
       return { success: false, stale: true };
+    }
+
+    if (!inputNeeded) {
+      // Host doesn't mirror elicitations into `inputNeeded` — fall back to
+      // checking the chat's own inputRequests directly.
+      const chatState = await readChatState(client, chatUri);
+      if (!chatState?.inputRequests?.some((r) => r.id === requestId)) {
+        debug("Input request not found (stale):", requestId);
+        return { success: false, stale: true };
+      }
     }
 
     // Dispatch answers
@@ -136,9 +164,11 @@ export async function answerInput(
  * copilotcli plan-approval input.
  *
  * The plan-approval input offers approve/execute options. Declining it makes
- * the agent surface a follow-up text input — "What changes would you like me
- * to make to the plan?" — which we answer with the rubber-duck critique. The
- * agent then revises its plan and presents a new plan-approval input.
+ * the agent surface a follow-up asking what to change — historically a plain
+ * text input, but the Copilot CLI agent now commonly asks via its `ask_user`
+ * tool, which the host renders as a single/multi-select that permits free text.
+ * We answer whichever shape appears with the rubber-duck critique (carried as
+ * free text). The agent then revises its plan and presents a new plan-approval.
  *
  * Both steps run on one connection so the dispatches are flushed in order.
  */
@@ -180,22 +210,39 @@ export async function requestPlanChanges(
     client.dispatch(chatUri, chatInputCompleted(planRequestId, "decline"));
     await client.ping();
 
-    // Step 2 — wait for the follow-up text input and answer it with feedback.
+    // Step 2 — wait for the follow-up input and answer it with the critique.
+    // The agent may surface a plain text input *or* (via its `ask_user` tool) a
+    // single/multi-select that allows free text — both can carry the feedback.
+    // `buildFreeformAnswer` returns the right typed value per question shape, or
+    // null for shapes that can't carry prose (which we skip and keep polling).
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, pollMs));
       const inputs = await readInputs();
-      const followUp = inputs?.find(
-        (r) => r.id !== planRequestId && r.questions?.[0]?.kind === "text",
-      );
-      if (!followUp) continue;
 
-      const questionId = followUp.questions![0].id;
-      const answer = { state: "submitted", value: { kind: "text", value: feedback } };
-      client.dispatch(chatUri, chatInputAnswerChanged(followUp.id, questionId, answer));
-      client.dispatch(chatUri, chatInputCompleted(followUp.id, "accept", { [questionId]: answer }));
+      let matched:
+        | { requestId: string; questionId: string; value: unknown; kind: string }
+        | null = null;
+      for (const r of inputs ?? []) {
+        if (r.id === planRequestId) continue;
+        const q = r.questions?.[0];
+        if (!q) continue;
+        const value = buildFreeformAnswer(
+          { kind: q.kind, allowFreeform: (q as { allowFreeformInput?: boolean }).allowFreeformInput },
+          feedback,
+        );
+        if (value) {
+          matched = { requestId: r.id, questionId: q.id, value, kind: q.kind };
+          break;
+        }
+      }
+      if (!matched) continue;
+
+      const answer = { state: "submitted", value: matched.value };
+      client.dispatch(chatUri, chatInputAnswerChanged(matched.requestId, matched.questionId, answer));
+      client.dispatch(chatUri, chatInputCompleted(matched.requestId, "accept", { [matched.questionId]: answer }));
       await client.ping();
-      debug("Requested plan changes on", sessionUri, "follow-up:", followUp.id);
+      debug("Requested plan changes on", sessionUri, "follow-up:", matched.requestId, "kind:", matched.kind);
       return { success: true };
     }
 
@@ -273,6 +320,32 @@ export async function fetchLastTurns(
   } finally {
     releaseAHPClient(hostUrl);
   }
+}
+
+/**
+ * Fetch a single turn by its exact `Turn.id`, so a caller that knows which
+ * turn it cares about (e.g. the turn a specific prompt started) doesn't have
+ * to guess by scanning the last few turns in the chat — which can bind to
+ * the wrong transcript if other turns happened in between.
+ *
+ * `Turn.id` is the id the client supplied to `chat/turnStarted` when it
+ * started the turn, so this only finds a match when the caller's id was used
+ * to start a turn directly (not merely queued — a queued message's id is not
+ * guaranteed by the protocol to become the eventual turn id).
+ *
+ * Only searches the tail window already carried in `ChatState.turns` (no
+ * `turnsNextCursor` backfill) — the target turn is expected to still be
+ * within that window since callers fetch promptly after injection. Returns
+ * `undefined` if the turn isn't present (paged out, or truly never started).
+ */
+export async function fetchTurnById(
+  hostUrl: string,
+  sessionUri: string,
+  turnId: string,
+  searchWindow: number = 20
+): Promise<Turn | undefined> {
+  const { turns } = await fetchLastTurns(hostUrl, sessionUri, searchWindow);
+  return turns.find((t) => t.id === turnId);
 }
 
 /**

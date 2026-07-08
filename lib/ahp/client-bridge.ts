@@ -4,6 +4,7 @@ import type { SessionSummary } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
+import { classifyAhpError } from "./rpc-error";
 import { enrichFromChangeset, ChangesetEnrichment } from "./changeset-enricher";
 import { fetchCopilotCliPlan, clearPlanCache } from "./plan-artifact";
 import { fetchSessionModel } from "./session-config";
@@ -412,7 +413,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to connect to AHP host";
     error("connect failed:", message);
-    onEvent(classifyError(message, "connect"));
+    onEvent(classifyAhpError(err, "connect"));
     return dispose;
   }
 
@@ -443,7 +444,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   } catch (err) {
     const message = err instanceof Error ? err.message : "Protocol initialization failed";
     error("initialize failed:", message);
-    onEvent(classifyError(message, "protocol"));
+    onEvent(classifyAhpError(err, "protocol"));
     dispose();
     return dispose;
   }
@@ -451,6 +452,16 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   if (disposed) return dispose;
 
   info("connected to", hostUrl);
+
+  // Attach the local subscription for the root channel *before* the
+  // `listSessions()` round-trip below. The server already subscribed us via
+  // `initialSubscriptions`, but the client only starts buffering events for a
+  // channel once a local queue exists (`attachSubscription` creates it
+  // on-demand; `fanOut` silently drops events for channels with no queue —
+  // see dist/client/client.js). Attaching late left a window, spanning the
+  // `listSessions()` await, where a root-channel event (e.g. a session
+  // finishing a turn) would be dropped.
+  const rootSub = client.attachSubscription("ahp-root://");
 
   // Subscribe to OTLP telemetry logs if the host advertises them
   if (initResult.telemetry?.logs) {
@@ -480,8 +491,19 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     // enrichment reads below. Unchanged sessions are served entirely from cache.
     const staleUris = new Set<string>();
 
-    const result = await client.request("listSessions", { channel: "ahp-root://" });
-    for (const summary of result.items) {
+    // Page through the full catalogue. Pagination is additive (a server that
+    // doesn't paginate just returns everything with no `nextCursor`), but a
+    // host that does impose a page cap would otherwise silently hide older
+    // sessions from the board if we only read the first page.
+    const allSummaries: SessionSummary[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await client.request("listSessions", { channel: "ahp-root://", cursor });
+      allSummaries.push(...page.items);
+      cursor = page.nextCursor;
+    } while (cursor);
+
+    for (const summary of allSummaries) {
       const mapped = mapSdkSession(summary);
       if (!shouldShowSession(summary.status, summary.changes?.files ?? 0)) {
         if (summary.status & AHPStatus.IsArchived) skippedArchived.set(summary.resource, mapped);
@@ -517,7 +539,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
       sessions.set(summary.resource, mapped);
     }
-    info(`loaded ${sessions.size} sessions (${result.items.length} total, archived without changes filtered); ${staleUris.size} new/changed`);
+    info(`loaded ${sessions.size} sessions (${allSummaries.length} total, archived without changes filtered); ${staleUris.size} new/changed`);
     onEvent({ type: "init", sessions: Array.from(sessions.values()), enrichments, pendingInputs });
 
     // Cache all sessions and remove stale entries
@@ -538,13 +560,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to list sessions";
     error("listSessions failed:", message);
-    onEvent(classifyError(message, "protocol"));
+    onEvent(classifyAhpError(err, "request"));
     dispose();
     return dispose;
   }
-
-  // Attach subscription to root channel (already subscribed via initialSubscriptions)
-  const rootSub = client.attachSubscription("ahp-root://");
 
   // Process events in background
   (async () => {
@@ -661,7 +680,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       if (!disposed) {
         const message = err instanceof Error ? err.message : "Event stream error";
         warn("event loop error:", message);
-        onEvent(classifyError(message, "stream"));
+        onEvent(classifyAhpError(err, "stream"));
       }
     }
   })();

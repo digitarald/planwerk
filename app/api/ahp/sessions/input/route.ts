@@ -12,6 +12,7 @@ import {
   chatToolCallResultConfirmed,
 } from "@/lib/ahp/actions";
 import { readSessionState } from "@/lib/ahp/snapshot";
+import { ahpErrorResponse } from "@/lib/ahp/api-error";
 
 const debug = (...args: unknown[]) => {
   if (process.env.AHP_DEBUG) console.info("[ahp:input]", ...args);
@@ -143,7 +144,6 @@ export async function POST(request: NextRequest) {
     }
   } catch (err) {
     console.error("[ahp:input] error:", err instanceof Error ? err.message : err);
-    const message = err instanceof Error ? err.message : "Failed to submit input";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return ahpErrorResponse(err, "Failed to submit input");
   }
 }

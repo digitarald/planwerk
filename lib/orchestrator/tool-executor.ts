@@ -5,6 +5,7 @@ import { startReview } from "./review-executor";
 import { loadConfig } from "./skill-config";
 import { startGateRun, setCardPhase } from "./gate-engine";
 import { assessRisk } from "./risk-assessor";
+import { buildAnswer } from "@/lib/ahp/answer-value";
 import type { OrchestratorToolName, ToolCallResult } from "./orchestrator-agent";
 import type { KanbanCard, Phase, RiskLevel } from "@/lib/types";
 import { getCardRisk } from "./risk-store";
@@ -91,12 +92,39 @@ async function handleAnswerInput(
   if (!card) return { success: false, message: `Card ${cardId} not found` };
   if (!card.pendingInput) return { success: false, message: `Card ${card.title} has no pending input` };
 
-  // Use the first question's request ID
-  const requestId = card.pendingInput.questions[0]?.id ?? "unknown";
-  const { success } = await answerInput(context.hostUrl, cardId, requestId, "accept", { answer });
+  // Only elicitation-kind pending input has an answerable question; tool
+  // confirmations (`card.pendingInput.toolConfirmation`) are a different wire
+  // shape (chat/toolCallConfirmed) not handled by this tool.
+  const question = card.pendingInput.questions[0];
+  if (!question) {
+    return {
+      success: false,
+      message: `${card.title}'s pending input isn't an answerable question (likely a tool confirmation) — this tool only answers elicitations.`,
+    };
+  }
+
+  const built = buildAnswer(question, answer);
+  if (!built) {
+    return { success: false, message: `Could not map "${answer}" onto the question format for ${card.title}` };
+  }
+
+  // Dispatch by the pending input's requestId — NOT the question id — keyed
+  // per-question in the answers record (see ChatInputCompletedAction shape).
+  const { success, stale } = await answerInput(
+    context.hostUrl,
+    cardId,
+    card.pendingInput.requestId,
+    "accept",
+    { [question.id]: { state: "submitted", value: built.value } },
+  );
   return success
-    ? { success: true, message: `Answered input for ${card.title}` }
-    : { success: false, message: `Failed to answer input for ${card.title}` };
+    ? { success: true, message: `Answered input for ${card.title}: ${built.display}` }
+    : {
+        success: false,
+        message: stale
+          ? `Input request for ${card.title} is no longer pending (stale)`
+          : `Failed to answer input for ${card.title}`,
+      };
 }
 
 async function handleTriggerReview(

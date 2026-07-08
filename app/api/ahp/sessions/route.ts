@@ -5,6 +5,7 @@ import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 import { AHPSessionSummary, shouldShowSession } from "@/lib/ahp/types";
 import { OFFERED_PROTOCOL_VERSIONS } from "@/lib/ahp/protocol";
 import { injectMessage } from "@/lib/ahp/session-messenger";
+import { ahpErrorResponse } from "@/lib/ahp/api-error";
 
 /** Default agent provider for new sessions on this host. */
 const DEFAULT_PROVIDER = "copilotcli";
@@ -29,8 +30,7 @@ export async function GET(request: NextRequest) {
   try {
     transport = await WebSocketTransport.connect(hostUrl);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to connect to AHP host";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return ahpErrorResponse(err, "Failed to connect to AHP host");
   }
 
   const client = new AhpClient(transport);
@@ -72,8 +72,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ sessions });
   } catch (err) {
     await client.shutdown().catch(() => {});
-    const message = err instanceof Error ? err.message : "Failed to list sessions";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return ahpErrorResponse(err, "Failed to list sessions");
   }
 }
 
@@ -135,7 +134,6 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ resource: channel, title: title ?? task });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to create session";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return ahpErrorResponse(err, "Failed to create session");
   }
 }
