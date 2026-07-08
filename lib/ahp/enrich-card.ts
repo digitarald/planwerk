@@ -74,6 +74,20 @@ export function enrichSessionToCard(
     }));
   }
 
+  // Parked-on-escalation overlay: a review that escalated for the card's current
+  // transition is a terminal human-handoff — the heartbeat stops re-injecting it,
+  // so surface `needs-human` or the card would sit here looking idle. Precedence:
+  // runtime error/needs-human already wins; escalation outranks coherence/stale.
+  if (nextPhase && card.attention !== "error" && card.attention !== "needs-human") {
+    const transition = `${card.phase}->${nextPhase}`;
+    const parked = reviewRuns.some(
+      (run) => run.status === "escalated" && run.phaseTransition === transition
+    );
+    if (parked) {
+      card.attention = "needs-human";
+    }
+  }
+
   // Record the current status line and attach the recent trail. Best-effort:
   // a history failure must never break card enrichment.
   try {

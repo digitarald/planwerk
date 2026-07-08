@@ -98,6 +98,26 @@ export function getReviewRunsForCard(cardId: string): ReviewRun[] {
   return rows.map(mapRow);
 }
 
+/**
+ * Whether a review for this (card, skill, transition) has already escalated to a
+ * human. An escalation is a terminal human-handoff: the automated loop must NOT
+ * re-inject the same review, otherwise the heartbeat churns (review-injected →
+ * escalated → review-injected …). Mirrors the `hasPlanRubberDuck` short-circuit.
+ */
+export function hasEscalatedReview(
+  cardId: string,
+  skillId: string,
+  phaseTransition: string
+): boolean {
+  const db = getDb();
+  const row = db
+    .prepare(
+      "SELECT 1 FROM review_runs WHERE card_id = ? AND skill_id = ? AND phase_transition = ? AND status = 'escalated' LIMIT 1"
+    )
+    .get(cardId, skillId, phaseTransition) as { 1: number } | undefined;
+  return row !== undefined;
+}
+
 /** Skill ID used to record a forced plan rubber-duck pass. */
 const PLAN_REVIEW_SKILL = "plan-review";
 
@@ -373,6 +393,15 @@ function buildReviewPrompt(skill: SkillConfig, iteration: number, maxIterations:
   if (!skill.autoFix) {
     prompt += "\n\nReport findings only — do NOT make any code changes.";
   }
+
+  // Verdict contract: the review machinery parses this token deterministically
+  // (see verdict-parse.ts). Without it, a clean review can be misread as ambiguous
+  // and escalate needlessly.
+  prompt +=
+    '\n\nWhen finished, end your reply with exactly one line stating your verdict, ' +
+    'one of:\n"VERDICT: pass" (no blocking issues), ' +
+    '"VERDICT: fail" (issues that must be addressed), or ' +
+    '"VERDICT: needs-human" (cannot decide — human review required).';
 
   return prompt;
 }

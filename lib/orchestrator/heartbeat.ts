@@ -3,7 +3,7 @@ import "server-only";
 import { getDb } from "@/lib/db/schema";
 import { KanbanCard, Phase, RiskLevel, PendingInput, normalizeChangesetRef } from "@/lib/types";
 import { loadConfig } from "./skill-config";
-import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills, hasPlanRubberDuck, recordPlanRubberDuck } from "./review-executor";
+import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills, hasPlanRubberDuck, recordPlanRubberDuck, hasEscalatedReview } from "./review-executor";
 import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard, completeGateRun, executeGateCommand } from "./gate-engine";
 import { getCardRisk } from "./risk-store";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
@@ -334,6 +334,43 @@ async function processCard(
 }
 
 /**
+ * Inject any not-yet-started review skills for a transition, skipping skills that
+ * have already escalated to a human. An escalation is a terminal human-handoff, so
+ * re-injecting its skill would restart the review-injected → escalated churn. When
+ * every required skill is escalated the card is *parked*: nothing is injected and it
+ * waits for a human (surfaced as `needs-human` via card enrichment).
+ */
+async function startPendingReviews(
+  hostUrl: string,
+  card: KanbanCard,
+  transition: string,
+  riskLevel: RiskLevel,
+  changesetRef: string
+): Promise<HeartbeatAction[]> {
+  const actions: HeartbeatAction[] = [];
+  const skills = getRequiredReviewSkills(transition, riskLevel).filter(
+    (skill) => !hasEscalatedReview(card.id, skill.id, transition)
+  );
+  for (const skill of skills) {
+    const { success } = await startReview(
+      hostUrl,
+      card.id,
+      card.id,
+      skill,
+      transition,
+      riskLevel,
+      changesetRef
+    );
+    if (success) {
+      const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: 1 };
+      emit(action);
+      actions.push(action);
+    }
+  }
+  return actions;
+}
+
+/**
  * Build phase pipeline: deterministic gates → review skills → auto-advance.
  */
 async function runBuildPipeline(
@@ -433,31 +470,8 @@ async function runBuildPipeline(
     // Check for active review runs
     const activeReviews = getActiveReviewRuns(card.id);
     if (activeReviews.length === 0) {
-      // No active reviews — start them
-      const skills = getRequiredReviewSkills(transition, riskLevel);
-      for (const skill of skills) {
-        // Only auto-inject if no prior run exists (or prior failed and needs re-iteration)
-        const sessionUri = card.id; // In production, resolve actual session URI
-        const { success } = await startReview(
-          hostUrl,
-          sessionUri,
-          card.id,
-          skill,
-          transition,
-          riskLevel,
-          changesetRef
-        );
-        if (success) {
-          const action: HeartbeatAction = {
-            type: "review-injected",
-            cardId: card.id,
-            skillId: skill.id,
-            iteration: 1,
-          };
-          emit(action);
-          actions.push(action);
-        }
-      }
+      // No active reviews — start any that aren't parked on a human escalation.
+      actions.push(...(await startPendingReviews(hostUrl, card, transition, riskLevel, changesetRef)));
     } else {
       // Active reviews exist — handle based on status
       for (const review of activeReviews) {
@@ -673,16 +687,8 @@ async function runPlanPipeline(
   if (reviewPending.length > 0) {
     const activeReviews = getActiveReviewRuns(card.id);
     if (activeReviews.length === 0) {
-      const skills = getRequiredReviewSkills(transition, riskLevel);
-      for (const skill of skills) {
-        const sessionUri = card.id;
-        const { success } = await startReview(hostUrl, sessionUri, card.id, skill, transition, riskLevel, changesetRef);
-        if (success) {
-          const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: 1 };
-          emit(action);
-          actions.push(action);
-        }
-      }
+      // No active reviews — start any that aren't parked on a human escalation.
+      actions.push(...(await startPendingReviews(hostUrl, card, transition, riskLevel, changesetRef)));
     } else {
       // Process active reviews (verdict extraction, re-iteration, escalation)
       for (const review of activeReviews) {
@@ -766,16 +772,8 @@ async function runReviewPipeline(
   if (reviewPending.length > 0) {
     const activeReviews = getActiveReviewRuns(card.id);
     if (activeReviews.length === 0) {
-      const skills = getRequiredReviewSkills(transition, riskLevel);
-      for (const skill of skills) {
-        const sessionUri = card.id;
-        const { success } = await startReview(hostUrl, sessionUri, card.id, skill, transition, riskLevel, changesetRef);
-        if (success) {
-          const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: 1 };
-          emit(action);
-          actions.push(action);
-        }
-      }
+      // No active reviews — start any that aren't parked on a human escalation.
+      actions.push(...(await startPendingReviews(hostUrl, card, transition, riskLevel, changesetRef)));
     } else {
       // Process active reviews (verdict extraction, re-iteration, escalation)
       for (const review of activeReviews) {

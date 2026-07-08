@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { Turn } from "@microsoft/agent-host-protocol";
+import { parseVerdictToken, parseFindings, classifyProse } from "./verdict-parse";
 
 /**
  * Verdict from a review skill execution.
@@ -11,26 +12,6 @@ export interface ReviewVerdict {
   findings: string[];
   madeEdits: boolean;
 }
-
-const PASS_SIGNALS = [
-  /no\s+(issues?|problems?|concerns?)\s+(found|detected|identified)/i,
-  /lgtm/i,
-  /looks?\s+good/i,
-  /all\s+(checks?\s+)?pass/i,
-  /no\s+(critical|significant)\s+(issues?|findings?)/i,
-  /code\s+(is\s+)?(clean|solid|well[- ]structured)/i,
-  /approved/i,
-];
-
-const FAIL_SIGNALS = [
-  /\b(bug|vulnerability|security\s+issue)\b/i,
-  /\bmust\s+(be\s+)?(fixed|addressed|resolved)\b/i,
-  /\bblocking\b/i,
-  /\bfail(ed|ing|s)?\b/i,
-  /\breject(ed)?\b/i,
-  // "critical" and "error" only match when NOT preceded by "no"
-  /(?<!no\s+)(critical|error)\s+(issue|problem|finding)/i,
-];
 
 const EDIT_TOOL_PATTERNS = [
   /^edit$/i,
@@ -45,12 +26,12 @@ const EDIT_TOOL_PATTERNS = [
  * Extract a structured verdict from the agent's turn output after a review.
  *
  * Strategy:
- * 1. Check if agent made file edits (tool calls to edit/create/write)
- * 2. Parse the last response text for pass/fail signals
- * 3. If edits were made → passed (agent fixed issues)
- * 4. If positive language, no edits → passed clean
- * 5. If negative language → failed
- * 6. Ambiguous → needs-human
+ * 1. Detect whether the agent made file edits (tool calls to edit/create/write).
+ * 2. If the reviewer emitted an explicit `VERDICT:` token (the prompt contract),
+ *    that is authoritative — map it directly to a status.
+ * 3. Otherwise fall back to prose heuristics: edits → failed (agent applied fixes),
+ *    positive language → passed, negative language / findings → failed, else
+ *    ambiguous → needs-human.
  */
 export function extractVerdict(turns: Turn[]): ReviewVerdict {
   // Walk the most recent turns to find the review response. Turns carry
@@ -60,7 +41,6 @@ export function extractVerdict(turns: Turn[]): ReviewVerdict {
 
   let madeEdits = false;
   let responseText = "";
-  const findings: string[] = [];
 
   for (const turn of recentTurns) {
     for (const part of turn.responseParts ?? []) {
@@ -75,26 +55,41 @@ export function extractVerdict(turns: Turn[]): ReviewVerdict {
     }
   }
 
-  // Extract findings from bullet points or numbered items
-  const bulletPattern = /^[\s]*[-*•]\s+(.+)$/gm;
-  const numberedPattern = /^[\s]*\d+[.)]\s+(.+)$/gm;
-  let match;
-  while ((match = bulletPattern.exec(responseText)) !== null) {
-    const line = match[1].trim();
-    if (line.length > 10 && line.length < 500) {
-      findings.push(line);
-    }
+  const findings = parseFindings(responseText);
+
+  // 2. Explicit verdict token is authoritative (overrides the madeEdits heuristic).
+  const token = parseVerdictToken(responseText);
+  if (token === "pass") {
+    return {
+      status: "passed",
+      summary: madeEdits
+        ? "Review passed — reviewer verdict: pass (fixes applied)."
+        : "Review passed — reviewer verdict: pass.",
+      findings: [],
+      madeEdits,
+    };
   }
-  while ((match = numberedPattern.exec(responseText)) !== null) {
-    const line = match[1].trim();
-    if (line.length > 10 && line.length < 500 && !findings.includes(line)) {
-      findings.push(line);
-    }
+  if (token === "fail") {
+    return {
+      status: "failed",
+      summary: madeEdits
+        ? "Review found issues and agent applied fixes."
+        : "Review found issues that need attention.",
+      findings: findings.slice(0, 10),
+      madeEdits,
+    };
+  }
+  if (token === "needs-human") {
+    return {
+      status: "needs-human",
+      summary: "Reviewer requested human review.",
+      findings: findings.slice(0, 10),
+      madeEdits,
+    };
   }
 
-  // If agent made edits, it found and fixed issues.
+  // 3a. No token: if the agent made edits, it found and fixed issues.
   // Don't auto-pass here — let processReviewResult decide based on risk policy.
-  // Return "failed" with madeEdits=true so the caller can apply shouldFollowEdits logic.
   if (madeEdits) {
     return {
       status: "failed",
@@ -104,11 +99,9 @@ export function extractVerdict(turns: Turn[]): ReviewVerdict {
     };
   }
 
-  // Check for explicit pass signals
-  const hasPassSignal = PASS_SIGNALS.some((p) => p.test(responseText));
-  const hasFailSignal = FAIL_SIGNALS.some((p) => p.test(responseText));
-
-  if (hasPassSignal && !hasFailSignal) {
+  // 3b. No token, no edits: classify from prose heuristics.
+  const prose = classifyProse(responseText, findings);
+  if (prose === "passed") {
     return {
       status: "passed",
       summary: "Review passed — no issues found.",
@@ -116,21 +109,12 @@ export function extractVerdict(turns: Turn[]): ReviewVerdict {
       madeEdits: false,
     };
   }
-
-  if (hasFailSignal && !hasPassSignal) {
+  if (prose === "failed") {
     return {
       status: "failed",
-      summary: "Review found issues that need attention.",
-      findings: findings.slice(0, 10),
-      madeEdits: false,
-    };
-  }
-
-  // Mixed signals or unclear — report findings if any
-  if (findings.length > 0) {
-    return {
-      status: "failed",
-      summary: `Review produced ${findings.length} finding(s) without clear resolution.`,
+      summary: findings.length > 0
+        ? `Review produced ${findings.length} finding(s) without clear resolution.`
+        : "Review found issues that need attention.",
       findings: findings.slice(0, 10),
       madeEdits: false,
     };
