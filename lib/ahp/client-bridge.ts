@@ -566,13 +566,16 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }
     reconcileSessionCache(hostUrl, new Set(sessions.keys()));
 
-    // Trigger async enrichment (changeset + plan artifact) only for new/changed
-    // sessions — enrichment subscribes to the session and would resume it.
-    // syncInputState runs for every session but only subscribes when InputNeeded,
-    // which is a hot session the user is actively resolving (its timestamp moving
-    // is expected).
+    // Trigger async enrichment (changeset + plan artifact) for new/changed
+    // sessions and for InputNeeded sessions still missing a plan artifact — a
+    // plan confirmation is the moment plan.md is finalized, so a reload/restart
+    // mid-confirmation must still fetch it. Enrichment subscribes to the session
+    // and would resume it, but syncInputState already subscribes to InputNeeded
+    // sessions (they're hot — the user is actively resolving them).
     for (const [uri, session] of sessions) {
-      if (staleUris.has(uri)) triggerEnrichment(uri);
+      const isInputNeeded = (session.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
+      const missingPlan = !enrichments.get(uri)?.artifacts.some((a) => a.type === "plan");
+      if (staleUris.has(uri) || (isInputNeeded && missingPlan)) triggerEnrichment(uri);
       syncInputState(uri, session.status);
     }
   } catch (err) {
@@ -666,8 +669,21 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
               enrichment: enrichments.get(sessionUri),
               pendingInput: pendingInputs.get(sessionUri),
             });
-            // Re-trigger enrichment if file changes updated or session became idle
-            if (changes.changes !== undefined || (changes.status !== undefined && !(changes.status & AHPStatus.InProgress))) {
+            // Re-trigger enrichment if file changes updated, the session became
+            // idle, or it's InputNeeded but has no plan artifact yet. InputNeeded
+            // (24) is composite and carries the InProgress bit, so the "became
+            // idle" guard alone skips the plan (re)fetch at the exact moment a
+            // plan confirmation appears — and session-state plan.md lives outside
+            // the git tree, so file counts don't move either. The missing-plan
+            // guard scopes this to the case that matters and avoids re-enriching
+            // once the plan is captured.
+            const isInputNeeded = (existing.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
+            const missingPlan = !enrichments.get(sessionUri)?.artifacts.some((a) => a.type === "plan");
+            if (
+              changes.changes !== undefined
+              || (changes.status !== undefined && !(changes.status & AHPStatus.InProgress))
+              || (isInputNeeded && missingPlan)
+            ) {
               triggerEnrichment(sessionUri);
             }
           } else {
