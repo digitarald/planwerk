@@ -39,6 +39,11 @@ import {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { isGenericStatus } from "@/lib/utils/status-placeholders";
+import {
+  RUNTIME_STATUS,
+  GATE_STATUS,
+  blockedFromAdvancingHint,
+} from "@/lib/utils/status-vocabulary";
 import { copyDebugState } from "@/lib/utils/copy-debug-state";
 
 interface KanbanCardProps {
@@ -101,21 +106,21 @@ const attentionEdge: Record<AttentionLevel, string> = {
 function RuntimeIndicator({ status }: { status: RuntimeStatus }) {
   switch (status) {
     case "running":
-      return <span title="Running"><Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" /></span>;
+      return <span title={RUNTIME_STATUS.running.hint}><Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" /></span>;
     case "idle":
-      return <span title="Idle"><CirclePause className="h-3 w-3 shrink-0 text-muted-foreground/40" /></span>;
+      return <span title={RUNTIME_STATUS.idle.hint}><CirclePause className="h-3 w-3 shrink-0 text-muted-foreground/40" /></span>;
     case "input-needed":
       return (
-        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" title="Waiting for input">
+        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" title={RUNTIME_STATUS["input-needed"].hint}>
           <MessageCircleWarning className="h-2.5 w-2.5" />
-          Input
+          {RUNTIME_STATUS["input-needed"].label}
         </span>
       );
     case "error":
       return (
-        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400" title="Error occurred">
+        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400" title={RUNTIME_STATUS.error.hint}>
           <XCircle className="h-2.5 w-2.5" />
-          Error
+          {RUNTIME_STATUS.error.label}
         </span>
       );
   }
@@ -149,7 +154,7 @@ function InputContext({ card }: { card: KanbanCardType }) {
   return (
     <div className="mt-1 space-y-0.5 rounded border border-amber-200 bg-amber-50 px-1.5 py-1 dark:border-amber-800/40 dark:bg-amber-950/20">
       <p className="line-clamp-2 text-[11px] font-medium text-amber-800 dark:text-amber-300">
-        {card.activity || "Waiting for input"}
+        {card.activity || RUNTIME_STATUS["input-needed"].label}
       </p>
       {lastTool && (
         <p className="line-clamp-1 text-[10px] text-amber-700/70 dark:text-amber-400/60">
@@ -163,14 +168,14 @@ function InputContext({ card }: { card: KanbanCardType }) {
 function GateIndicator({ status }: { status: GateStatus }) {
   switch (status) {
     case "passed":
-      return <span title="Gates passed"><ShieldCheck className="h-3 w-3 shrink-0 text-emerald-500" /></span>;
+      return <span title={GATE_STATUS.passed.hint}><ShieldCheck className="h-3 w-3 shrink-0 text-emerald-500" /></span>;
     case "evaluating":
-      return <span title="Evaluating gates"><Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary/70" /></span>;
+      return <span title={GATE_STATUS.evaluating.hint}><Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary/70" /></span>;
     case "failed":
       return (
-        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold text-white" title="Gate check failed">
+        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold text-white" title={GATE_STATUS.failed.hint}>
           <ShieldX className="h-3 w-3" />
-          Gate
+          {GATE_STATUS.failed.label}
         </span>
       );
     case "pending":
@@ -336,7 +341,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                   {card.gateStatus === "pending" && card.gateBlocker && (
                     <span
                       className="inline-flex min-w-0 shrink items-center gap-0.5 text-[9px] font-medium text-muted-foreground/80"
-                      title={`Not yet advancing: ${card.gateBlocker}`}
+                      title={blockedFromAdvancingHint(card.gateBlocker)}
                     >
                       <ShieldAlert className="h-2.5 w-2.5 shrink-0" />
                       <span className="truncate">{card.gateBlocker}</span>
@@ -378,7 +383,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                   )}
                 </div>
 
-                <div className="mt-1 text-[10px] text-muted-foreground/70">
+                <div className="mt-1.5 text-[10px] text-muted-foreground/70">
                   {showStats && (
                     <>
                       <span className="text-emerald-600">+{card.additions}</span>{" "}

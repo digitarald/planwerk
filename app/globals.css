@@ -47,6 +47,18 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
+
+  /* Semantic z-index scale — overlays stack by role, not by ad-hoc numbers.
+     Generates z-base / z-sticky / z-dropdown / z-modal-backdrop / z-modal /
+     z-toast / z-tooltip. Tooltips sit above modals so a tooltip raised from
+     inside a dialog is never clipped behind it. */
+  --z-index-base: 5;
+  --z-index-sticky: 10;
+  --z-index-dropdown: 40;
+  --z-index-modal-backdrop: 50;
+  --z-index-modal: 60;
+  --z-index-toast: 70;
+  --z-index-tooltip: 80;
 }
 
 :root {
@@ -251,5 +263,21 @@
     .animate-pulse {
       animation: none;
     }
+  }
+}
+
+/* Global reduced-motion baseline (top level so it wins over Tailwind's
+   entrance utilities). The specific glow/pulse rules above already preserve the
+   static emphasis; this neutralizes the remaining ~40 animate-in / transition
+   usages across the cards and detail modal so nothing moves for users who opt
+   out of motion, while state changes still resolve instantly. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

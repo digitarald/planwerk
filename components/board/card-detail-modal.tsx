@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -51,6 +51,11 @@ import { GatePipeline } from "@/components/gates/gate-pipeline";
 import { useGateRuns } from "@/lib/hooks/use-gate-runs";
 import { cn } from "@/lib/utils";
 import { isGenericStatus } from "@/lib/utils/status-placeholders";
+import {
+  RUNTIME_STATUS,
+  GATE_STATUS,
+  blockedFromAdvancingHint,
+} from "@/lib/utils/status-vocabulary";
 
 const artifactIcons: Record<ArtifactType, typeof FileText> = {
   plan: FileText,
@@ -60,6 +65,22 @@ const artifactIcons: Record<ArtifactType, typeof FileText> = {
   "test-plan": ClipboardCheck,
   decision: Scale,
 };
+
+/** Single source of truth for the modal's small-caps section-header typography.
+ *  Every panel label shares it so the rhythm can't drift; variants (icon row,
+ *  amber "Awaiting Input", the collapsible Changed Files button) layer on top. */
+const SECTION_LABEL_CLASS =
+  "text-[10px] font-semibold uppercase tracking-widest text-muted-foreground";
+
+function SectionLabel({
+  className,
+  children,
+}: {
+  className?: string;
+  children: ReactNode;
+}) {
+  return <h3 className={cn("mb-2", SECTION_LABEL_CLASS, className)}>{children}</h3>;
+}
 
 function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString([], {
@@ -93,30 +114,30 @@ function RuntimeBadge({ status }: { status: RuntimeStatus }) {
   switch (status) {
     case "running":
       return (
-        <span className="inline-flex items-center gap-1.5 rounded-md bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400">
+        <span title={RUNTIME_STATUS.running.hint} className="inline-flex items-center gap-1.5 rounded-md bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400">
           <Loader2 className="h-3 w-3 animate-spin" />
-          Running
+          {RUNTIME_STATUS.running.label}
         </span>
       );
     case "idle":
       return (
-        <span className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+        <span title={RUNTIME_STATUS.idle.hint} className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
           <CirclePause className="h-3 w-3" />
-          Idle
+          {RUNTIME_STATUS.idle.label}
         </span>
       );
     case "input-needed":
       return (
-        <span className="inline-flex items-center gap-1.5 rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-950/30 dark:text-amber-400">
+        <span title={RUNTIME_STATUS["input-needed"].hint} className="inline-flex items-center gap-1.5 rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-950/30 dark:text-amber-400">
           <MessageCircleWarning className="h-3 w-3" />
-          Input Needed
+          {RUNTIME_STATUS["input-needed"].label}
         </span>
       );
     case "error":
       return (
-        <span className="inline-flex items-center gap-1.5 rounded-md bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-950/30 dark:text-red-400">
+        <span title={RUNTIME_STATUS.error.hint} className="inline-flex items-center gap-1.5 rounded-md bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-950/30 dark:text-red-400">
           <XCircle className="h-3 w-3" />
-          Error
+          {RUNTIME_STATUS.error.label}
         </span>
       );
   }
@@ -126,23 +147,23 @@ function GateBadge({ status }: { status: GateStatus }) {
   switch (status) {
     case "passed":
       return (
-        <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+        <span title={GATE_STATUS.passed.hint} className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
           <ShieldCheck className="h-3 w-3" />
-          Passed
+          {GATE_STATUS.passed.label}
         </span>
       );
     case "evaluating":
       return (
-        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+        <span title={GATE_STATUS.evaluating.hint} className="inline-flex items-center gap-1 text-xs text-muted-foreground">
           <Loader2 className="h-3 w-3 animate-spin" />
-          Evaluating
+          {GATE_STATUS.evaluating.label}
         </span>
       );
     case "failed":
       return (
-        <span className="inline-flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
+        <span title={GATE_STATUS.failed.hint} className="inline-flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
           <ShieldX className="h-3 w-3" />
-          Failed
+          {GATE_STATUS.failed.label}
         </span>
       );
     case "pending":
@@ -214,7 +235,7 @@ function GateRunRow({
           )}
           <span
             className={cn(
-              "rounded px-1.5 py-0.5 text-[10px] font-medium",
+              "rounded px-1.5 py-0.5 text-[10px] font-medium capitalize",
               run.status === "passed" && "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
               run.status === "failed" && "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
               run.status === "running" && "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300"
@@ -405,7 +426,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   const [filesExpanded, setFilesExpanded] = useState(fileChanges.length <= 12);
 
   return (
-    <div className="absolute inset-0 z-40 flex items-start justify-center">
+    <div className="absolute inset-0 z-modal-backdrop flex items-start justify-center">
       {/* Scrim */}
       <div
         ref={scrimRef}
@@ -414,7 +435,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
       />
 
       {/* Modal */}
-      <div className="absolute inset-4 z-50 grid grid-rows-[auto_1fr] overflow-hidden rounded-2xl border border-border bg-popover shadow-elevation-lg animate-in fade-in slide-in-from-bottom-2 duration-200">
+      <div className="absolute inset-4 z-modal grid grid-rows-[auto_1fr] overflow-hidden rounded-2xl border border-border bg-popover shadow-elevation-lg animate-in fade-in slide-in-from-bottom-2 duration-200">
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-border/60 px-6 py-4">
           <div
@@ -442,14 +463,14 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               {card.gateStatus === "pending" && card.gateBlocker && (
                 <span
                   className="inline-flex items-center gap-1 text-xs text-muted-foreground"
-                  title="Reason this card hasn't advanced to the next phase"
+                  title={blockedFromAdvancingHint(card.gateBlocker)}
                 >
                   <ShieldAlert className="h-3 w-3" />
                   {card.gateBlocker}
                 </span>
               )}
               {card.manualOverride && (
-                <span className="inline-flex items-center gap-1 text-xs text-amber-600">
+                <span className="inline-flex items-center gap-1 text-xs text-amber-600" title="Manual override active">
                   <AlertTriangle className="h-3 w-3" />
                   Override
                 </span>
@@ -520,9 +541,9 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               {/* Current Activity — always visible */}
               {showCurrentActivity && (
                 <section>
-                  <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                  <SectionLabel>
                     Current Activity
-                  </h3>
+                  </SectionLabel>
                   <p className="text-[13px] leading-relaxed text-foreground/80">
                     {card.activity}
                   </p>
@@ -532,9 +553,9 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               {/* Status history */}
               {visibleStatusHistory.length > 0 && (
                 <section>
-                  <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                  <SectionLabel>
                     Status history
-                  </h3>
+                  </SectionLabel>
                   <div className="relative space-y-0.5 pl-1">
                     {[...visibleStatusHistory].reverse().map((entry, idx) => {
                       const isCurrent = idx === 0;
@@ -582,7 +603,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                   <button
                     type="button"
                     onClick={() => setFilesExpanded(!filesExpanded)}
-                    className="mb-2 flex w-full items-center gap-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors"
+                    className={cn("mb-2 flex w-full items-center gap-1 hover:text-foreground transition-colors", SECTION_LABEL_CLASS)}
                   >
                     <ChevronDown className={cn("h-3 w-3 transition-transform", !filesExpanded && "-rotate-90")} />
                     Changed Files
@@ -626,9 +647,9 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               {/* Last Agent Message (only when not awaiting input — input section shows it inline) */}
               {card.lastAgentMessage && !card.pendingInput && (
                 <section>
-                  <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                  <SectionLabel>
                     Last Response
-                  </h3>
+                  </SectionLabel>
                   <div className="rounded-xl border border-border/60 bg-muted/30 p-4">
                     <article className="prose prose-sm dark:prose-invert max-w-none prose-p:text-[13px] prose-p:leading-relaxed prose-code:text-xs prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-muted prose-pre:border prose-pre:border-border">
                       <ReactMarkdown
@@ -645,7 +666,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               {/* Coherence — board-level conflicts with other in-flight sessions */}
               {card.coherence && card.coherence.conflictsWith.length > 0 && (
                 <section>
-                  <h3 className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                  <SectionLabel className="flex items-center gap-1.5">
                     <Split className="h-3 w-3 text-purple-500" />
                     Coherence
                     {card.coherence.blocking && (
@@ -653,7 +674,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                         blocking ship
                       </span>
                     )}
-                  </h3>
+                  </SectionLabel>
                   <div className="space-y-2">
                     {card.coherence.conflictsWith.map((peer) => (
                       <div
@@ -709,9 +730,9 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               {/* Gates — real verdicts from the gate engine, with freshness */}
               {gateRuns.length > 0 && (
                 <section>
-                  <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                  <SectionLabel>
                     Gates
-                  </h3>
+                  </SectionLabel>
                   <div className="space-y-2">
                     {gateRuns.map((run) => (
                       <GateRunRow key={run.id} run={run} cardDiff={cardDiff} />
@@ -723,9 +744,9 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               {/* Review Findings */}
               {card.reviewFindings && card.reviewFindings.length > 0 && (
                 <section>
-                  <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                  <SectionLabel>
                     Review Findings
-                  </h3>
+                  </SectionLabel>
                   <div className="space-y-2">
                     {card.reviewFindings.map((review) => (
                       <div
@@ -741,13 +762,13 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                         <div className="flex items-center justify-between">
                           <span className="text-xs font-medium">{review.skillId}</span>
                           <span className={cn(
-                            "text-[10px] font-medium px-1.5 py-0.5 rounded",
+                            "text-[10px] font-medium px-1.5 py-0.5 rounded capitalize",
                             review.status === "passed" && "text-emerald-700 bg-emerald-100 dark:text-emerald-300 dark:bg-emerald-900/40",
                             review.status === "failed" && "text-red-700 bg-red-100 dark:text-red-300 dark:bg-red-900/40",
                             review.status === "escalated" && "text-amber-700 bg-amber-100 dark:text-amber-300 dark:bg-amber-900/40",
                             review.status === "in-progress" && "text-blue-700 bg-blue-100 dark:text-blue-300 dark:bg-blue-900/40",
                           )}>
-                            {review.status === "in-progress" ? `reviewing (${review.iteration}/${review.maxIterations})` : review.status}
+                            {review.status === "in-progress" ? `Reviewing (${review.iteration}/${review.maxIterations})` : review.status}
                           </span>
                         </div>
                         {review.summary && (
@@ -772,9 +793,9 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               {/* Pending Input */}
               {card.pendingInput && (
                 <section>
-                  <h3 className="mb-2.5 text-[10px] font-semibold uppercase tracking-widest text-amber-600 dark:text-amber-400">
+                  <SectionLabel className="mb-2.5 text-amber-600 dark:text-amber-400">
                     Awaiting Input
-                  </h3>
+                  </SectionLabel>
                   {/* Show last agent message as context when available */}
                   {card.lastAgentMessage && (
                     <div className="mb-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5">
@@ -800,9 +821,9 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               {/* Artifacts (non-plan) */}
               {artifacts.filter((a) => a.type !== "plan").length > 0 && (
                 <section>
-                  <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                  <SectionLabel>
                     Artifacts
-                  </h3>
+                  </SectionLabel>
                   <div className="space-y-1">
                     {artifacts
                       .filter((a) => a.type !== "plan")

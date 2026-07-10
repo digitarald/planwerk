@@ -51,44 +51,36 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
       className={cn(
         "flex flex-col rounded-xl transition-[min-width,max-width,flex] duration-200",
         isEmpty
-          ? "min-w-[60px] max-w-[60px] flex-shrink-0"
+          ? "min-w-[48px] max-w-[48px] flex-shrink-0"
           : "@container/col min-w-[180px] max-w-[480px] flex-1 bg-[var(--pw-column-bg)]"
       )}
       data-column-id={column.id}
     >
-      <div className={cn(
-        "flex items-start gap-3 px-3 py-2 @min-[340px]/col:px-4 @min-[340px]/col:py-2.5",
-        isEmpty && "flex-col items-center gap-1 px-1"
-      )}>
-        <div className="min-w-0 flex-1">
-          <h2 className={cn(
-            "text-xs font-semibold tracking-[0.18em] text-muted-foreground uppercase @min-[340px]/col:text-[13px]",
-            isEmpty && "[writing-mode:vertical-lr] rotate-180 text-center"
-          )}>
-            {column.title}
-          </h2>
-          {!isEmpty && (
+      {!isEmpty && (
+        <div className="flex items-start gap-3 px-3 py-2 @min-[340px]/col:px-4 @min-[340px]/col:py-2.5">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-xs font-semibold tracking-[0.18em] text-muted-foreground uppercase @min-[340px]/col:text-[13px]">
+              {column.title}
+            </h2>
             <p className="mt-0.5 text-[11px] text-muted-foreground/80 @min-[420px]/col:text-xs">
               {column.description}
             </p>
-          )}
-        </div>
-        {!isEmpty && topAttention && (() => {
-          const { Icon, pill, label } = ATTENTION_META[topAttention];
-          return (
-            <span
-              className={cn(
-                "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums",
-                pill
-              )}
-              title={`${attentionCards.length} ${attentionCards.length === 1 ? "card needs" : "cards need"} attention (${label})`}
-            >
-              <Icon className="h-3 w-3" />
-              {attentionCards.length}
-            </span>
-          );
-        })()}
-        {!isEmpty && (
+          </div>
+          {topAttention && (() => {
+            const { Icon, pill, label } = ATTENTION_META[topAttention];
+            return (
+              <span
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums",
+                  pill
+                )}
+                title={`${attentionCards.length} ${attentionCards.length === 1 ? "card needs" : "cards need"} attention (${label})`}
+              >
+                <Icon className="h-3 w-3" />
+                {attentionCards.length}
+              </span>
+            );
+          })()}
           <span
             className={cn(
               "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium tabular-nums",
@@ -106,8 +98,8 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
             {cards.length}
             {column.wipLimit && `/${column.wipLimit}`}
           </span>
-        )}
-      </div>
+        </div>
+      )}
 
       <Droppable droppableId={column.id}>
         {(provided, snapshot) => (
@@ -116,27 +108,36 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
               ref={provided.innerRef}
               {...provided.droppableProps}
               className={cn(
-                "min-h-full rounded-xl border border-transparent px-2 pb-2 transition-all duration-200 @min-[340px]/col:px-3",
+                "min-h-full rounded-xl border border-transparent transition-all duration-200",
+                isEmpty
+                  ? "flex items-center justify-center px-1 py-4"
+                  : "px-3 pb-2 @min-[340px]/col:px-4",
                 snapshot.isDraggingOver && "border-primary/20 bg-primary/5 shadow-[inset_0_2px_8px_oklch(0.57_0.17_251/0.06)]"
               )}
             >
-              <div className="space-y-2">
-                {cards.map((card, index) => (
-                  <KanbanCard key={card.id} card={card} index={index} />
-                ))}
-                {cards.length === 0 && !snapshot.isDraggingOver && !isEmpty && (
-                  <div className="py-6 text-center text-[10px] text-muted-foreground/60">
-                    No tasks
-                  </div>
-                )}
-                {provided.placeholder}
-              </div>
+              {isEmpty ? (
+                <h2 className="[writing-mode:vertical-lr] rotate-180 text-center text-xs font-semibold tracking-[0.18em] text-muted-foreground/60 uppercase">
+                  {column.title}
+                </h2>
+              ) : (
+                <div className="space-y-2">
+                  {cards.map((card, index) => (
+                    <KanbanCard key={card.id} card={card} index={index} />
+                  ))}
+                  {cards.length === 0 && !snapshot.isDraggingOver && (
+                    <div className="py-6 text-center text-[10px] text-muted-foreground/60">
+                      No tasks
+                    </div>
+                  )}
+                </div>
+              )}
+              {provided.placeholder}
             </div>
           </ScrollArea>
         )}
       </Droppable>
       {column.id === "define" && (
-        <div className="px-2 pb-2">
+        <div className="px-3 pb-2 @min-[340px]/col:px-4">
           <SessionCreator />
         </div>
       )}
