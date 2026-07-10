@@ -251,6 +251,11 @@ function formatHeartbeatAction(action: HeartbeatActionData): { type: "interventi
         type: "intervention",
         message: "Auto-approved low-risk plan — proceeding to implementation.",
       };
+    case "plan-approve-failed":
+      return {
+        type: "alert",
+        message: `Plan approval not confirmed: ${action.reason ?? "the agent may still be stuck awaiting input."}`,
+      };
     case "plan-rubber-ducked":
       return {
         type: "intervention",

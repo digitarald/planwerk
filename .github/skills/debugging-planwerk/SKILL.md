@@ -157,6 +157,19 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
 - `lib/db/schema.ts` — tables + `getDb()`.
 - `scripts/ahp-smoke.ts` — reference for live-host connection.
 
+**Plan-approval "accepted but agent still stuck"** — if `heartbeat_log` shows a
+`plan-approved` yet the card sits in plan awaiting input, check whether the
+approval was *applied*, not just dispatched. `answerInput`
+(`lib/ahp/session-messenger.ts`) reports `success` only after it re-reads
+`SessionState.inputNeeded` and confirms the request left the aggregate
+(`client.ping()` alone flushes the transport — it does NOT confirm the host
+applied the answer). The presence/removal predicate is the alias-free, unit-
+tested `lib/ahp/input-presence.ts` (`isInputResolved` etc.). When an accept
+dispatches but never gets consumed, `runPlanApprovalPipeline` retries once then
+emits a **`plan-approve-failed`** heartbeat action (mirror of
+`plan-rubber-duck-failed`) instead of a phantom `plan-approved` — so look for
+that action in `heartbeat_log`/the orchestrator feed.
+
 **AHP status bits** (`lib/ahp/types.ts`) — decode a raw `status` number:
 `Idle=1`, `Error=2`, `InProgress=8`, `InputNeeded=24` (**composite** `8|16`),
 `IsRead=32`, `IsArchived=64`. `InputNeeded` includes the `InProgress` bit — test it as

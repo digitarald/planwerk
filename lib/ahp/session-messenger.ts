@@ -1,11 +1,12 @@
 import "server-only";
 
-import type { ChatState, SessionChatInputRequest, SessionLifecycle, Turn } from "@microsoft/agent-host-protocol";
+import type { ChatState, SessionChatInputRequest, SessionLifecycle, SessionState, Turn } from "@microsoft/agent-host-protocol";
 
 import { getAHPClient, releaseAHPClient } from "./client-manager";
 import { asSessionState, readChatState, readSessionState } from "./snapshot";
 import { AHPStatus, parseAHPStatus } from "./types";
 import { buildFreeformAnswer } from "./answer-value";
+import { findChatInputEntry, findEntryById as findEntryByIdPure, isInputResolved } from "./input-presence";
 import {
   chatTurnStarted,
   chatQueuedMessage,
@@ -82,46 +83,68 @@ export async function injectMessage(
   }
 }
 
+/** Find a mirrored chat elicitation in `inputNeeded` by its `ChatInputRequest.id`. */
+function findChatInput(
+  inputNeeded: SessionState["inputNeeded"],
+  requestId: string,
+): SessionChatInputRequest | undefined {
+  return findChatInputEntry(inputNeeded ?? undefined, requestId) as SessionChatInputRequest | undefined;
+}
+
 /**
  * Answer a pending *elicitation* (chatInput-kind) request on an AHP session.
- * Dispatches inputAnswerChanged + inputCompleted to the request's owning chat.
+ * Dispatches inputAnswerChanged + inputCompleted to the request's owning chat,
+ * then **verifies the host actually consumed it** by re-reading
+ * `SessionState.inputNeeded` and confirming the request is gone.
+ *
+ * `client.ping()` only flushes the transport — it does not confirm the host
+ * applied the answer — so a plain dispatch+ping can report a phantom success
+ * even when the plan/question was never confirmed. We therefore poll the
+ * post-dispatch state (bounded) and key success on removal, mirroring the
+ * `inputRemoved` check in `app/api/ahp/sessions/input/route.ts`. This is what
+ * lets the orchestrator's plan-approval pipeline trust `success` before it logs
+ * `plan-approved`.
  *
  * Resolves the target chat and validates staleness from the session-level
  * `SessionState.inputNeeded` aggregate (AHP 0.5+) — the authoritative source,
  * since `defaultChat` is documented as only a UI routing hint and may not be
- * the chat the request actually lives on. Mirrors the logic in
- * `app/api/ahp/sessions/input/route.ts`. Falls back to `defaultChat` +
+ * the chat the request actually lives on. Falls back to `defaultChat` +
  * `ChatState.inputRequests` only when a host doesn't populate `inputNeeded`.
  *
  * This function only handles `chatInput`-kind entries. Tool-call
  * confirmations (`toolConfirmation` / `toolClientExecution`) are a different
  * wire shape (`chat/toolCallConfirmed` etc., see `actions.ts`) and are not
  * answered here — see `app/api/ahp/sessions/input/route.ts` for that path.
+ *
+ * `success` is true only when the answer was **applied** (the request left
+ * `inputNeeded`). `stale` marks a request that was already gone before we
+ * dispatched. A dispatched-but-not-applied answer returns
+ * `{ success: false, stale: false }`.
  */
 export async function answerInput(
   hostUrl: string,
   sessionUri: string,
   requestId: string,
   response: "accept" | "decline" | "cancel",
-  answers?: Record<string, unknown>
+  answers?: Record<string, unknown>,
+  options?: { verifyTimeoutMs?: number; pollIntervalMs?: number },
 ): Promise<{ success: boolean; stale?: boolean }> {
+  const verifyTimeoutMs = options?.verifyTimeoutMs ?? 3_000;
+  const pollMs = options?.pollIntervalMs ?? 400;
   const client = await getAHPClient(hostUrl);
 
   try {
     const sessionState = await readSessionState(client, sessionUri);
     const inputNeeded = sessionState?.inputNeeded;
 
-    const chatEntry = inputNeeded?.find(
-      (e) => (e.kind as string) === "chatInput" && (e as SessionChatInputRequest).request.id === requestId,
-    ) as SessionChatInputRequest | undefined;
-
+    const chatEntry = findChatInput(inputNeeded, requestId);
     const chatUri = chatEntry?.chat ?? sessionState?.defaultChat;
     if (!chatUri) {
       debug("No chat channel found for", sessionUri);
       return { success: false };
     }
 
-    if (inputNeeded && inputNeeded.length > 0 && !chatEntry) {
+    if (inputNeeded && inputNeeded.length > 0 && !chatEntry && !findEntryByIdPure(inputNeeded, requestId)) {
       // Aggregate is populated but doesn't contain this request (either it
       // already resolved, or it's a non-chatInput kind this function can't
       // answer) — treat as stale either way so the caller re-reads state.
@@ -149,10 +172,33 @@ export async function answerInput(
     // Dispatch completion
     client.dispatch(chatUri, chatInputCompleted(requestId, response, answers));
 
-    // Verify dispatch reached the server
+    // Flush the dispatch, then verify the host actually consumed the request.
+    // `ping` alone only proves the frames reached the server — not that the
+    // answer was applied — so poll `inputNeeded` (bounded) for the request to
+    // disappear before reporting success.
     await client.ping();
 
-    debug("Answered input", requestId, "on", sessionUri);
+    const isRemoved = (state: SessionState | undefined): boolean =>
+      isInputResolved(state?.inputNeeded ?? undefined, requestId);
+
+    const deadline = Date.now() + verifyTimeoutMs;
+    let applied = false;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      const after = await readSessionState(client, sessionUri);
+      if (isRemoved(after)) {
+        applied = true;
+        break;
+      }
+      if (Date.now() >= deadline) break;
+    }
+
+    if (!applied) {
+      debug("Answer dispatched but request not consumed (not applied):", requestId, "on", sessionUri);
+      return { success: false };
+    }
+
+    debug("Answered input", requestId, "on", sessionUri, "(applied)");
     return { success: true };
   } finally {
     releaseAHPClient(hostUrl);

@@ -26,6 +26,7 @@ export type HeartbeatAction =
   | { type: "wip-violation"; phase: Phase; count: number; limit: number }
   | { type: "auto-answered"; cardId: string; answer: string }
   | { type: "plan-approved"; cardId: string }
+  | { type: "plan-approve-failed"; cardId: string; reason: string }
   | { type: "plan-rubber-ducked"; cardId: string }
   | { type: "plan-rubber-duck-failed"; cardId: string; reason: string }
   | { type: "coherence-conflict"; cardId: string; otherCardId: string; summary: string }
@@ -654,9 +655,30 @@ async function runPlanApprovalPipeline(
         value: { kind: "selected", value: approval.approveOptionId },
       },
     };
-    const { success } = await answerInput(hostUrl, card.id, input.requestId, "accept", answers);
-    if (success) {
+    // `answerInput` now returns success only when the host actually consumed the
+    // plan-approval (the request left `inputNeeded`) — a bare dispatch+ping can
+    // report a phantom success without confirming the plan. Retry once on a
+    // dispatched-but-not-applied result, then surface a failure so the card
+    // doesn't silently sit in plan while the log claims it was approved.
+    let result = await answerInput(hostUrl, card.id, input.requestId, "accept", answers);
+    if (!result.success && !result.stale) {
+      result = await answerInput(hostUrl, card.id, input.requestId, "accept", answers);
+    }
+
+    if (result.success) {
       const action: HeartbeatAction = { type: "plan-approved", cardId: card.id };
+      emit(action);
+      actions.push(action);
+    } else if (!result.stale) {
+      // Dispatched but the host never consumed it — a genuine failure. (A
+      // `stale` result means the input was already gone, e.g. a human approved
+      // it in the UI first; that's a no-op, not a failure, so stay silent and
+      // let the next tick re-evaluate the card's real state.)
+      const action: HeartbeatAction = {
+        type: "plan-approve-failed",
+        cardId: card.id,
+        reason: "Dispatched the plan approval but the host never confirmed it (still awaiting input).",
+      };
       emit(action);
       actions.push(action);
     }
