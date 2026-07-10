@@ -41,3 +41,8 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 dogfood-output
+
+# impeccable design skill: local tooling + machine-local caches (keep critiques)
+.github/skills/impeccable/
+.impeccable/*
+!.impeccable/critique/

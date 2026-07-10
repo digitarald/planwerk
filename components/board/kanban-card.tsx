@@ -47,27 +47,55 @@ interface KanbanCardProps {
 }
 
 const riskConfig: Record<RiskLevel, { color: string; label: string }> = {
-  low: { color: "text-emerald-500", label: "Low risk" },
+  // Low risk is the common, healthy case — keep it quiet so it doesn't compete
+  // with the exceptions. High risk earns a filled badge (see RiskIndicator).
+  low: { color: "text-muted-foreground/40", label: "Low risk" },
   medium: { color: "text-amber-500", label: "Medium risk" },
-  high: { color: "text-red-500", label: "High risk" },
+  high: { color: "text-red-600 dark:text-red-400", label: "High risk" },
 };
 
 function RiskIndicator({ level }: { level: RiskLevel }) {
   const { color, label } = riskConfig[level];
-  const Icon = level === "high" ? ShieldAlert : Shield;
+  // High risk reads as a filled badge so it's unmistakable at a glance; lower
+  // levels stay as a lightweight icon.
+  if (level === "high") {
+    return (
+      <span
+        title={label}
+        className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
+      >
+        <ShieldAlert className="h-3 w-3" />
+      </span>
+    );
+  }
   return (
     <span title={label}>
-      <Icon className={cn("mt-0.5 h-3.5 w-3.5 shrink-0", color)} />
+      <Shield className={cn("mt-0.5 h-3.5 w-3.5 shrink-0", color)} />
     </span>
   );
 }
 
-const attentionStyles: Record<AttentionLevel, string> = {
-  none: "",
-  "needs-human": "border-amber-400/60 animate-glow-amber",
-  stale: "opacity-60",
-  error: "shadow-glow-red border-red-400/60",
-  conflict: "shadow-glow-purple border-purple-400/60",
+/** Card surface + edge treatment per attention level. Exceptions get a tinted
+ *  surface, a solid semantic border, and a glow so they dominate the column;
+ *  `none` stays the neutral card. `stale` reads as "cooling" (dashed, muted)
+ *  rather than disabled — never dim a problem with opacity. The states that
+ *  demand immediate human action (needs-human, error) pulse; conflict/stale
+ *  are static. Reduced-motion falls back to the static glow (see globals.css). */
+const attentionSurface: Record<AttentionLevel, string> = {
+  none: "bg-card",
+  "needs-human": "bg-amber-50/70 dark:bg-amber-950/25",
+  stale: "bg-muted/40",
+  error: "bg-red-50/70 dark:bg-red-950/25",
+  conflict: "bg-purple-50/60 dark:bg-purple-950/25",
+};
+
+const attentionEdge: Record<AttentionLevel, string> = {
+  none: "border-border/60",
+  "needs-human":
+    "border-amber-400 shadow-glow-amber animate-glow-amber dark:border-amber-500/70",
+  stale: "border-dashed border-border",
+  error: "border-red-400 shadow-glow-red animate-glow-red dark:border-red-500/70",
+  conflict: "border-purple-400 shadow-glow-purple dark:border-purple-500/70",
 };
 
 function RuntimeIndicator({ status }: { status: RuntimeStatus }) {
@@ -140,8 +168,8 @@ function GateIndicator({ status }: { status: GateStatus }) {
       return <span title="Evaluating gates"><Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary/70" /></span>;
     case "failed":
       return (
-        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400" title="Gate check failed">
-          <ShieldX className="h-2.5 w-2.5" />
+        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold text-white" title="Gate check failed">
+          <ShieldX className="h-3 w-3" />
           Gate
         </span>
       );
@@ -269,9 +297,10 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
               }}
               style={style as CSSProperties | undefined}
               className={cn(
-                "cursor-pointer rounded-lg border border-border/60 bg-card p-2 shadow-elevation-xs transition-all duration-150 hover:-translate-y-0.5 hover:shadow-elevation-sm hover:border-primary/30 focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1 @min-[340px]/col:p-2.5",
+                "cursor-pointer rounded-lg border p-2 shadow-elevation-xs transition-all duration-150 hover:-translate-y-0.5 hover:shadow-elevation-sm hover:border-primary/30 focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1 @min-[340px]/col:p-2.5",
+                attentionSurface[card.attention],
+                attentionEdge[card.attention],
                 snapshot.isDragging && "scale-[1.02] shadow-elevation-lg border-primary/30",
-                attentionStyles[card.attention],
                 card.isArchived && "opacity-60"
               )}
             >

@@ -220,4 +220,36 @@
   .animate-glow-amber {
     animation: pulse-glow-amber 2s ease-in-out infinite;
   }
+
+  @keyframes pulse-glow-red {
+    0%, 100% {
+      box-shadow: 0 1px 2px oklch(0.25 0.02 250 / 0.06), 0 0 0 1px oklch(0.55 0.2 26 / 0.35), 0 2px 8px oklch(0.55 0.2 26 / 0.15);
+    }
+    50% {
+      box-shadow: 0 1px 2px oklch(0.25 0.02 250 / 0.06), 0 0 0 1px oklch(0.55 0.2 26 / 0.5), 0 2px 12px oklch(0.55 0.2 26 / 0.24);
+    }
+  }
+
+  .animate-glow-red {
+    animation: pulse-glow-red 2s ease-in-out infinite;
+  }
+
+  /* Motion is reserved for the states that demand immediate human action
+     (needs-human, error). Honor reduced-motion: drop the pulse and fall back
+     to the static glow the same classes already carry, so the emphasis stays
+     without the movement. */
+  @media (prefers-reduced-motion: reduce) {
+    .animate-glow-amber {
+      animation: none;
+      box-shadow: var(--shadow-glow-amber);
+    }
+    .animate-glow-red {
+      animation: none;
+      box-shadow: var(--shadow-glow-red);
+    }
+    .animate-pulse-border,
+    .animate-pulse {
+      animation: none;
+    }
+  }
 }

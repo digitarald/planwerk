@@ -13,11 +13,13 @@ import {
   selectArchivedCount,
   UNASSIGNED_WORKSPACE,
 } from "@/lib/store/board-store";
+import { ATTENTION_META, highestAttention } from "@/lib/utils/attention";
 import { cn } from "@/lib/utils";
 
 export function TitleBar() {
   const cards = useBoardStore((s) => s.cards);
   const attentionCount = cards.filter((c) => c.attention !== "none").length;
+  const topAttention = highestAttention(cards);
 
   const workspaceFilters = useBoardStore((s) => s.workspaceFilters);
   const toggleWorkspaceFilter = useBoardStore((s) => s.toggleWorkspaceFilter);
@@ -37,11 +39,21 @@ export function TitleBar() {
         <Image src="/logo-light-64.png" alt="Planwerk" width={28} height={28} className="dark:hidden" />
         <Image src="/logo-dark-64.png" alt="Planwerk" width={28} height={28} className="hidden dark:block" />
         <span className="text-sm font-semibold">Planwerk</span>
-        {attentionCount > 0 && (
-          <span className="ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-bold text-white">
-            {attentionCount}
-          </span>
-        )}
+        {attentionCount > 0 && topAttention !== "none" && (() => {
+          const { Icon, pill, label } = ATTENTION_META[topAttention];
+          return (
+            <span
+              className={cn(
+                "ml-2 inline-flex h-5 items-center gap-1 rounded-full px-1.5 text-[11px] font-bold tabular-nums shadow-elevation-xs",
+                pill
+              )}
+              title={`${attentionCount} ${attentionCount === 1 ? "session needs" : "sessions need"} attention (${label})`}
+            >
+              <Icon className="h-3 w-3" />
+              {attentionCount}
+            </span>
+          );
+        })()}
       </div>
 
       {/* Workspace chip bar */}

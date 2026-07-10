@@ -2,12 +2,14 @@
 
 import { useShallow } from "zustand/react/shallow";
 import { Droppable } from "@hello-pangea/dnd";
+import { TriangleAlert } from "lucide-react";
 
 import { KanbanCard } from "@/components/board/kanban-card";
 import { SessionCreator } from "@/components/board/session-creator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useBoardStore, selectFilteredCards } from "@/lib/store/board-store";
 import { Column } from "@/lib/types";
+import { ATTENTION_PRIORITY, ATTENTION_META } from "@/lib/utils/attention";
 import { cn } from "@/lib/utils";
 
 interface KanbanColumnProps {
@@ -17,9 +19,15 @@ interface KanbanColumnProps {
 export function KanbanColumn({ column }: KanbanColumnProps) {
   const cards = useBoardStore(useShallow((state) => {
     const filtered = selectFilteredCards(state).filter((c) => c.phase === column.id);
-    // Sort: non-archived first (by modifiedAt desc), archived last (by modifiedAt desc)
+    // Sort so the board reads by priority, not just recency: exceptions that
+    // need a human float to the top of each column (error > conflict >
+    // needs-human > stale), then healthy cards by recency, archived last.
     return filtered.sort((a, b) => {
       if (a.isArchived !== b.isArchived) return a.isArchived ? 1 : -1;
+      if (!a.isArchived) {
+        const attn = ATTENTION_PRIORITY[b.attention] - ATTENTION_PRIORITY[a.attention];
+        if (attn !== 0) return attn;
+      }
       return b.modifiedAt - a.modifiedAt;
     });
   }));
@@ -27,6 +35,16 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
   // The define column always hosts the SessionCreator ("New task"), so it must
   // never collapse to the 60px rail even when it has no cards.
   const isEmpty = cards.length === 0 && column.id !== "define";
+
+  // Summarize the column's attention as a single severity-ranked pill so an
+  // operator sees "2 cards need you in Build" at the header, in the color of
+  // the most severe state present.
+  const attentionCards = cards.filter((c) => !c.isArchived && c.attention !== "none");
+  const topAttention = attentionCards.reduce<keyof typeof ATTENTION_META | null>((top, card) => {
+    const level = card.attention as keyof typeof ATTENTION_META;
+    if (!top || ATTENTION_META[level].rank > ATTENTION_META[top].rank) return level;
+    return top;
+  }, null);
 
   return (
     <section
@@ -55,22 +73,40 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
             </p>
           )}
         </div>
+        {!isEmpty && topAttention && (() => {
+          const { Icon, pill, label } = ATTENTION_META[topAttention];
+          return (
+            <span
+              className={cn(
+                "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums",
+                pill
+              )}
+              title={`${attentionCards.length} ${attentionCards.length === 1 ? "card needs" : "cards need"} attention (${label})`}
+            >
+              <Icon className="h-3 w-3" />
+              {attentionCards.length}
+            </span>
+          );
+        })()}
         {!isEmpty && (
           <span
             className={cn(
-              "rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-              isOverWip ? "bg-amber-100 text-amber-700" : "bg-muted text-muted-foreground"
+              "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium tabular-nums",
+              isOverWip
+                ? "bg-amber-500 font-semibold text-white ring-2 ring-amber-500/25"
+                : "bg-muted text-muted-foreground"
             )}
+            title={
+              isOverWip
+                ? `Over WIP limit: ${cards.length} of ${column.wipLimit} — flow is backing up`
+                : undefined
+            }
           >
+            {isOverWip && <TriangleAlert className="h-3 w-3" />}
             {cards.length}
             {column.wipLimit && `/${column.wipLimit}`}
           </span>
         )}
-        {(() => {
-          const attentionCount = cards.filter((c) => c.attention !== "none").length;
-          if (attentionCount === 0) return null;
-          return <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />;
-        })()}
       </div>
 
       <Droppable droppableId={column.id}>
