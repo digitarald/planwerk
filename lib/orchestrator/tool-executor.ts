@@ -91,6 +91,12 @@ async function handleAnswerInput(
   const card = context.cards.find((c) => c.id === cardId);
   if (!card) return { success: false, message: `Card ${cardId} not found` };
   if (!card.pendingInput) return { success: false, message: `Card ${card.title} has no pending input` };
+  if (card.pendingInput.kind === "toolAuthentication") {
+    return {
+      success: false,
+      message: `${card.title} requires tool authentication in VS Code; Planwerk never handles OAuth credentials.`,
+    };
+  }
 
   // Only elicitation-kind pending input has an answerable question; tool
   // confirmations (`card.pendingInput.toolConfirmation`) are a different wire

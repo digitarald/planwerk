@@ -31,6 +31,11 @@ export function getCachedSessions(hostUrl: string): CachedSession[] {
         parsed.fileChanges = parsed.filePaths.map((path: string) => ({ path, added: 0, removed: 0 }));
         delete parsed.filePaths;
       }
+      // AHP 0.6 review fields are absent from older cache rows. Preserve the
+      // old enrichment as-is; the next live changeset read supplies opaque IDs.
+      if (parsed.changesetReview && !Array.isArray(parsed.changesetReview.files)) {
+        delete parsed.changesetReview;
+      }
       enrichment = parsed as ChangesetEnrichment;
     }
     return {

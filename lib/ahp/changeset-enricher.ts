@@ -3,15 +3,15 @@ import type {
   ChangesetState,
   ChangesetFile,
   Changeset,
-  Turn,
-  ResponsePart,
 } from "@microsoft/agent-host-protocol";
 import { createHash } from "node:crypto";
 
-import { Artifact, ArtifactType, FileChange } from "@/lib/types";
+import type { Artifact, ArtifactType, ChangesetReview, FileChange } from "@/lib/types";
 
 import { readChatState, readSessionState } from "./snapshot";
 import { readTextResource } from "./resource-read";
+import { changesetReviewSummary, isChangesetFileReviewed } from "./changeset-review";
+import { extractLastAgentMessage } from "./response-parts";
 
 const LOG_PREFIX = "[ahp:changeset]";
 const debug = (...args: unknown[]) => {
@@ -64,6 +64,8 @@ export interface ChangesetEnrichment {
   planContentHash?: string;
   lastAgentMessage?: string;
   planContent?: string;
+  /** Selected channel and AHP 0.6 review facts; informational only. */
+  changesetReview?: ChangesetReview;
 }
 
 /** Stable, short freshness ref for plan content. Whitespace-insensitive so
@@ -74,55 +76,7 @@ export function hashPlanContent(content: string): string {
   return `plan:${digest}`;
 }
 
-const MAX_AGENT_MESSAGE_LENGTH = 2000;
 
-/**
- * Extract the last agent response from completed turns.
- * Takes only the trailing markdown parts after the final tool call,
- * which represents the agent's concluding response to the user.
- */
-function extractLastAgentMessage(turns: Turn[]): string | undefined {
-  if (!turns.length) return undefined;
-
-  // Walk backwards to find the last turn with markdown content
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const turn = turns[i];
-    const parts = turn.responseParts;
-    if (!parts?.length) continue;
-
-    // Find the index of the last tool call part
-    let lastToolIdx = -1;
-    for (let j = parts.length - 1; j >= 0; j--) {
-      if (parts[j].kind === "toolCall") {
-        lastToolIdx = j;
-        break;
-      }
-    }
-
-    // Collect markdown parts after the last tool call (the final response)
-    const trailingMarkdown = parts
-      .slice(lastToolIdx + 1)
-      .filter((p: ResponsePart) => p.kind === "markdown")
-      .map((p) => ("content" in p ? (p.content as string) : ""))
-      .join("")
-      .trim();
-
-    if (trailingMarkdown) {
-      return trailingMarkdown.slice(0, MAX_AGENT_MESSAGE_LENGTH);
-    }
-
-    // Fallback: if no tool calls at all, use the last markdown part
-    const allMarkdown = parts
-      .filter((p: ResponsePart) => p.kind === "markdown");
-    if (allMarkdown.length) {
-      const last = allMarkdown[allMarkdown.length - 1];
-      const text = "content" in last ? (last.content as string).trim() : "";
-      if (text) return text.slice(0, MAX_AGENT_MESSAGE_LENGTH);
-    }
-  }
-
-  return undefined;
-}
 
 function isNonCodeFile(filePath: string): boolean {
   return NON_CODE_PATTERNS.some((p) => p.test(filePath));
@@ -158,7 +112,7 @@ function titleFromPath(filePath: string): string {
  * Find the session-level changeset from a session's changeset catalogue.
  * Prefers changeKind "session", falls back to first static URI (no template vars).
  */
-function findSessionChangeset(changesets: Changeset[]): Changeset | undefined {
+export function findSessionChangeset(changesets: Changeset[]): Changeset | undefined {
   // Prefer explicit session-kind changeset
   const sessionKind = changesets.find((c) => c.changeKind === "session");
   if (sessionKind) return sessionKind;
@@ -256,9 +210,11 @@ export async function enrichFromChangeset(
       additions += added;
       deletions += removed;
       fileChanges.push({
+        id: file.id,
         path: filePath,
         added,
         removed,
+        reviewed: isChangesetFileReviewed(file),
       });
       const artifactType = classifyArtifactFile(filePath);
 
@@ -316,6 +272,7 @@ export async function enrichFromChangeset(
       planContentHash,
       lastAgentMessage,
       planContent,
+      changesetReview: changesetReviewSummary(changeset, csState.files),
     };
   } catch (err) {
     debug("enrichment failed for", sessionUri, err);

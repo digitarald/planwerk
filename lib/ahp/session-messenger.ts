@@ -1,12 +1,18 @@
 import "server-only";
 
-import type { ChatState, SessionChatInputRequest, SessionLifecycle, SessionState, Turn } from "@microsoft/agent-host-protocol";
+import type { SessionChatInputRequest, SessionLifecycle, SessionState, Turn } from "@microsoft/agent-host-protocol";
 
 import { getAHPClient, releaseAHPClient } from "./client-manager";
 import { asSessionState, readChatState, readSessionState } from "./snapshot";
 import { AHPStatus, parseAHPStatus } from "./types";
 import { buildFreeformAnswer } from "./answer-value";
-import { findChatInputEntry, findEntryById as findEntryByIdPure, isInputResolved } from "./input-presence";
+import type { PlanChangeResult } from "./plan-change-result";
+import {
+  findChatInputEntry,
+  findUniqueNewChatInputEntry,
+  hasObservedInputNeeded,
+  isInputObservedRemoved,
+} from "./input-presence";
 import {
   chatTurnStarted,
   chatQueuedMessage,
@@ -108,8 +114,8 @@ function findChatInput(
  * Resolves the target chat and validates staleness from the session-level
  * `SessionState.inputNeeded` aggregate (AHP 0.5+) — the authoritative source,
  * since `defaultChat` is documented as only a UI routing hint and may not be
- * the chat the request actually lives on. Falls back to `defaultChat` +
- * `ChatState.inputRequests` only when a host doesn't populate `inputNeeded`.
+ * the chat the request actually lives on. An unavailable aggregate is unknown,
+ * so this function does not dispatch until the host reports the request there.
  *
  * This function only handles `chatInput`-kind entries. Tool-call
  * confirmations (`toolConfirmation` / `toolClientExecution`) are a different
@@ -137,30 +143,18 @@ export async function answerInput(
     const sessionState = await readSessionState(client, sessionUri);
     const inputNeeded = sessionState?.inputNeeded;
 
-    const chatEntry = findChatInput(inputNeeded, requestId);
-    const chatUri = chatEntry?.chat ?? sessionState?.defaultChat;
-    if (!chatUri) {
-      debug("No chat channel found for", sessionUri);
+    if (!hasObservedInputNeeded(inputNeeded)) {
+      debug("Input aggregate unavailable; not dispatching:", requestId);
       return { success: false };
     }
 
-    if (inputNeeded && inputNeeded.length > 0 && !chatEntry && !findEntryByIdPure(inputNeeded, requestId)) {
-      // Aggregate is populated but doesn't contain this request (either it
-      // already resolved, or it's a non-chatInput kind this function can't
-      // answer) — treat as stale either way so the caller re-reads state.
+    const chatEntry = findChatInput(inputNeeded, requestId);
+    if (!chatEntry) {
       debug("Input request not found (stale):", requestId);
       return { success: false, stale: true };
     }
 
-    if (!inputNeeded) {
-      // Host doesn't mirror elicitations into `inputNeeded` — fall back to
-      // checking the chat's own inputRequests directly.
-      const chatState = await readChatState(client, chatUri);
-      if (!chatState?.inputRequests?.some((r) => r.id === requestId)) {
-        debug("Input request not found (stale):", requestId);
-        return { success: false, stale: true };
-      }
-    }
+    const chatUri = chatEntry.chat;
 
     // Dispatch answers
     if (answers) {
@@ -179,7 +173,7 @@ export async function answerInput(
     await client.ping();
 
     const isRemoved = (state: SessionState | undefined): boolean =>
-      isInputResolved(state?.inputNeeded ?? undefined, requestId);
+      isInputObservedRemoved(state?.inputNeeded, requestId);
 
     const deadline = Date.now() + verifyTimeoutMs;
     let applied = false;
@@ -217,6 +211,11 @@ export async function answerInput(
  * free text). The agent then revises its plan and presents a new plan-approval.
  *
  * Both steps run on one connection so the dispatches are flushed in order.
+ *
+ * `confirmed` means a later snapshot observed the feedback input disappear.
+ * `delivered-unconfirmed` means the feedback was dispatched and pinged but the
+ * shared deadline left no time to observe removal; callers must record it to
+ * avoid sending a second rubber-duck to the revised plan.
  */
 export async function requestPlanChanges(
   hostUrl: string,
@@ -224,7 +223,7 @@ export async function requestPlanChanges(
   planRequestId: string,
   feedback: string,
   options?: { timeoutMs?: number; pollIntervalMs?: number },
-): Promise<{ success: boolean; stale?: boolean }> {
+): Promise<PlanChangeResult> {
   // Allow generous time for the agent to surface the follow-up text input —
   // declining the plan is irreversible, so we must answer the "what changes?"
   // input that follows. If it never appears in time the heartbeat's stuck-card
@@ -234,23 +233,28 @@ export async function requestPlanChanges(
   const client = await getAHPClient(hostUrl);
 
   try {
-    const { chatUri } = await getSessionContext(client, sessionUri);
-    if (!chatUri) {
-      debug("No chat channel found for", sessionUri);
-      return { success: false };
+    const sessionState = await readSessionState(client, sessionUri);
+    const initialInputs = sessionState?.inputNeeded;
+    if (!hasObservedInputNeeded(initialInputs)) {
+      debug("Input aggregate unavailable; not declining plan:", planRequestId);
+      return { outcome: "undelivered" };
     }
 
-    const readInputs = async (): Promise<ChatState["inputRequests"]> => {
-      const chatState = await readChatState(client, chatUri);
-      return chatState?.inputRequests;
-    };
-
-    // The plan-approval input must still be present.
-    const current = await readInputs();
-    if (!current?.some((r) => r.id === planRequestId)) {
+    // The plan-approval input and its owning chat must still be present in the
+    // server-derived aggregate. Never use defaultChat as a routing fallback.
+    const planEntry = findChatInput(initialInputs, planRequestId);
+    if (!planEntry) {
       debug("Plan-approval request not found (stale):", planRequestId);
-      return { success: false, stale: true };
+      return { outcome: "stale" };
     }
+    const chatUri = planEntry.chat;
+    const knownRequestIds = new Set(
+      initialInputs.flatMap((entry) =>
+        entry.kind === "chatInput" && typeof entry.request.id === "string"
+          ? [entry.request.id]
+          : [],
+      ),
+    );
 
     // Step 1 — decline the plan-approval; the agent will ask what to change.
     client.dispatch(chatUri, chatInputCompleted(planRequestId, "decline"));
@@ -262,38 +266,64 @@ export async function requestPlanChanges(
     // `buildFreeformAnswer` returns the right typed value per question shape, or
     // null for shapes that can't carry prose (which we skip and keep polling).
     const deadline = Date.now() + timeoutMs;
+    let sawPlanRemoval = false;
+    let dispatchedFollowUpId: string | undefined;
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, pollMs));
-      const inputs = await readInputs();
+      const after = await readSessionState(client, sessionUri);
+      const inputs = after?.inputNeeded;
+      if (!hasObservedInputNeeded(inputs)) continue;
 
-      let matched:
-        | { requestId: string; questionId: string; value: unknown; kind: string }
-        | null = null;
-      for (const r of inputs ?? []) {
-        if (r.id === planRequestId) continue;
-        const q = r.questions?.[0];
-        if (!q) continue;
-        const value = buildFreeformAnswer(
-          { kind: q.kind, allowFreeform: (q as { allowFreeformInput?: boolean }).allowFreeformInput },
-          feedback,
-        );
-        if (value) {
-          matched = { requestId: r.id, questionId: q.id, value, kind: q.kind };
-          break;
+      if (dispatchedFollowUpId) {
+        if (isInputObservedRemoved(inputs, dispatchedFollowUpId)) {
+          debug("Requested plan changes on", sessionUri, "follow-up:", dispatchedFollowUpId);
+          return { outcome: "confirmed", followUpRequestId: dispatchedFollowUpId };
         }
+        continue;
       }
-      if (!matched) continue;
 
-      const answer = { state: "submitted", value: matched.value };
-      client.dispatch(chatUri, chatInputAnswerChanged(matched.requestId, matched.questionId, answer));
-      client.dispatch(chatUri, chatInputCompleted(matched.requestId, "accept", { [matched.questionId]: answer }));
+      if (!sawPlanRemoval) {
+        if (!isInputObservedRemoved(inputs, planRequestId)) continue;
+        sawPlanRemoval = true;
+      }
+
+      // Only accept a single new request on the original owning chat. If other
+      // inputs arrive concurrently, their identity is ambiguous; leave all of
+      // them for a later snapshot or a human rather than consuming one blindly.
+      const followUp = findUniqueNewChatInputEntry(
+        inputs,
+        chatUri,
+        knownRequestIds,
+      ) as SessionChatInputRequest | undefined;
+      const request = followUp?.request;
+      const question = request?.questions?.[0];
+      if (!followUp || !request || !question) continue;
+
+      const value = buildFreeformAnswer(
+        { kind: question.kind, allowFreeform: (question as { allowFreeformInput?: boolean }).allowFreeformInput },
+        feedback,
+      );
+      if (!value) continue;
+
+      const answer = { state: "submitted", value };
+      client.dispatch(followUp.chat, chatInputAnswerChanged(request.id, question.id, answer));
+      client.dispatch(followUp.chat, chatInputCompleted(request.id, "accept", { [question.id]: answer }));
       await client.ping();
-      debug("Requested plan changes on", sessionUri, "follow-up:", matched.requestId, "kind:", matched.kind);
-      return { success: true };
+      dispatchedFollowUpId = request.id;
+    }
+
+    if (dispatchedFollowUpId) {
+      debug(
+        "Plan-change feedback delivered but host consumption was not observed before the deadline:",
+        dispatchedFollowUpId,
+        "on",
+        sessionUri,
+      );
+      return { outcome: "delivered-unconfirmed", followUpRequestId: dispatchedFollowUpId };
     }
 
     debug("Plan-change follow-up input never appeared for", sessionUri);
-    return { success: false };
+    return { outcome: "undelivered" };
   } finally {
     releaseAHPClient(hostUrl);
   }

@@ -8,6 +8,7 @@ import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, start
 import { getCardRisk } from "./risk-store";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
 import { injectMessage, answerInput, requestPlanChanges } from "@/lib/ahp/session-messenger";
+import { isPlanChangeConfirmed, isPlanChangeDelivered } from "@/lib/ahp/plan-change-result";
 import { syncCoherence } from "./coherence-engine";
 import { runCoherenceExecutor, type ReviewCardCtx } from "./coherence-reviewer";
 import { advanceReviewToShip } from "./phase-advance";
@@ -27,7 +28,7 @@ export type HeartbeatAction =
   | { type: "auto-answered"; cardId: string; answer: string }
   | { type: "plan-approved"; cardId: string }
   | { type: "plan-approve-failed"; cardId: string; reason: string }
-  | { type: "plan-rubber-ducked"; cardId: string }
+  | { type: "plan-rubber-ducked"; cardId: string; confirmed: boolean }
   | { type: "plan-rubber-duck-failed"; cardId: string; reason: string }
   | { type: "coherence-conflict"; cardId: string; otherCardId: string; summary: string }
   | { type: "coherence-cleared"; cardId: string; otherCardId: string }
@@ -597,6 +598,9 @@ function detectPlanApproval(
   input: PendingInput | undefined
 ): { questionId: string; approveOptionId: string } | null {
   if (!input || input.questions.length !== 1) return null;
+  // Authentication and host-tool safety input must never be interpreted as a
+  // plan approval, regardless of any coincidental select options.
+  if (input.kind && input.kind !== "elicitation") return null;
   const q = input.questions[0];
   if (q.kind !== "single-select" || !q.options?.length) return null;
   // Every option must be a known plan-approval action (this avoids matching
@@ -691,22 +695,26 @@ async function runPlanApprovalPipeline(
     return actions;
   }
 
-  const { success, stale } = await requestPlanChanges(
+  const result = await requestPlanChanges(
     hostUrl,
     card.id,
     input.requestId,
     PLAN_RUBBER_DUCK_FEEDBACK
   );
-  if (success) {
+  if (isPlanChangeDelivered(result)) {
     recordPlanRubberDuck(card.id);
-    const action: HeartbeatAction = { type: "plan-rubber-ducked", cardId: card.id };
+    const action: HeartbeatAction = {
+      type: "plan-rubber-ducked",
+      cardId: card.id,
+      confirmed: isPlanChangeConfirmed(result),
+    };
     emit(action);
     actions.push(action);
   } else {
-    // The decline landed but the follow-up critique never reached the agent
-    // (e.g. it surfaced a shape we couldn't answer, or timed out). Surface it —
-    // otherwise the card sits blocked on an unanswerable question with no trace.
-    const reason = stale
+    // A stale request or an undispatched critique remains a failure. A critique
+    // dispatched at the end of the shared deadline is handled above as
+    // delivered-unconfirmed so we do not rubber-duck the revised plan again.
+    const reason = result.outcome === "stale"
       ? "Plan-approval input went stale before feedback could be delivered."
       : "Declined the plan but could not deliver the review feedback to the agent.";
     const action: HeartbeatAction = { type: "plan-rubber-duck-failed", cardId: card.id, reason };
@@ -950,5 +958,3 @@ function buildNudgeMessage(card: KanbanCard, nudgesSent: number): string {
   }
   return `This session has been idle for an extended period. Please respond with your current status.`;
 }
-
-

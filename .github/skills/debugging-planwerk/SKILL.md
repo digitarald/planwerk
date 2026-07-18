@@ -69,7 +69,11 @@ Good first queries: `card_phases` (persisted column), `heartbeat_log`
 The `session_cache` table (`session_uri, host_url, summary_json, enrichment_json,
 updated_at`) stores the last AHP `SessionSummary` and enrichment per session. This is the
 fastest way to see **what inputs `mapSessionToCard`/`inferPhase` actually saw** (status,
-`changes`, `activity`, `annotations`, `codeFileCount`, artifacts) without a live host.
+`changes`, `activity`, `annotations`, `codeFileCount`, artifacts, and informational
+`changesetReview`) without a live host. `changesetReview` contains the static session
+changeset URI, opaque file IDs, and host-owned reviewed bits; it does **not** affect gates,
+risk, or phase. Tool authentication is likewise represented only as a redacted
+`pendingInput` handoff — it never contains OAuth challenge data.
 Note `enrichment_json` may be `null` — enrichment is best-effort and async.
 
 ### 3. Live AHP host — the source of truth for runtime facts
@@ -87,9 +91,12 @@ The built-in smoke harness connects, lists sessions, and reads one session's
 AHP_SMOKE_HOST=ws://127.0.0.1:PORT npm run ahp:smoke
 ```
 For a specific session, subscribe to its `resource` and inspect `snapshot.state`:
-`inputNeeded` (pending input / approvals), `changesets` (file changes), `defaultChat`,
-`status`, `lifecycle`. Use `lib/ahp/snapshot.ts` helpers (`readSessionState`,
-`readChatState`) to narrow the snapshot union. Standalone SDK scripts run under
+`inputNeeded` (pending input / approvals / OAuth handoffs), `changesets` (file changes),
+`defaultChat`, `status`, `lifecycle`. For changeset-review state, subscribe to the selected
+static session changeset and inspect its `ChangesetState.files[].reviewed`; its catalogue
+`capabilities.review` is presence-based (an empty object is supported). Use
+`lib/ahp/snapshot.ts` helpers (`readSessionState`, `readChatState`,
+`readChangesetState`) to narrow the snapshot union. Standalone SDK scripts run under
 `node --experimental-strip-types` and can import `../lib/ahp/*.ts` **relatively** (the
 `@/` alias does not resolve outside Next/tsc).
 
@@ -105,7 +112,8 @@ card id). Contents worth reading:
 ### 5. Server-side logs — the dev server console
 Run the app with `npm run dev` (Next.js, port 3000) and watch its terminal. Log lines are
 prefixed by subsystem: `[ahp:bridge]`, `[ahp:conn]`, `[ahp:changeset]`, `[ahp:plan]`,
-`[ahp:input]`, `[ahp:sse]`, `[heartbeat]`, `[heartbeat:card-error]`, `[orchestrator-chat]`.
+`[ahp:input]`, `[ahp:review]`, `[ahp:sse]`, `[heartbeat]`, `[heartbeat:card-error]`,
+`[orchestrator-chat]`.
 Set **`AHP_DEBUG=1`** to unlock verbose `debug()` output across the AHP layer
 (`client-bridge`, `changeset-enricher`, `plan-artifact`, `enrich-card`,
 `session-messenger`) and the heartbeat — invaluable for enrichment / input-fetch traces.
@@ -139,13 +147,21 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
 
 **Code map** (where derivation happens):
 - `lib/ahp/client-bridge.ts` — connect, session sync, enrichment + pending-input fetch.
-- `lib/ahp/snapshot.ts` — narrow `Snapshot.state` to `SessionState` / `ChatState`.
+- `lib/ahp/snapshot.ts` — narrow `Snapshot.state` to `SessionState` / `ChatState` /
+  `ChangesetState`.
 - `lib/ahp/map-session.ts` — `SessionSummary` → `KanbanCard`, phase inference, input mapping.
 - `lib/ahp/enrich-card.ts` — assembles DB-backed card facts: gate status, review
   findings, escalation/coherence overlays, and `card.gateBlocker` (the
   human-readable "why isn't this advancing" reason shown when `gateStatus` is a
   silent `pending`, e.g. "Plan review not started").
 - `lib/ahp/changeset-enricher.ts`, `lib/ahp/plan-artifact.ts` — file/artifact enrichment.
+- `lib/ahp/changeset-review.ts` and `app/api/ahp/sessions/review/route.ts` — the narrow
+  **AHP 0.6 compatibility adapter** and mutation path for host-owned file review bits.
+  They are not an official SDK migration: npm still supplies the 0.5 SDK, so the adapter
+  uses structural 0.6 wire shapes until the SDK publishes 0.6.
+- `lib/ahp/tool-safety.ts` — redacts `toolAuthentication` to a VS Code handoff and validates
+  host-provided confirmation options/tool-safety state. Host tool safety is not Planwerk
+  card risk and never advances a phase.
 - `lib/ahp/types.ts` — `AHPStatus` bits + `parseAHPStatus`.
 - `app/api/ahp/events/route.ts` — SSE bridge + triage entry point.
 - `lib/orchestrator/{heartbeat,gate-engine,triage,risk-*}.ts` — the autonomous loop.

@@ -47,6 +47,7 @@ import {
   type GateRunView,
   isGateRunStale,
 } from "@/lib/types";
+import type { ChangesetReview } from "@/lib/types";
 import { GatePipeline } from "@/components/gates/gate-pipeline";
 import { useGateRuns } from "@/lib/hooks/use-gate-runs";
 import { cn } from "@/lib/utils";
@@ -301,6 +302,8 @@ interface CardDetailModalProps {
 
 export function CardDetailModal({ card }: CardDetailModalProps) {
   const setDetailCard = useBoardStore((s) => s.setDetailCard);
+  const updateCard = useBoardStore((s) => s.updateCard);
+  const reconcileCard = useBoardStore((s) => s.reconcileCard);
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
   const hostUrl = useConnectionStore((s) => s.hostUrl);
   const [message, setMessage] = useState("");
@@ -424,6 +427,86 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   );
   const showCurrentActivity = card.activity && !isGenericStatus(card.activity);
   const [filesExpanded, setFilesExpanded] = useState(fileChanges.length <= 12);
+  const [reviewingFileIds, setReviewingFileIds] = useState<Set<string>>(new Set());
+  const changesetReview = card.changesetReview;
+  const reviewById = new Map(changesetReview?.files.map((file) => [file.id, file]) ?? []);
+  const supportsFileReview =
+    changesetReview?.capabilities.review === true && changesetReview.files.length > 0;
+  const reviewedFileCount = changesetReview?.files.filter((file) => file.reviewed).length ?? 0;
+  const remainingReviewFileIds =
+    changesetReview?.files.filter((file) => !file.reviewed).map((file) => file.id) ?? [];
+
+  const withReviewState = (
+    review: ChangesetReview,
+    sourceFiles: typeof fileChanges,
+  ) => {
+    const byId = new Map(review.files.map((file) => [file.id, file.reviewed]));
+    return sourceFiles.map((file) =>
+      file.id && byId.has(file.id) ? { ...file, reviewed: byId.get(file.id) } : file,
+    );
+  };
+
+  const updateReviewState = async (fileIds: string[], reviewed: boolean) => {
+    if (
+      !hostUrl ||
+      !changesetReview ||
+      !changesetReview.capabilities.review ||
+      fileIds.length === 0 ||
+      fileIds.some((fileId) => !reviewById.has(fileId))
+    ) {
+      return;
+    }
+
+    const previousReview = changesetReview;
+    const previousFiles = fileChanges;
+    const optimisticReview: ChangesetReview = {
+      ...changesetReview,
+      files: changesetReview.files.map((file) =>
+        fileIds.includes(file.id) ? { ...file, reviewed } : file,
+      ),
+    };
+
+    setReviewingFileIds((current) => new Set([...current, ...fileIds]));
+    updateCard(card.id, {
+      changesetReview: optimisticReview,
+      fileChanges: withReviewState(optimisticReview, fileChanges),
+    });
+
+    try {
+      const response = await fetch("/api/ahp/sessions/review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hostUrl, sessionUri: card.id, files: fileIds, reviewed }),
+      });
+      const data = (await response.json().catch(() => null)) as
+        | { ok?: boolean; review?: ChangesetReview }
+        | null;
+
+      // Always prefer the host's re-read, including a stale/racing response.
+      if (data?.review) {
+        reconcileCard(card.id, {
+          changesetReview: data.review,
+          fileChanges: withReviewState(data.review, fileChanges),
+        });
+      } else if (!response.ok || !data?.ok) {
+        reconcileCard(card.id, {
+          changesetReview: previousReview,
+          fileChanges: previousFiles,
+        });
+      }
+    } catch {
+      reconcileCard(card.id, {
+        changesetReview: previousReview,
+        fileChanges: previousFiles,
+      });
+    } finally {
+      setReviewingFileIds((current) => {
+        const next = new Set(current);
+        for (const fileId of fileIds) next.delete(fileId);
+        return next;
+      });
+    }
+  };
 
   return (
     <div className="absolute inset-0 z-modal-backdrop flex items-start justify-center">
@@ -600,15 +683,35 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               {/* Changed Files */}
               {fileChanges.length > 0 && (
                 <section>
-                  <button
-                    type="button"
-                    onClick={() => setFilesExpanded(!filesExpanded)}
-                    className={cn("mb-2 flex w-full items-center gap-1 hover:text-foreground transition-colors", SECTION_LABEL_CLASS)}
-                  >
-                    <ChevronDown className={cn("h-3 w-3 transition-transform", !filesExpanded && "-rotate-90")} />
-                    Changed Files
-                    <span className="ml-1 font-normal normal-case tabular-nums">({fileChanges.length})</span>
-                  </button>
+                  <div className="mb-2 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setFilesExpanded(!filesExpanded)}
+                      className={cn("flex min-w-0 flex-1 items-center gap-1 text-left hover:text-foreground transition-colors", SECTION_LABEL_CLASS)}
+                    >
+                      <ChevronDown className={cn("h-3 w-3 shrink-0 transition-transform", !filesExpanded && "-rotate-90")} />
+                      Changed Files
+                      <span className="ml-1 font-normal normal-case tabular-nums">({fileChanges.length})</span>
+                      {supportsFileReview && (
+                        <span className="ml-1 font-normal normal-case tabular-nums text-muted-foreground">
+                          · {reviewedFileCount}/{changesetReview.files.length} reviewed
+                        </span>
+                      )}
+                    </button>
+                    {supportsFileReview && remainingReviewFileIds.length > 0 && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-6 shrink-0 px-2 text-[10px]"
+                        disabled={!hostUrl || reviewingFileIds.size > 0}
+                        title={!hostUrl ? "Connect to the agent host to update review progress" : undefined}
+                        onClick={() => void updateReviewState(remainingReviewFileIds, true)}
+                      >
+                        Mark {remainingReviewFileIds.length} remaining
+                      </Button>
+                    )}
+                  </div>
                   {filesExpanded && (
                     <div className="space-y-px rounded-lg border border-border/60 bg-muted/20 py-1">
                       {[...fileChanges]
@@ -618,10 +721,20 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                           const hasStats = file.added > 0 || file.removed > 0;
                           return (
                             <div
-                              key={file.path}
+                              key={file.id ?? file.path}
                               title={file.path}
                               className="group flex items-center gap-2 px-2.5 py-1 hover:bg-muted/50"
                             >
+                              {supportsFileReview && file.id && reviewById.has(file.id) && (
+                                <input
+                                  type="checkbox"
+                                  checked={reviewById.get(file.id)?.reviewed === true}
+                                  disabled={!hostUrl || reviewingFileIds.size > 0}
+                                  onChange={(event) => void updateReviewState([file.id!], event.target.checked)}
+                                  aria-label={`Mark ${display.name} as reviewed`}
+                                  className="h-3.5 w-3.5 shrink-0 accent-primary"
+                                />
+                              )}
                               <FilePen className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
                               <span className="min-w-0 flex-1 truncate text-[12px] font-mono">
                                 <span className="text-foreground">{display.name}</span>
@@ -797,7 +910,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                     Awaiting Input
                   </SectionLabel>
                   {/* Show last agent message as context when available */}
-                  {card.lastAgentMessage && (
+                  {card.lastAgentMessage && card.pendingInput?.kind !== "toolAuthentication" && (
                     <div className="mb-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5">
                       <p className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">
                         Agent

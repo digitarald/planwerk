@@ -51,6 +51,9 @@ export interface AutoAnswerResult {
  */
 export function shouldAutoAnswer(card: KanbanCard): boolean {
   if (!card.pendingInput) return false;
+  // Tool confirmation, execution, and OAuth authentication are host-tool
+  // safety workflows, never elicitation work for the orchestrator.
+  if (card.pendingInput.kind && card.pendingInput.kind !== "elicitation") return false;
 
   // Conservative: only auto-answer cards with an *explicit* risk assessment.
   // The card's own `risk` field defaults to "low" before triage, so relying on
@@ -75,6 +78,9 @@ export async function autoAnswer(
   }
 
   const input = card.pendingInput;
+  if (input.kind && input.kind !== "elicitation") {
+    return { answered: false, reason: "Pending input is not an automatable elicitation" };
+  }
   const question = input.questions[0];
   if (!question) {
     return { answered: false, reason: "No questions in pending input" };

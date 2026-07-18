@@ -1,4 +1,4 @@
-import { Artifact, KanbanCard, PendingInput, PendingInputQuestion, PendingInputOptionKind, Phase, RiskLevel, RuntimeStatus, ToolConfirmationDetails, ToolConfirmationOption } from "@/lib/types";
+import { Artifact, KanbanCard, PendingInput, PendingInputQuestion, PendingInputOptionKind, Phase, RiskLevel, RuntimeStatus, ToolAuthenticationDetails, ToolConfirmationDetails, ToolConfirmationOption } from "@/lib/types";
 import type {
   ChatInputRequest,
   ChatInputQuestion,
@@ -10,14 +10,37 @@ import type {
 
 import { AHPSessionSummary, AHPStatus, parseAHPStatus } from "./types";
 import type { ChangesetEnrichment } from "./changeset-enricher";
+import {
+  normalizeToolRiskAssessment,
+  toolAuthenticationHandoff,
+  toolConfirmationIntent,
+} from "./tool-safety";
+
+/**
+ * AHP 0.6 extends `inputNeeded` with `toolAuthentication`, but the installed
+ * SDK's 0.5.x union does not declare it yet. Keep that extension structural and
+ * read-only until the SDK catches up.
+ */
+interface SessionToolAuthenticationRequestCompat {
+  id: string;
+  kind: "toolAuthentication";
+  chat: string;
+  turnId: string;
+  toolCall: {
+    toolCallId?: unknown;
+    displayName?: unknown;
+    toolName?: unknown;
+    [key: string]: unknown;
+  };
+}
 
 /**
  * Convert a session's aggregated `SessionState.inputNeeded` into the single most
  * actionable {@link PendingInput}. This is the AHP 0.5 session-level input surface,
- * covering elicitations, tool confirmations, and client-execution across every chat.
+ * covering elicitations, tool confirmations, authentication handoffs, and client-execution across every chat.
  *
  * Priority (most actionable first): user elicitation → tool confirmation →
- * read-only client-execution blocker.
+ * read-only authentication handoff → read-only client-execution blocker.
  *
  * `SessionInputRequestKind` / `ToolCallStatus` are ambient `const enum`s, which
  * cannot be referenced as values under `isolatedModules`; we compare their string
@@ -37,6 +60,11 @@ export function mapSessionInputNeeded(
   const toolConfirm = entries.find((e) => (e.kind as string) === "toolConfirmation");
   if (toolConfirm) {
     return mapToolConfirmation(toolConfirm as SessionToolConfirmationRequest);
+  }
+
+  const toolAuth = entries.find((e) => (e.kind as string) === "toolAuthentication");
+  if (toolAuth) {
+    return mapToolAuthentication(toolAuth as unknown as SessionToolAuthenticationRequestCompat);
   }
 
   const toolExec = entries.find((e) => (e.kind as string) === "toolClientExecution");
@@ -64,7 +92,7 @@ function mapToolConfirmation(entry: SessionToolConfirmationRequest): PendingInpu
     options = tc.options.map((o) => ({
       id: o.id,
       label: o.label,
-      intent: (o.kind as string) === "deny" ? "deny" : "approve",
+      intent: toolConfirmationIntent(o.kind),
     }));
   }
 
@@ -79,6 +107,9 @@ function mapToolConfirmation(entry: SessionToolConfirmationRequest): PendingInpu
     toolName: tc.displayName ?? tc.toolName,
     intention: tc.intention,
     options,
+    riskAssessment: normalizeToolRiskAssessment(
+      "riskAssessment" in tc ? tc.riskAssessment : undefined,
+    ),
   };
 
   return {
@@ -87,6 +118,18 @@ function mapToolConfirmation(entry: SessionToolConfirmationRequest): PendingInpu
     message: title ? `Confirm: ${title}` : "Confirm tool call",
     questions: [],
     toolConfirmation: details,
+  };
+}
+
+function mapToolAuthentication(entry: SessionToolAuthenticationRequestCompat): PendingInput {
+  const handoff = toolAuthenticationHandoff(entry.toolCall);
+  const details: ToolAuthenticationDetails = { toolName: handoff.toolName };
+  return {
+    requestId: entry.id,
+    kind: "toolAuthentication",
+    message: handoff.message,
+    questions: [],
+    toolAuthentication: details,
   };
 }
 
@@ -295,6 +338,7 @@ export function mapSessionToCard(
     artifacts: artifacts.length > 0 ? artifacts : undefined,
     lastAgentMessage: enrichment?.lastAgentMessage,
     fileChanges: enrichment?.fileChanges.length ? enrichment.fileChanges : undefined,
+    changesetReview: enrichment?.changesetReview,
     isArchived,
   };
 }

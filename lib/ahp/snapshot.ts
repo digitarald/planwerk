@@ -1,7 +1,12 @@
 import "server-only";
 
 import type { AhpClient } from "@microsoft/agent-host-protocol/client";
-import type { ChatState, SessionState, Snapshot } from "@microsoft/agent-host-protocol";
+import type {
+  ChangesetState,
+  ChatState,
+  SessionState,
+  Snapshot,
+} from "@microsoft/agent-host-protocol";
 
 /**
  * Typed access to AHP channel snapshots.
@@ -36,6 +41,19 @@ export function asChatState(snapshot: Snapshot | undefined): ChatState | undefin
   return snapshot.state as ChatState;
 }
 
+/** Narrow a changeset snapshot by its unique `files` array and lifecycle status. */
+export function asChangesetState(snapshot: Snapshot | undefined): ChangesetState | undefined {
+  const state = snapshot?.state;
+  if (
+    !state ||
+    !Array.isArray((state as Partial<ChangesetState>).files) ||
+    typeof (state as Partial<ChangesetState>).status !== "string"
+  ) {
+    return undefined;
+  }
+  return state as ChangesetState;
+}
+
 /**
  * One-shot read of a session channel: subscribe, capture the snapshot, then close the
  * local iterator and release the server-side subscription. Use when you need the current
@@ -64,4 +82,15 @@ export async function readChatState(
   void subscription.close();
   await client.unsubscribe(chatUri).catch(() => {});
   return asChatState(result.snapshot);
+}
+
+/** One-shot read of an already-selected static changeset channel. */
+export async function readChangesetState(
+  client: AhpClient,
+  changesetUri: string,
+): Promise<ChangesetState | undefined> {
+  const { result, subscription } = await client.subscribe(changesetUri);
+  void subscription.close();
+  await client.unsubscribe(changesetUri).catch(() => {});
+  return asChangesetState(result.snapshot);
 }

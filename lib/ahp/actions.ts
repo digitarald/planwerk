@@ -29,12 +29,25 @@ function userMessage(text: string): Message {
   return { text, origin: USER_ORIGIN };
 }
 
+/**
+ * AHP 0.6 adds `startedAt` to client-originated turn starts. Keep this
+ * compatibility extension local until the published SDK declares the field.
+ */
+export type ChatTurnStartedActionWithStartedAt = ChatTurnStartedAction & {
+  startedAt: string;
+};
+
 /** Start a new turn with a user message (idle session). */
-export function chatTurnStarted(turnId: string, text: string): ChatTurnStartedAction {
+export function chatTurnStarted(
+  turnId: string,
+  text: string,
+  startedAt: string = new Date().toISOString(),
+): ChatTurnStartedActionWithStartedAt {
   return {
     type: "chat/turnStarted" as ChatTurnStartedAction["type"],
     turnId,
     message: userMessage(text),
+    startedAt,
   };
 }
 

@@ -203,6 +203,7 @@ interface HeartbeatActionData {
   to?: string;
   message?: string;
   reason?: string;
+  confirmed?: boolean;
   gateType?: string;
   iteration?: number;
   otherCardId?: string;
@@ -259,7 +260,9 @@ function formatHeartbeatAction(action: HeartbeatActionData): { type: "interventi
     case "plan-rubber-ducked":
       return {
         type: "intervention",
-        message: "Sent plan back for a rubber-duck review before approval.",
+        message: action.confirmed
+          ? "Sent plan back for a rubber-duck review before approval."
+          : "Sent plan back for a rubber-duck review; host consumption was not confirmed before the deadline.",
       };
     case "plan-rubber-duck-failed":
       return {

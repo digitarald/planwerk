@@ -245,7 +245,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   }
 
   /**
-   * One-shot fetch of inputRequests for a session in InputNeeded state.
+   * One-shot fetch of session-level inputNeeded for a session in InputNeeded state.
    * Subscribes to get the snapshot, extracts input data, then immediately unsubscribes.
    * Uses a dirty flag to refetch if the session changes while a fetch is in-flight.
    */

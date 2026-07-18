@@ -19,6 +19,15 @@ export interface InputNeededEntryLike {
   kind?: string;
   /** The chat-input request, present on `chatInput` entries. */
   request?: { id?: string };
+  /** Owning chat channel, supplied by the session aggregate. */
+  chat?: string;
+}
+
+/** Whether the host has supplied an aggregate snapshot, even when it is empty. */
+export function hasObservedInputNeeded<T>(
+  inputNeeded: readonly T[] | undefined | null,
+): inputNeeded is readonly T[] {
+  return Array.isArray(inputNeeded);
 }
 
 /**
@@ -41,14 +50,36 @@ export function findEntryById<T extends InputNeededEntryLike>(
 }
 
 /**
- * True when `requestId` matches no entry in the aggregate — matched neither by
- * `request.id` nor by opaque entry id. Used both to detect a stale request
- * (gone before we dispatched) and an *applied* answer (gone after we
- * dispatched).
+ * True only when an *observed* aggregate contains no matching entry. An
+ * unavailable aggregate is unknown, not evidence that an input was removed.
  */
-export function isInputResolved(
+export function isInputObservedRemoved(
   inputNeeded: readonly InputNeededEntryLike[] | undefined | null,
   requestId: string,
 ): boolean {
-  return !findChatInputEntry(inputNeeded, requestId) && !findEntryById(inputNeeded, requestId);
+  return hasObservedInputNeeded(inputNeeded)
+    && !findChatInputEntry(inputNeeded, requestId)
+    && !findEntryById(inputNeeded, requestId);
+}
+
+/**
+ * Return a single chat-input request that appeared after a known snapshot on
+ * the specified chat. More than one new request is ambiguous, so callers must
+ * wait rather than answer an unrelated concurrent input.
+ */
+export function findUniqueNewChatInputEntry<T extends InputNeededEntryLike>(
+  inputNeeded: readonly T[] | undefined | null,
+  chatUri: string,
+  knownRequestIds: ReadonlySet<string>,
+): T | undefined {
+  if (!hasObservedInputNeeded(inputNeeded)) return undefined;
+
+  const candidates = inputNeeded.filter(
+    (entry) =>
+      entry.kind === "chatInput"
+      && entry.chat === chatUri
+      && typeof entry.request?.id === "string"
+      && !knownRequestIds.has(entry.request.id),
+  );
+  return candidates.length === 1 ? candidates[0] : undefined;
 }

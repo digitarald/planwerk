@@ -201,7 +201,8 @@ async function maybeWriteSmokeTurn(
   }
 
   const turnId = randomUUID();
-  const text = `Planwerk AHP smoke test ping (${new Date().toISOString()})`;
+  const startedAt = new Date().toISOString();
+  const text = `Planwerk AHP smoke test ping (${startedAt})`;
   const status = Number(sessionState.status);
   const inProgress = parseAHPStatus(status).isInProgress;
 
@@ -209,8 +210,8 @@ async function maybeWriteSmokeTurn(
     client.dispatch(chatUri, chatQueuedMessage(turnId, text));
     log(`AHP_SMOKE_WRITE=1 queued benign smoke message ${turnId}.`);
   } else {
-    client.dispatch(chatUri, chatTurnStarted(turnId, text));
-    log(`AHP_SMOKE_WRITE=1 started benign smoke turn ${turnId}.`);
+    client.dispatch(chatUri, chatTurnStarted(turnId, text, startedAt));
+    log(`AHP_SMOKE_WRITE=1 started benign smoke turn ${turnId} at ${startedAt}.`);
   }
 
   await client.ping();

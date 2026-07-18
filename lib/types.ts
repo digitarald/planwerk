@@ -63,14 +63,21 @@ export interface PendingInputQuestion {
  * - `toolExecution` — a running tool delegated to an active client. Planwerk provides
  *   no tools, so these are surfaced read-only as a blocker.
  */
-export type PendingInputKind = "elicitation" | "toolConfirmation" | "toolExecution";
+export type PendingInputKind = "elicitation" | "toolConfirmation" | "toolExecution" | "toolAuthentication";
 
 /** An approve/deny confirmation option offered by the host for a tool call. */
 export interface ToolConfirmationOption {
   id: string;
   label: string;
   /** Whether choosing this option approves or denies the tool call. */
-  intent: "approve" | "deny";
+  intent: "approve" | "deny" | "unknown";
+}
+
+/** Host-owned safety judgment for one tool call, never a card risk assessment. */
+export interface ToolRiskAssessment {
+  status: "loading" | "complete";
+  reason?: string;
+  safety?: number;
 }
 
 /** Details needed to render and answer a tool-call confirmation. */
@@ -87,6 +94,13 @@ export interface ToolConfirmationDetails {
   intention?: string;
   /** Server-provided options; when present, render these instead of plain approve/deny. */
   options?: ToolConfirmationOption[];
+  /** AHP host tool-safety judgment. This never affects card risk, gates, or phase. */
+  riskAssessment?: ToolRiskAssessment;
+}
+
+/** Read-only handoff for an OAuth flow that only VS Code can complete. */
+export interface ToolAuthenticationDetails {
+  toolName?: string;
 }
 
 export interface PendingInput {
@@ -98,12 +112,33 @@ export interface PendingInput {
   kind?: PendingInputKind;
   /** Present when `kind === "toolConfirmation"`. */
   toolConfirmation?: ToolConfirmationDetails;
+  /** Present when `kind === "toolAuthentication"`; intentionally contains no OAuth data. */
+  toolAuthentication?: ToolAuthenticationDetails;
 }
 
 export interface FileChange {
+  /** Opaque AHP changeset-file identity. Missing on older cached enrichments. */
+  id?: string;
   path: string;
   added: number;
   removed: number;
+  /** AHP 0.6 per-file review state. Missing is equivalent to not reviewed. */
+  reviewed?: boolean;
+}
+
+/** Informational, capability-gated review state from an AHP changeset. */
+export interface ChangesetReview {
+  /** The server-selected static session changeset channel. */
+  changesetUri: string;
+  /** Mirrors the AHP changeset catalogue's presence-based capability flags. */
+  capabilities: {
+    review: boolean;
+  };
+  /** Opaque file identities and their authoritative reviewed state. */
+  files: Array<{
+    id: string;
+    reviewed: boolean;
+  }>;
 }
 
 export interface KanbanCard {
@@ -147,6 +182,8 @@ export interface KanbanCard {
   pendingInput?: PendingInput;
   lastAgentMessage?: string;
   fileChanges?: FileChange[];
+  /** Informational AHP changeset review progress; never affects SDLC state. */
+  changesetReview?: ChangesetReview;
   isArchived?: boolean;
   reviewFindings?: ReviewFinding[];
   /** Recent status lines (oldest→newest), for the fading progress trail. */

@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/lib/store/connection-store";
 import type { PendingInput, PendingInputQuestion } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { canApproveToolConfirmation } from "@/lib/ahp/tool-safety";
 
 interface PendingInputCardProps {
   cardId: string;
@@ -394,11 +395,25 @@ export function PendingInputCard({ cardId, input }: PendingInputCardProps) {
     );
   }
 
+  // OAuth authentication is intentionally read-only. VS Code owns the
+  // authenticate command and Planwerk never receives any OAuth data.
+  if (input.kind === "toolAuthentication") {
+    return (
+      <div className="mt-1.5 space-y-1 rounded-lg border border-amber-200/80 bg-gradient-to-b from-amber-50/80 to-amber-50/40 px-2.5 py-2 dark:border-amber-800/30 dark:from-amber-950/20 dark:to-amber-950/10">
+        <p className="text-[11px] font-medium text-amber-900 dark:text-amber-200 leading-snug">
+          {input.message || "Tool authentication required"}
+        </p>
+        <p className="text-[10px] text-muted-foreground">Complete authentication in VS Code.</p>
+      </div>
+    );
+  }
+
   // Tool-call confirmation — approve/deny (or host-provided options). Approving or
   // denying a tool call is a management decision, so Planwerk surfaces it inline.
   if (input.kind === "toolConfirmation" && input.toolConfirmation) {
     const tc = input.toolConfirmation;
     const options = tc.options ?? [];
+    const approveAllowed = canApproveToolConfirmation(tc.riskAssessment);
     return (
       <div className="mt-1.5 space-y-2 rounded-lg border border-amber-200/80 bg-gradient-to-b from-amber-50/80 to-amber-50/40 px-2.5 py-2 dark:border-amber-800/30 dark:from-amber-950/20 dark:to-amber-950/10">
         <div className="space-y-0.5">
@@ -411,24 +426,48 @@ export function PendingInputCard({ cardId, input }: PendingInputCardProps) {
           {tc.confirmKind === "result" && (
             <p className="text-[10px] text-muted-foreground">Review the result before it is used.</p>
           )}
+          {tc.riskAssessment && (
+            <div className="mt-1 rounded border border-amber-200/70 bg-amber-100/40 px-1.5 py-1 text-[10px] text-amber-900 dark:border-amber-800/40 dark:bg-amber-950/20 dark:text-amber-200">
+              <span className="font-medium">Host tool safety:</span>{" "}
+              {tc.riskAssessment.status === "loading"
+                ? "Assessing… Approval is unavailable until this finishes."
+                : `${tc.riskAssessment.safety !== undefined ? `${Math.round(tc.riskAssessment.safety * 100)}% safe` : "Assessment complete"}${tc.riskAssessment.reason ? ` — ${tc.riskAssessment.reason}` : ""}`}
+            </div>
+          )}
         </div>
         <div className="flex flex-wrap gap-1.5">
           {options.length > 0 ? (
             options.map((opt) => (
               <button
                 key={opt.id}
+                disabled={
+                  opt.intent === "unknown" ||
+                  (opt.intent === "approve" && !approveAllowed)
+                }
                 className={cn(
                   "inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-[10px] font-medium shadow-sm transition-all",
+                  "disabled:cursor-not-allowed disabled:opacity-50",
                   opt.intent === "approve"
                     ? "border-primary/40 bg-primary text-primary-foreground hover:bg-primary/90 hover:shadow-md"
-                    : "border-border bg-background text-foreground hover:border-primary/30 hover:bg-primary/5 hover:shadow-md"
+                    : opt.intent === "deny"
+                      ? "border-border bg-background text-foreground hover:border-primary/30 hover:bg-primary/5 hover:shadow-md"
+                      : "border-border bg-muted text-muted-foreground"
                 )}
+                title={
+                  opt.intent === "unknown"
+                    ? "This host option is not supported by Planwerk"
+                    : opt.intent === "approve" && !approveAllowed
+                      ? "Wait for the host tool-safety assessment before approving"
+                      : undefined
+                }
                 onClick={(e) => {
                   e.stopPropagation();
-                  void handleToolConfirm(opt.intent === "approve", opt.id);
+                  if (opt.intent !== "unknown" && (opt.intent !== "approve" || approveAllowed)) {
+                    void handleToolConfirm(opt.intent === "approve", opt.id);
+                  }
                 }}
               >
-                {opt.intent === "approve" ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
+                {opt.intent === "approve" ? <Check className="h-3 w-3" /> : opt.intent === "deny" ? <X className="h-3 w-3" /> : <HelpCircle className="h-3 w-3" />}
                 {opt.label}
               </button>
             ))
@@ -436,9 +475,11 @@ export function PendingInputCard({ cardId, input }: PendingInputCardProps) {
             <>
               <button
                 className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary px-2.5 py-1 text-[10px] font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90 hover:shadow-md"
+                disabled={!approveAllowed}
+                title={!approveAllowed ? "Wait for the host tool-safety assessment before approving" : undefined}
                 onClick={(e) => {
                   e.stopPropagation();
-                  void handleToolConfirm(true);
+                  if (approveAllowed) void handleToolConfirm(true);
                 }}
               >
                 <Check className="h-3 w-3" />
