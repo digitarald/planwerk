@@ -32,9 +32,7 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
     });
   }));
   const isOverWip = column.wipLimit ? cards.length > column.wipLimit : false;
-  // The define column always hosts the SessionCreator ("New task"), so it must
-  // never collapse to the 60px rail even when it has no cards.
-  const isEmpty = cards.length === 0 && column.id !== "define";
+  const isEmpty = cards.length === 0;
 
   // Summarize the column's attention as a single severity-ranked pill so an
   // operator sees "2 cards need you in Build" at the header, in the color of
@@ -137,8 +135,11 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
         )}
       </Droppable>
       {column.id === "define" && (
-        <div className="px-3 pb-2 @min-[340px]/col:px-4">
-          <SessionCreator />
+        <div className={cn(
+          "relative pb-2",
+          isEmpty ? "px-1" : "px-3 @min-[340px]/col:px-4",
+        )}>
+          <SessionCreator compact={isEmpty} />
         </div>
       )}
     </section>

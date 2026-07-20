@@ -15,7 +15,11 @@ import { usePersistentState } from "@/lib/hooks/use-persistent-state";
 
 const LAST_WORKSPACE_KEY = "planwerk-last-workspace";
 
-export function SessionCreator() {
+interface SessionCreatorProps {
+  compact?: boolean;
+}
+
+export function SessionCreator({ compact = false }: SessionCreatorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [task, setTask] = useState("");
   const [isCreating, setIsCreating] = useState(false);
@@ -91,10 +95,12 @@ export function SessionCreator() {
       <button
         type="button"
         onClick={() => setIsOpen(true)}
-        className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+        className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+        aria-label={compact ? "New task" : undefined}
+        title={compact ? "New task" : undefined}
       >
         <Plus className="h-3.5 w-3.5" />
-        <span>New task</span>
+        {!compact && <span>New task</span>}
       </button>
     );
   }
@@ -102,7 +108,9 @@ export function SessionCreator() {
   return (
     <form
       onSubmit={handleCreate}
-      className="space-y-2 rounded-lg border border-border/70 bg-card p-2 shadow-elevation-xs"
+      className={`space-y-2 rounded-lg border border-border/70 bg-card p-2 shadow-elevation-xs ${
+        compact ? "absolute bottom-0 left-full z-dropdown ml-2 w-72" : ""
+      }`}
     >
       <Textarea
         value={task}
