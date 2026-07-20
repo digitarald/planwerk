@@ -35,8 +35,9 @@ lib/store/board-store.ts (Zustand)  ── client card state
         ▼
 components/board/*  ── what you see
 
-lib/orchestrator/heartbeat.ts  ── separate loop; reads cards, runs gates/reviews,
-                                   advances phase, answers input (writes to SQLite)
+lib/orchestrator/heartbeat.ts  ── separate loop; reads workspace-scoped cards, runs
+                                   gates/reviews, advances phase, answers input
+                                   (writes to SQLite)
 ```
 
 Two invariants worth re-checking before deep debugging (see `AGENTS.md`):
@@ -163,7 +164,12 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
   host-provided confirmation options/tool-safety state. Host tool safety is not Planwerk
   card risk and never advances a phase.
 - `lib/ahp/types.ts` — `AHPStatus` bits + `parseAHPStatus`.
-- `app/api/ahp/events/route.ts` — SSE bridge + triage entry point.
+- `app/api/ahp/events/route.ts` — SSE bridge + triage entry point. Each connected board
+  sends its selected workspace paths as `workspaceScope`; all automation is limited to
+  the union of cards visible in those connected tabs. An unfiltered tab intentionally
+  permits all workspaces. A malformed supplied scope fails closed, while an omitted
+  scope preserves compatibility with older clients. The browser's “hide done” setting
+  does not further limit automation because archived cards are already excluded.
 - `lib/orchestrator/{heartbeat,gate-engine,triage,risk-*}.ts` — the autonomous loop.
   Note: a plain plan-phase card only gets its `plan-review` gate injected when
   **idle**. A card that stays `running` (heads-down coding) won't advance until it
@@ -225,3 +231,6 @@ both the run and the card? Pure-logic tests live in
    derivation/enrichment/input-fetch path execute.
 4. Confirm the exact card id: `copilotcli:/<uuid>` — the app's own dogfood session is a
    card too, so make sure you're inspecting the *right* one before drawing conclusions.
+5. If a card is unexpectedly not being automated, inspect the workspace filters in every
+   connected board tab. Cards outside their union are intentionally deferred: triage,
+   gates, reviews, nudges, auto-answers, phase advances, and coherence checks do not run.

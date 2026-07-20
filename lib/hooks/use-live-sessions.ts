@@ -41,6 +41,7 @@ async function hydratePersistedPhases(
 export function useLiveSessions() {
   const status = useConnectionStore((s) => s.status);
   const hostUrl = useConnectionStore((s) => s.hostUrl);
+  const workspaceFilters = useBoardStore((s) => s.workspaceFilters);
   const setConnected = useConnectionStore((s) => s.setConnected);
   const setError = useConnectionStore((s) => s.setError);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -66,6 +67,7 @@ export function useLiveSessions() {
   // ephemeral and not replayed, so that reopen was dropping anything the host
   // emitted in the gap.
   const shouldConnect = status === "connected" || status === "reconnecting";
+  const workspaceScope = JSON.stringify(Array.from(workspaceFilters).sort());
 
   useEffect(() => {
     if (!shouldConnect) {
@@ -82,6 +84,7 @@ export function useLiveSessions() {
     let sseUrl = "/api/ahp/events";
     if (hostUrl) {
       sseUrl += `?host=${encodeURIComponent(hostUrl)}`;
+      sseUrl += `&workspaceScope=${encodeURIComponent(workspaceScope)}`;
     }
 
     console.info("[ahp:sse]", `opening stream →`, sseUrl);
@@ -192,7 +195,7 @@ export function useLiveSessions() {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [shouldConnect, hostUrl, setCards, updateCard, reconcileCard, addCard, removeCard, addFeedItem, setMonitoringStatus, setConnected, setError]);
+  }, [shouldConnect, hostUrl, workspaceScope, setCards, updateCard, reconcileCard, addCard, removeCard, addFeedItem, setMonitoringStatus, setConnected, setError]);
 }
 
 interface HeartbeatActionData {

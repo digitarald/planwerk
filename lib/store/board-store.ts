@@ -1,10 +1,11 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
+import { UNASSIGNED_WORKSPACE } from "@/lib/automation-scope";
 import { KanbanCard, Phase } from "@/lib/types";
 
 // Sentinel value for filtering cards with no project
-export const UNASSIGNED_WORKSPACE = "__unassigned__";
+export { UNASSIGNED_WORKSPACE };
 
 interface BoardState {
   cards: KanbanCard[];

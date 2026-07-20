@@ -11,6 +11,7 @@ import { triageCard } from "@/lib/orchestrator/triage";
 import { getPersistedCardPhase } from "@/lib/orchestrator/gate-engine";
 import { getCardRisk } from "@/lib/orchestrator/risk-store";
 import { startHeartbeat, stopHeartbeat, isHeartbeatRunning, type HeartbeatAction } from "@/lib/orchestrator/heartbeat";
+import { isCardInAnyAutomationScope, parseWorkspaceScope } from "@/lib/automation-scope";
 import { KanbanCard, type Phase, type RiskLevel } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -51,6 +52,7 @@ async function tryTriage(
   session: AHPSessionSummary,
   enrichment?: ChangesetEnrichment | null
 ): Promise<TriageEvent | undefined> {
+  if (!isCardInAnyAutomationScope(card, automationScopes.values())) return undefined;
   if (!TRIAGE_PHASES.includes(card.phase)) return undefined;
 
   // Only triage when the agent is done or waiting on input — not while running
@@ -153,20 +155,46 @@ function createEmptyStream(): ReadableStream<Uint8Array> {
 // Module-level card state for heartbeat access
 let currentCards: KanbanCard[] = [];
 let activeStreamCount = 0;
+let nextStreamId = 0;
+const automationScopes = new Map<number, Set<string> | null>();
 
-function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
+function getAutomationCards(): KanbanCard[] {
+  return currentCards.filter((card) =>
+    isCardInAnyAutomationScope(card, automationScopes.values())
+  );
+}
+
+function createRemoteStream(
+  hostUrl: string,
+  workspaceScope: Set<string> | null
+): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const abortController = new AbortController();
+  const streamId = nextStreamId++;
+  let closed = false;
+
+  function closeStream(): void {
+    if (closed) return;
+    closed = true;
+    abortController.abort();
+    automationScopes.delete(streamId);
+    activeStreamCount--;
+    if (activeStreamCount <= 0) {
+      activeStreamCount = 0;
+      stopHeartbeat();
+    }
+  }
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       activeStreamCount++;
+      automationScopes.set(streamId, workspaceScope);
 
       // Start heartbeat if this is the first active stream
       if (!isHeartbeatRunning()) {
         startHeartbeat(
           hostUrl,
-          () => currentCards,
+          getAutomationCards,
           (action) => {
             try {
               const event: CardStreamEvent = { type: "heartbeat", action };
@@ -242,7 +270,7 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
               })
               .catch(() => {
                 // Stream closed by client
-                abortController.abort();
+                closeStream();
               });
           },
         });
@@ -254,15 +282,11 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
           );
           controller.close();
         } catch {}
+        closeStream();
       }
     },
     cancel() {
-      abortController.abort();
-      activeStreamCount--;
-      if (activeStreamCount <= 0) {
-        activeStreamCount = 0;
-        stopHeartbeat();
-      }
+      closeStream();
     },
   });
 }
@@ -270,7 +294,8 @@ function createRemoteStream(hostUrl: string): ReadableStream<Uint8Array> {
 export async function GET(request: NextRequest) {
   const hostUrl = request.nextUrl.searchParams.get("host");
   console.info("[ahp:sse]", hostUrl ? `remote stream → ${hostUrl}` : "no host (empty board)");
-  const stream = hostUrl ? createRemoteStream(hostUrl) : createEmptyStream();
+  const workspaceScope = parseWorkspaceScope(request.nextUrl.searchParams.get("workspaceScope"));
+  const stream = hostUrl ? createRemoteStream(hostUrl, workspaceScope) : createEmptyStream();
 
   return new NextResponse(stream, {
     headers: {
