@@ -16,6 +16,7 @@ import {
   XCircle,
 
   Bug,
+  Bot,
   RotateCcw,
 } from "lucide-react";
 
@@ -183,6 +184,32 @@ function GateIndicator({ status }: { status: GateStatus }) {
   }
 }
 
+function WorkerProgress({ card }: { card: KanbanCardType }) {
+  const workers = card.workers;
+  if (!workers || workers.length === 0) return null;
+
+  const activeWorkers = workers.filter((worker) => worker.isActive);
+  const latestWorker = activeWorkers.find((worker) => worker.activity) ?? workers.find((worker) => worker.activity);
+  const countLabel = `${activeWorkers.length} active ${activeWorkers.length === 1 ? "worker" : "workers"}`;
+  const activity = latestWorker?.activity;
+
+  return (
+    <p
+      className="mt-1 flex min-w-0 items-center gap-1 text-[10px] leading-tight text-muted-foreground/80"
+      title={activity ? `${countLabel}: ${activity}` : countLabel}
+    >
+      <Bot className="h-3 w-3 shrink-0 text-primary/70" />
+      <span className="shrink-0 tabular-nums">{countLabel}</span>
+      {activity && (
+        <>
+          <span className="text-muted-foreground/40">·</span>
+          <span className="truncate">{activity}</span>
+        </>
+      )}
+    </p>
+  );
+}
+
 /** Split a card's status into the current (live) line and older trail entries.
  *  The current line always comes from the live `activity` so an idle card can
  *  never present a stale historical status as if it were current. Older entries
@@ -332,6 +359,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                 {olderStatuses.length > 0 && (
                   <StatusTrailHistory entries={olderStatuses} />
                 )}
+                <WorkerProgress card={card} />
 
                 <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
                   {card.runtime !== "input-needed" && (

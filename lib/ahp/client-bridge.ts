@@ -9,19 +9,21 @@ import { enrichFromChangeset, ChangesetEnrichment, hashPlanContent } from "./cha
 import { fetchCopilotCliPlan, clearPlanCache } from "./plan-artifact";
 import { fetchSessionModel } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
-import { asSessionState, readSessionState } from "./snapshot";
+import { asSessionState, readChatState, readSessionState } from "./snapshot";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT, type CachedSession } from "@/lib/db/session-cache";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
 import { OFFERED_PROTOCOL_VERSIONS } from "./protocol";
-import type { PendingInput } from "@/lib/types";
+import type { PendingInput, WorkerActivity } from "@/lib/types";
+import { mapWorkerChats, retainInactiveWorkers, type WorkerChatSummary } from "./worker-activity";
+import { getWorkerActivityHistory, recordWorkerActivity } from "@/lib/orchestrator/worker-activity-store";
 
 // Re-export for consumers that imported from here
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
 
 export type BridgeEvent =
-  | { type: "init"; sessions: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment>; pendingInputs: Map<string, PendingInput> }
-  | (AHPEvent & { enrichment?: ChangesetEnrichment | null; pendingInput?: PendingInput | null })
+  | { type: "init"; sessions: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment>; pendingInputs: Map<string, PendingInput>; workers: Map<string, WorkerActivity[]> }
+  | (AHPEvent & { enrichment?: ChangesetEnrichment | null; pendingInput?: PendingInput | null; workers?: WorkerActivity[] })
   | ConnectionError;
 
 const LOG_PREFIX = "[ahp:bridge]";
@@ -120,6 +122,9 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   const pendingInputs = new Map<string, PendingInput>();
   // Track in-flight input fetches to avoid duplicates
   const pendingInputFetches = new Set<string>();
+  const workersBySession = new Map<string, WorkerActivity[]>();
+  const workerChatsBySession = new Map<string, WorkerChatSummary[]>();
+  const workerObservers = new Map<string, { close: () => void }>();
 
   let disposed = false;
   let client: AhpClient | null = null;
@@ -129,6 +134,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     disposed = true;
     clearPlanCache();
     pendingInputs.clear();
+    workersBySession.clear();
+    workerChatsBySession.clear();
+    for (const observer of workerObservers.values()) observer.close();
+    workerObservers.clear();
     client?.shutdown().catch(() => {});
   }
 
@@ -420,6 +429,132 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }
   }
 
+  function emitWorkers(sessionUri: string, workers: WorkerActivity[]) {
+    workersBySession.set(sessionUri, workers);
+    const session = sessions.get(sessionUri);
+    if (session) {
+      onEvent({
+        type: "sessionSummaryChanged",
+        session,
+        enrichment: enrichments.get(sessionUri) ?? null,
+        pendingInput: pendingInputs.get(sessionUri),
+        workers,
+      });
+    }
+  }
+
+  async function applyWorkerChats(sessionUri: string, chats: readonly WorkerChatSummary[]) {
+    const workers = mapWorkerChats(chats);
+    await Promise.all(workers.map(async (worker) => {
+      try {
+        const chat = await readChatState(client!, worker.id);
+        const completedUsage = chat?.turns.at(-1)?.usage;
+        const usage = chat?.activeTurn?.usage ?? completedUsage;
+        if (
+          usage
+          && (usage.inputTokens !== undefined
+            || usage.outputTokens !== undefined
+            || usage.cacheReadTokens !== undefined)
+        ) {
+          worker.usage = {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheReadTokens: usage.cacheReadTokens,
+          };
+        }
+      } catch (err) {
+        debug("worker usage read failed:", worker.id, err instanceof Error ? err.message : err);
+      }
+    }));
+    for (const worker of workers) {
+      recordWorkerActivity(sessionUri, worker.id, worker.activity);
+      worker.history = getWorkerActivityHistory(sessionUri, worker.id);
+    }
+    emitWorkers(sessionUri, retainInactiveWorkers(workersBySession.get(sessionUri), workers));
+  }
+
+  function stopWorkerObserver(sessionUri: string) {
+    const observer = workerObservers.get(sessionUri);
+    if (!observer) return;
+    workerObservers.delete(sessionUri);
+    observer.close();
+    void client?.unsubscribe(sessionUri).catch(() => {});
+  }
+
+  async function syncWorkerActivity(sessionUri: string, status: number) {
+    if (
+      disposed
+      || !client
+      || (status & AHPStatus.InProgress) === 0
+      || (status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded
+      || (status & AHPStatus.IsArchived) !== 0
+    ) {
+      stopWorkerObserver(sessionUri);
+      return;
+    }
+    if (workerObservers.has(sessionUri)) return;
+
+    try {
+      const { result, subscription } = await client.subscribe(sessionUri);
+      if (disposed) {
+        subscription.close();
+        void client.unsubscribe(sessionUri).catch(() => {});
+        return;
+      }
+      const initial = asSessionState(result.snapshot);
+      if (!initial) {
+        subscription.close();
+        void client.unsubscribe(sessionUri).catch(() => {});
+        return;
+      }
+
+      workerObservers.set(sessionUri, subscription);
+      workerChatsBySession.set(sessionUri, [...initial.chats]);
+      await applyWorkerChats(sessionUri, initial.chats);
+
+      void (async () => {
+        try {
+          for await (const event of subscription) {
+            if (disposed || !workerObservers.has(sessionUri) || event.type !== "action") break;
+            const action = event.params.action as {
+              type?: string;
+              summary?: WorkerChatSummary;
+              chat?: string;
+              changes?: Partial<WorkerChatSummary>;
+            };
+            const current = workerChatsBySession.get(sessionUri) ?? [];
+            if (action.type === "session/chatAdded" && action.summary) {
+              const next = [...current.filter((chat) => chat.resource !== action.summary!.resource), action.summary];
+              workerChatsBySession.set(sessionUri, next);
+              await applyWorkerChats(sessionUri, next);
+            } else if (action.type === "session/chatUpdated" && action.chat && action.changes) {
+              const next = current.map((chat) =>
+                chat.resource === action.chat ? { ...chat, ...action.changes } : chat
+              );
+              workerChatsBySession.set(sessionUri, next);
+              await applyWorkerChats(sessionUri, next);
+            } else if (action.type === "session/chatRemoved" && action.chat) {
+              const next = current.filter((chat) => chat.resource !== action.chat);
+              workerChatsBySession.set(sessionUri, next);
+              await applyWorkerChats(sessionUri, next);
+            }
+          }
+        } catch (err) {
+          if (!disposed) {
+            debug("worker observer failed:", sessionUri, err instanceof Error ? err.message : err);
+          }
+        } finally {
+          if (workerObservers.get(sessionUri) === subscription) {
+            workerObservers.delete(sessionUri);
+            void client?.unsubscribe(sessionUri).catch(() => {});
+          }
+        }
+      })();
+    } catch (err) {
+      debug("worker activity read failed:", sessionUri, err instanceof Error ? err.message : err);
+    }
+  }
+
   if (signal) {
     signal.addEventListener("abort", dispose, { once: true });
   }
@@ -558,7 +693,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       sessions.set(summary.resource, mapped);
     }
     info(`loaded ${sessions.size} sessions (${allSummaries.length} total, archived without changes filtered); ${staleUris.size} new/changed`);
-    onEvent({ type: "init", sessions: Array.from(sessions.values()), enrichments, pendingInputs });
+    onEvent({ type: "init", sessions: Array.from(sessions.values()), enrichments, pendingInputs, workers: workersBySession });
 
     // Cache all sessions and remove stale entries
     for (const [uri, session] of sessions) {
@@ -577,6 +712,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       const missingPlan = !enrichments.get(uri)?.artifacts.some((a) => a.type === "plan");
       if (staleUris.has(uri) || (isInputNeeded && missingPlan)) triggerEnrichment(uri);
       syncInputState(uri, session.status);
+      void syncWorkerActivity(uri, session.status);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to list sessions";
@@ -605,8 +741,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           onEvent({ type: "sessionAdded", session: mapped, enrichment: enrichments.get(mapped.resource) });
           triggerEnrichment(mapped.resource);
           syncInputState(mapped.resource, mapped.status);
+          void syncWorkerActivity(mapped.resource, mapped.status);
         } else if (event.type === "sessionRemoved") {
           debug("sessionRemoved:", event.params.session);
+          stopWorkerObserver(event.params.session);
           sessions.delete(event.params.session);
           removeSessionCache(hostUrl, event.params.session);
           clearPendingInput(event.params.session);
@@ -636,6 +774,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
             // Check if session became archived
             if (existing.status & AHPStatus.IsArchived) {
+              stopWorkerObserver(sessionUri);
               clearPendingInput(sessionUri);
               if (shouldShowSession(existing.status, existing.changes?.files)) {
                 debug("sessionArchived: keeping (has code changes)", sessionUri);
@@ -660,6 +799,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
               // (host may have replaced the input request without toggling status)
               fetchInputOnce(sessionUri);
             }
+            void syncWorkerActivity(sessionUri, existing.status);
 
             sessions.set(sessionUri, existing);
             upsertSessionCache(hostUrl, sessionUri, existing, enrichments.get(sessionUri));
@@ -668,6 +808,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
               session: existing,
               enrichment: enrichments.get(sessionUri),
               pendingInput: pendingInputs.get(sessionUri),
+              workers: workersBySession.get(sessionUri),
             });
             // Re-trigger enrichment if file changes updated, the session became
             // idle, or it's InputNeeded but has no plan artifact yet. InputNeeded

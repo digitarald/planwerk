@@ -33,13 +33,14 @@ interface TriageEvent {
 function safeEnrich(
   session: AHPSessionSummary,
   changesetData?: ChangesetEnrichment | null,
-  options?: EnrichOptions
+  options?: EnrichOptions,
+  workers?: KanbanCard["workers"],
 ): KanbanCard {
   try {
-    return enrichSessionToCard(session, changesetData, options);
+    return enrichSessionToCard(session, changesetData, options, workers);
   } catch (err) {
     console.warn("[ahp:sse] enrichment failed, using base mapping:", err instanceof Error ? err.message : err);
-    return mapSessionToCard(session);
+    return mapSessionToCard(session, undefined, undefined, undefined, workers);
   }
 }
 
@@ -106,7 +107,7 @@ async function projectRemoteEvent(event: BridgeEvent): Promise<CardStreamEvent> 
 
   if (event.type === "init") {
     const cards = event.sessions.map((s) => {
-      const card = safeEnrich(s, event.enrichments.get(s.resource));
+      const card = safeEnrich(s, event.enrichments.get(s.resource), undefined, event.workers.get(s.resource));
       const pi = event.pendingInputs.get(s.resource);
       if (pi) card.pendingInput = pi;
       return card;
@@ -121,7 +122,7 @@ async function projectRemoteEvent(event: BridgeEvent): Promise<CardStreamEvent> 
     };
   }
 
-  const card = safeEnrich(event.session, event.enrichment);
+  const card = safeEnrich(event.session, event.enrichment, undefined, event.workers);
   // Attach pending input if available (null means explicitly cleared)
   if (event.pendingInput !== undefined) {
     card.pendingInput = event.pendingInput ?? undefined;

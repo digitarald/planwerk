@@ -1,4 +1,4 @@
-import { Artifact, KanbanCard, PendingInput, PendingInputQuestion, PendingInputOptionKind, Phase, RiskLevel, RuntimeStatus, ToolAuthenticationDetails, ToolConfirmationDetails, ToolConfirmationOption } from "@/lib/types";
+import { Artifact, KanbanCard, PendingInput, PendingInputQuestion, PendingInputOptionKind, Phase, RiskLevel, RuntimeStatus, ToolAuthenticationDetails, ToolConfirmationDetails, ToolConfirmationOption, WorkerActivity } from "@/lib/types";
 import type {
   ChatInputRequest,
   ChatInputQuestion,
@@ -293,7 +293,8 @@ export function mapSessionToCard(
   session: AHPSessionSummary,
   existingPhase?: Phase,
   enrichment?: ChangesetEnrichment | null,
-  persistedRisk?: RiskLevel
+  persistedRisk?: RiskLevel,
+  workers?: WorkerActivity[],
 ): KanbanCard {
   const runtime = mapAHPRuntimeStatus(session.status);
   const artifacts = enrichment?.artifacts ?? inferArtifacts(session);
@@ -340,5 +341,6 @@ export function mapSessionToCard(
     fileChanges: enrichment?.fileChanges.length ? enrichment.fileChanges : undefined,
     changesetReview: enrichment?.changesetReview,
     isArchived,
+    workers,
   };
 }

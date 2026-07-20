@@ -35,6 +35,22 @@ export interface StatusEntry {
   timestamp: number;
 }
 
+/** A tool-spawned worker chat attached to a parent task. Its state is purely
+ * observational: it never participates in phase, gate, or attention logic. */
+export interface WorkerActivity {
+  id: string;
+  title: string;
+  runtime: RuntimeStatus;
+  activity?: string;
+  isActive: boolean;
+  history: StatusEntry[];
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+  };
+}
+
 export type PendingInputOptionKind = "text" | "number" | "boolean" | "single-select" | "multi-select";
 
 export interface PendingInputOption {
@@ -186,6 +202,8 @@ export interface KanbanCard {
   changesetReview?: ChangesetReview;
   isArchived?: boolean;
   reviewFindings?: ReviewFinding[];
+  /** Tool-spawned worker chat activity, sourced from the AHP session catalog. */
+  workers?: WorkerActivity[];
   /** Recent status lines (oldest→newest), for the fading progress trail. */
   statusHistory?: StatusEntry[];
   /** Board-level coherence: other in-flight cards this one clashes with. Set from

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { KanbanCard, ReviewFinding, RiskLevel, Phase } from "@/lib/types";
+import { KanbanCard, ReviewFinding, RiskLevel, Phase, WorkerActivity } from "@/lib/types";
 import {
   canAdvancePhase,
   computeChangesetRef,
@@ -114,11 +114,12 @@ export interface EnrichOptions {
 export function enrichSessionToCard(
   session: AHPSessionSummary,
   changesetData?: ChangesetEnrichment | null,
-  options?: EnrichOptions
+  options?: EnrichOptions,
+  workers?: WorkerActivity[],
 ): KanbanCard {
   const persistedPhase = getPersistedCardPhase(session.resource);
   const storedRisk = getCardRisk(session.resource);
-  const card = mapSessionToCard(session, persistedPhase, changesetData, storedRisk?.level);
+  const card = mapSessionToCard(session, persistedPhase, changesetData, storedRisk?.level, workers);
 
   // Sync DB when inference overrides the persisted phase (e.g. archived+code → ship)
   if (card.phase !== persistedPhase) {

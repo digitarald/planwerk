@@ -27,6 +27,7 @@ import {
   ChevronDown,
   Split,
   Cpu,
+  Bot,
 } from "lucide-react";
 
 import { PendingInputCard } from "./pending-input-card";
@@ -275,6 +276,65 @@ function RiskBadge({ level }: { level: RiskLevel }) {
       <Icon className="h-3 w-3" />
       {level} risk
     </span>
+  );
+}
+
+function formatTokenCount(value: number): string {
+  return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function WorkerActivitySection({ card }: { card: KanbanCard }) {
+  const workers = card.workers;
+  if (!workers || workers.length === 0) return null;
+
+  return (
+    <section>
+      <SectionLabel className="flex items-center gap-1.5">
+        <Bot className="h-3 w-3 text-primary" />
+        Worker activity
+        <span className="font-normal normal-case tracking-normal text-muted-foreground">
+          ({workers.filter((worker) => worker.isActive).length} active)
+        </span>
+      </SectionLabel>
+      <div className="space-y-2">
+        {workers.map((worker) => (
+          <div key={worker.id} className="rounded-lg border border-border/60 bg-muted/20 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate text-xs font-medium">{worker.title}</span>
+              <span className={cn(
+                "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
+                worker.runtime === "running" && "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+                worker.runtime === "idle" && "bg-muted text-muted-foreground",
+                worker.runtime === "input-needed" && "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+                worker.runtime === "error" && "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+              )}>
+                {worker.runtime === "running" ? "working" : worker.runtime}
+              </span>
+            </div>
+            {worker.activity && (
+              <p className="mt-1 text-[11px] text-muted-foreground">{worker.activity}</p>
+            )}
+            {worker.history.length > 0 && (
+              <div className="mt-2 border-l border-border pl-2">
+                {worker.history.slice(-3).reverse().map((entry) => (
+                  <p key={`${entry.timestamp}-${entry.message}`} className="text-[10px] leading-relaxed text-muted-foreground/75">
+                    {entry.message}
+                  </p>
+                ))}
+              </div>
+            )}
+            {worker.usage && (
+              <p className="mt-2 text-[10px] tabular-nums text-muted-foreground/70">
+                {worker.usage.inputTokens !== undefined && `${formatTokenCount(worker.usage.inputTokens)} in`}
+                {worker.usage.inputTokens !== undefined && worker.usage.outputTokens !== undefined && " · "}
+                {worker.usage.outputTokens !== undefined && `${formatTokenCount(worker.usage.outputTokens)} out`}
+                {worker.usage.cacheReadTokens !== undefined && ` · ${formatTokenCount(worker.usage.cacheReadTokens)} cached`}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -679,6 +739,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                   </div>
                 </section>
               )}
+              <WorkerActivitySection card={card} />
 
               {/* Changed Files */}
               {fileChanges.length > 0 && (
