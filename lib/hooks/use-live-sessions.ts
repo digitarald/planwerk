@@ -134,6 +134,7 @@ export function useLiveSessions() {
                 message: card.activity,
                 cardId: card.id,
                 cardTitle: card.title,
+                projectName: card.project?.name,
               });
             }
             // Surface triage results when a card enters plan/build
@@ -148,6 +149,7 @@ export function useLiveSessions() {
                 message: `${riskLabel} risk${factorList}.${gateList}${approval}`,
                 cardId: card.id,
                 cardTitle: card.title,
+                projectName: card.project?.name,
               });
             }
           } else {
@@ -161,11 +163,13 @@ export function useLiveSessions() {
           if (action) {
             const feedMsg = formatHeartbeatAction(action);
             if (feedMsg) {
+              const actionCard = useBoardStore.getState().getCard(action.cardId);
               addFeedItem({
                 type: feedMsg.type,
                 message: feedMsg.message,
                 cardId: action.cardId,
-                cardTitle: useBoardStore.getState().getCard(action.cardId)?.title,
+                cardTitle: actionCard?.title,
+                projectName: actionCard?.project?.name,
               });
             }
           }

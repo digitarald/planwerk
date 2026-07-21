@@ -24,8 +24,8 @@ export function HealthBar({ active, idle, errors, needsInput }: HealthBarProps) 
   };
 
   return (
-    <div className="px-3 py-2 bg-muted/30 rounded-md mx-2 my-1">
-      <div className="flex items-center gap-3 text-xs">
+    <div className="px-3 py-1.5">
+      <div className="flex items-center gap-2.5 text-[10px]">
         <span className="text-emerald-600">{active} active</span>
         <span className="text-muted-foreground">{idle} idle</span>
         {errors > 0 && (

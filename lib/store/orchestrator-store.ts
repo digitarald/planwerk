@@ -19,6 +19,7 @@ export interface FeedItem {
   timestamp: number;
   cardId?: string;
   cardTitle?: string;
+  projectName?: string;
   isStreaming?: boolean;
   toolName?: string;
 }

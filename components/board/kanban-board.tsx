@@ -12,6 +12,7 @@ interface TransitionArgs {
   cardId: string;
   toPhase: Phase;
   projectPath?: string;
+  projectName?: string;
   changesetRef: string;
   title: string;
   original: {
@@ -22,7 +23,13 @@ interface TransitionArgs {
   };
   generation: number;
   reconcileCard: (id: string, card: Partial<KanbanCard>) => void;
-  addFeedItem: (item: { type: "alert"; message: string; cardId?: string }) => void;
+  addFeedItem: (item: {
+    type: "alert";
+    message: string;
+    cardId?: string;
+    cardTitle?: string;
+    projectName?: string;
+  }) => void;
 }
 
 /** Latest drag generation per card. A reconcile/rollback only applies if it is
@@ -37,6 +44,7 @@ async function persistTransition({
   cardId,
   toPhase,
   projectPath,
+  projectName,
   changesetRef,
   title,
   original,
@@ -83,6 +91,8 @@ async function persistTransition({
       type: "alert",
       message: `Couldn't save the move for "${title}" — reverted to ${original.phase.toUpperCase()}`,
       cardId,
+      cardTitle: title,
+      projectName,
     });
   }
 }
@@ -147,12 +157,16 @@ export function KanbanBoard() {
         type: "alert",
         message: `Manual override: "${card.title}" moved ${fromPhase.toUpperCase()} → ${toPhase.toUpperCase()} — gates not verified for this move`,
         cardId: card.id,
+        cardTitle: card.title,
+        projectName: card.project?.name,
       });
     } else {
       addFeedItem({
         type: "transition",
         message: `"${card.title}" moved back to ${toPhase.toUpperCase()} for rework`,
         cardId: card.id,
+        cardTitle: card.title,
+        projectName: card.project?.name,
       });
     }
 
@@ -163,6 +177,7 @@ export function KanbanBoard() {
       cardId: card.id,
       toPhase,
       projectPath: card.project?.path,
+      projectName: card.project?.name,
       changesetRef,
       generation,
       reconcileCard,

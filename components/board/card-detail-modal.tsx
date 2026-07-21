@@ -460,6 +460,8 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
         type: "intervention",
         message: `Message ${data.queued ? "queued for" : "sent to"} "${card.title}": "${text}"`,
         cardId: card.id,
+        cardTitle: card.title,
+        projectName: card.project?.name,
       });
       setMessage("");
       setSendState("idle");

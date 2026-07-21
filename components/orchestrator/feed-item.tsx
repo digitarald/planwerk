@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   Bot,
   CheckCircle2,
-  ExternalLink,
   Lightbulb,
   RefreshCw,
   Shield,
@@ -34,30 +33,32 @@ interface FeedItemProps {
   timestamp: number;
   cardId?: string;
   cardTitle?: string;
+  projectName?: string;
   isStreaming?: boolean;
   toolName?: string;
 }
 
-const typeConfig: Record<FeedItemType, { icon: typeof RefreshCw; color: string }> = {
-  intervention: { icon: Zap, color: "text-primary" },
-  alert: { icon: AlertTriangle, color: "text-amber-600" },
-  transition: { icon: CheckCircle2, color: "text-emerald-600" },
-  suggestion: { icon: Lightbulb, color: "text-violet-600" },
-  triage: { icon: Shield, color: "text-blue-600" },
-  user: { icon: User, color: "text-foreground" },
-  response: { icon: Bot, color: "text-primary" },
-  heartbeat: { icon: RefreshCw, color: "text-muted-foreground" },
-  "tool-action": { icon: Wrench, color: "text-orange-600" },
+const typeConfig: Record<FeedItemType, { icon: typeof RefreshCw; color: string; label: string }> = {
+  intervention: { icon: Zap, color: "text-primary", label: "Intervention" },
+  alert: { icon: AlertTriangle, color: "text-amber-600", label: "Alert" },
+  transition: { icon: CheckCircle2, color: "text-muted-foreground", label: "Transition" },
+  suggestion: { icon: Lightbulb, color: "text-muted-foreground", label: "Suggestion" },
+  triage: { icon: Shield, color: "text-muted-foreground", label: "Triage" },
+  user: { icon: User, color: "text-muted-foreground", label: "You" },
+  response: { icon: Bot, color: "text-muted-foreground", label: "Orchestrator" },
+  heartbeat: { icon: RefreshCw, color: "text-muted-foreground/70", label: "Heartbeat" },
+  "tool-action": { icon: Wrench, color: "text-muted-foreground", label: "Tool action" },
 };
 
 function formatRelativeTime(timestamp: number): string {
   const diff = Date.now() - timestamp;
   const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return "just now";
+  if (seconds < 60) return "now";
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
-  return `${hours}h ago`;
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
 }
 
 function CardLink({ cardId, title }: { cardId: string; title: string }) {
@@ -66,10 +67,10 @@ function CardLink({ cardId, title }: { cardId: string; title: string }) {
   return (
     <button
       onClick={() => setDetailCard(cardId)}
-      className="inline-flex items-center gap-0.5 font-medium text-foreground hover:text-primary hover:underline underline-offset-2 transition-colors text-left"
+      className="min-w-0 truncate text-left text-[11px] font-medium text-foreground transition-colors hover:text-primary hover:underline underline-offset-2"
+      title={title}
     >
       {title}
-      <ExternalLink className="h-2.5 w-2.5 shrink-0 opacity-40" />
     </button>
   );
 }
@@ -125,61 +126,78 @@ function InlinePendingInput({ card }: { card: KanbanCard }) {
         className="inline-flex items-center gap-1 text-[10px] font-medium text-primary hover:underline underline-offset-2"
       >
         Open on board
-        <ExternalLink className="h-2.5 w-2.5" />
       </button>
     </div>
   );
 }
 
-export function FeedItem({ type, message, timestamp, cardId, cardTitle, isStreaming, toolName }: FeedItemProps) {
+export function FeedItem({
+  type,
+  message,
+  timestamp,
+  cardId,
+  cardTitle,
+  projectName,
+  isStreaming,
+  toolName,
+}: FeedItemProps) {
   const config = typeConfig[type];
   const Icon = config.icon;
   const card = useBoardStore((s) => (cardId ? s.getCard(cardId) : undefined));
 
   const showInlineInput = type === "alert" && card?.pendingInput;
+  const resolvedProjectName = projectName ?? card?.project?.name;
+  const resolvedCardTitle = cardTitle ?? card?.title;
 
   return (
     <div
       className={cn(
-        "flex gap-2 text-xs animate-in fade-in slide-in-from-top-2 duration-300",
-        type === "user" && "bg-muted/50 -mx-3 px-3 py-1.5 rounded",
-        type === "tool-action" && "bg-orange-50/50 dark:bg-orange-950/20 -mx-3 px-3 py-1 rounded",
+        "flex gap-2 border-b border-border/60 py-2 text-xs last:border-b-0",
+        "animate-in fade-in duration-150 motion-reduce:animate-none",
       )}
     >
-      <div className={cn(
-        "mt-1 w-0.5 shrink-0 rounded-full self-stretch",
-        type === "intervention" && "bg-primary/40",
-        type === "alert" && "bg-amber-500/40",
-        type === "transition" && "bg-emerald-500/40",
-        type === "suggestion" && "bg-violet-500/40",
-        type === "triage" && "bg-blue-500/40",
-        type === "user" && "bg-foreground/20",
-        type === "response" && "bg-primary/40",
-        type === "heartbeat" && "bg-muted-foreground/20",
-        type === "tool-action" && "bg-orange-500/40",
-      )} />
-      <Icon className={cn("h-3.5 w-3.5 mt-0.5 shrink-0", config.color)} />
+      <Icon
+        aria-label={config.label}
+        className={cn("mt-0.5 h-3 w-3 shrink-0", config.color)}
+      />
       <div className="flex-1 min-w-0">
-        <span className="text-muted-foreground">{formatRelativeTime(timestamp)}</span>
-        {toolName && (
-          <span className="ml-1 text-[10px] font-mono text-orange-600 bg-orange-100 dark:bg-orange-900/30 px-1 rounded">
-            {toolName}
-          </span>
-        )}
-
-        {cardId && cardTitle ? (
-          <div className="mt-0.5">
-            <CardLink cardId={cardId} title={cardTitle} />
-            <p className="text-muted-foreground leading-relaxed mt-0.5">{message}</p>
-          </div>
-        ) : (
-          <p className={cn(
-            "text-foreground leading-relaxed mt-0.5",
-            isStreaming && "after:content-['▊'] after:animate-pulse after:ml-0.5 after:text-primary"
-          )}>
-            {message || (isStreaming ? "Thinking..." : "")}
-          </p>
-        )}
+        <div className="flex min-w-0 items-center gap-1.5 text-[10px] leading-4 text-muted-foreground">
+          <time
+            dateTime={new Date(timestamp).toISOString()}
+            title={new Date(timestamp).toLocaleString()}
+            className="shrink-0 tabular-nums"
+          >
+            {formatRelativeTime(timestamp)}
+          </time>
+          {resolvedProjectName && (
+            <>
+              <span aria-hidden="true" className="text-border">/</span>
+              <span className="max-w-20 shrink-0 truncate" title={resolvedProjectName}>
+                {resolvedProjectName}
+              </span>
+            </>
+          )}
+          {cardId && resolvedCardTitle && (
+            <>
+              <span aria-hidden="true" className="text-border">/</span>
+              <CardLink cardId={cardId} title={resolvedCardTitle} />
+            </>
+          )}
+          {toolName && (
+            <span className="truncate font-mono" title={toolName}>
+              {toolName}
+            </span>
+          )}
+        </div>
+        <p
+          className={cn(
+            "mt-0.5 text-[11px] leading-4 text-muted-foreground",
+            type === "alert" && "text-foreground",
+            isStreaming && "after:ml-0.5 after:animate-pulse after:text-primary after:content-['▊']",
+          )}
+        >
+          {message || (isStreaming ? "Thinking..." : "")}
+        </p>
 
         {showInlineInput && card && <InlinePendingInput card={card} />}
       </div>

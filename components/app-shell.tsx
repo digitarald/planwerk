@@ -28,7 +28,7 @@ export function AppShell({ children }: AppShellProps) {
         <aside
           className={cn(
             "relative z-base flex min-h-0 flex-col bg-muted/50 shadow-elevation-md transition-[width] duration-200",
-            collapsed ? "w-12" : "w-80"
+            collapsed ? "w-12" : "w-72"
           )}
         >
           <div className="flex items-center justify-end px-2 py-1.5">

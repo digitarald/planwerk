@@ -9,7 +9,7 @@ import { Separator } from "@/components/ui/separator";
 import { useShallow } from "zustand/react/shallow";
 import { useBoardStore, selectSessionCounts } from "@/lib/store/board-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
-import { Zap } from "lucide-react";
+import { Activity } from "lucide-react";
 
 export function OrchestratorFeed() {
   const feedItems = useOrchestratorStore((s) => s.feedItems);
@@ -20,21 +20,21 @@ export function OrchestratorFeed() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="p-3 space-y-1.5">
-        <div className="flex items-center gap-2">
-          <Zap className="h-3.5 w-3.5 text-primary" />
-          <span className="text-xs font-medium">
+      <div className="space-y-1 px-3 pb-2 pt-1">
+        <div className="flex items-center gap-1.5">
+          <Activity className="h-3 w-3 text-muted-foreground" />
+          <span className="text-[11px] font-medium text-foreground">
             {total > 0
               ? `${total} session${total === 1 ? "" : "s"}`
-              : "Waiting for sessions..."}
+              : "No sessions"}
           </span>
         </div>
         {/* Pinned instrument readout — connection + monitoring status, kept
             out of the conversational feed below. */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 pl-0.5">
           <ConnectionDot />
           {monitoringStatus && (
-            <span className="text-[11px] text-muted-foreground/80">
+            <span className="text-[10px] text-muted-foreground">
               · {monitoringStatus.reconnected ? "reconnected · " : ""}
               monitoring {monitoringStatus.sessionCount} session
               {monitoringStatus.sessionCount === 1 ? "" : "s"}
@@ -46,9 +46,9 @@ export function OrchestratorFeed() {
       <Separator />
 
       <ScrollArea className="flex-1 min-h-0">
-        <div className="p-3 space-y-3 flex flex-col-reverse">
+        <div className="flex flex-col-reverse px-3">
           {feedItems.length === 0 ? (
-            <p className="text-xs text-muted-foreground text-center py-4">
+            <p className="py-4 text-center text-[11px] text-muted-foreground">
               No activity yet. Connect to an AHP host to begin.
             </p>
           ) : (
