@@ -173,6 +173,29 @@ function createRemoteStream(
   const streamId = nextStreamId++;
   let closed = false;
 
+  function reprojectCard(cardId: string): KanbanCard | undefined {
+    const existing = currentCards.find((card) => card.id === cardId);
+    if (!existing) return undefined;
+
+    const cached = getCachedSessions(hostUrl).find((entry) => entry.sessionUri === cardId);
+    if (!cached) return undefined;
+
+    const refreshed = safeEnrich(
+      cached.summary,
+      cached.enrichment,
+      { recordStatus: false },
+      existing.workers,
+    );
+    if (existing.pendingInput && refreshed.runtime === "input-needed") {
+      refreshed.pendingInput = existing.pendingInput;
+    }
+    currentCards = [
+      ...currentCards.filter((card) => card.id !== cardId),
+      refreshed,
+    ];
+    return refreshed;
+  }
+
   function closeStream(): void {
     if (closed) return;
     closed = true;
@@ -200,13 +223,13 @@ function createRemoteStream(
               const event: CardStreamEvent = { type: "heartbeat", action };
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
 
-              // Phase-advance actions should also update the board immediately
-              if (action.type === "phase-advanced" && "cardId" in action) {
-                const card = currentCards.find((c) => c.id === action.cardId);
-                if (card) {
-                  const updated = { ...card, phase: action.to };
-                  currentCards = [...currentCards.filter((c) => c.id !== card.id), updated];
-                  const cardEvent: CardStreamEvent = { type: "cardChanged", card: updated };
+              // Heartbeat actions mutate persisted gates, reviews, phases, and
+              // attention independently of AHP. Re-project immediately so the
+              // board never waits for an unrelated host event to see that truth.
+              if ("cardId" in action) {
+                const refreshed = reprojectCard(action.cardId);
+                if (refreshed) {
+                  const cardEvent: CardStreamEvent = { type: "cardChanged", card: refreshed };
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify(cardEvent)}\n\n`));
                 }
               }

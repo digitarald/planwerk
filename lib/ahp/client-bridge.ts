@@ -1,6 +1,6 @@
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
 import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
-import type { SessionSummary } from "@microsoft/agent-host-protocol";
+import type { SessionSummary, UsageInfo } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
@@ -9,7 +9,7 @@ import { enrichFromChangeset, ChangesetEnrichment, hashPlanContent } from "./cha
 import { fetchCopilotCliPlan, clearPlanCache } from "./plan-artifact";
 import { fetchSessionModel } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
-import { asSessionState, readChatState, readSessionState } from "./snapshot";
+import { asChatState, asSessionState, readChatState, readSessionState } from "./snapshot";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT, type CachedSession } from "@/lib/db/session-cache";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
@@ -125,6 +125,9 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   const workersBySession = new Map<string, WorkerActivity[]>();
   const workerChatsBySession = new Map<string, WorkerChatSummary[]>();
   const workerObservers = new Map<string, { close: () => void }>();
+  const workerUsageByChat = new Map<string, NonNullable<WorkerActivity["usage"]>>();
+  const workerCompletedUsageByChat = new Map<string, NonNullable<WorkerActivity["usage"]>>();
+  const workerUsageObservers = new Map<string, { sessionUri: string; close: () => void }>();
 
   let disposed = false;
   let client: AhpClient | null = null;
@@ -138,6 +141,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     workerChatsBySession.clear();
     for (const observer of workerObservers.values()) observer.close();
     workerObservers.clear();
+    for (const observer of workerUsageObservers.values()) observer.close();
+    workerUsageObservers.clear();
+    workerUsageByChat.clear();
+    workerCompletedUsageByChat.clear();
     client?.shutdown().catch(() => {});
   }
 
@@ -443,25 +450,189 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }
   }
 
+  function toWorkerUsage(usage: UsageInfo | undefined): NonNullable<WorkerActivity["usage"]> | undefined {
+    if (
+      !usage
+      || (
+        usage.inputTokens === undefined
+        && usage.outputTokens === undefined
+        && usage.cacheReadTokens === undefined
+      )
+    ) {
+      return undefined;
+    }
+    return {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadTokens,
+    };
+  }
+
+  function sumWorkerUsage(
+    usages: readonly (WorkerActivity["usage"])[],
+  ): NonNullable<WorkerActivity["usage"]> | undefined {
+    const present = usages.filter(
+      (usage): usage is NonNullable<WorkerActivity["usage"]> => usage !== undefined,
+    );
+    if (present.length === 0) return undefined;
+
+    const sumField = (
+      field: keyof NonNullable<WorkerActivity["usage"]>,
+    ): number | undefined => {
+      const values = present
+        .map((usage) => usage[field])
+        .filter((value): value is number => value !== undefined);
+      return values.length > 0
+        ? values.reduce((total, value) => total + value, 0)
+        : undefined;
+    };
+
+    return {
+      inputTokens: sumField("inputTokens"),
+      outputTokens: sumField("outputTokens"),
+      cacheReadTokens: sumField("cacheReadTokens"),
+    };
+  }
+
+  function completedUsageFromChat(
+    chat: ReturnType<typeof asChatState>,
+  ): NonNullable<WorkerActivity["usage"]> | undefined {
+    return sumWorkerUsage(chat?.turns.map((turn) => toWorkerUsage(turn.usage)) ?? []);
+  }
+
+  function usageFromChat(chat: ReturnType<typeof asChatState>): NonNullable<WorkerActivity["usage"]> | undefined {
+    return sumWorkerUsage([
+      completedUsageFromChat(chat),
+      toWorkerUsage(chat?.activeTurn?.usage),
+    ]);
+  }
+
+  function sameWorkerUsage(
+    left: WorkerActivity["usage"],
+    right: WorkerActivity["usage"],
+  ): boolean {
+    return (
+      left?.inputTokens === right?.inputTokens
+      && left?.outputTokens === right?.outputTokens
+      && left?.cacheReadTokens === right?.cacheReadTokens
+    );
+  }
+
+  function updateWorkerUsage(
+    sessionUri: string,
+    workerId: string,
+    usage: NonNullable<WorkerActivity["usage"]>,
+  ) {
+    const previous = workerUsageByChat.get(workerId);
+    if (sameWorkerUsage(previous, usage)) return;
+    workerUsageByChat.set(workerId, usage);
+
+    const current = workersBySession.get(sessionUri);
+    if (!current?.some((worker) => worker.id === workerId)) return;
+    emitWorkers(
+      sessionUri,
+      current.map((worker) => (
+        worker.id === workerId ? { ...worker, usage } : worker
+      )),
+    );
+  }
+
+  function stopWorkerUsageObserver(workerId: string) {
+    const observer = workerUsageObservers.get(workerId);
+    if (!observer) return;
+    workerUsageObservers.delete(workerId);
+    observer.close();
+    void client?.unsubscribe(workerId).catch(() => {});
+  }
+
+  async function observeWorkerUsage(
+    sessionUri: string,
+    workerId: string,
+  ): Promise<WorkerActivity["usage"]> {
+    const existing = workerUsageObservers.get(workerId);
+    if (existing?.sessionUri === sessionUri) return workerUsageByChat.get(workerId);
+    if (existing) stopWorkerUsageObserver(workerId);
+
+    const { result, subscription } = await client!.subscribe(workerId);
+    if (disposed) {
+      subscription.close();
+      void client!.unsubscribe(workerId).catch(() => {});
+      return undefined;
+    }
+
+    const initialChat = asChatState(result.snapshot);
+    const completedUsage = completedUsageFromChat(initialChat);
+    const initialUsage = usageFromChat(initialChat);
+    if (completedUsage) workerCompletedUsageByChat.set(workerId, completedUsage);
+    if (initialUsage) workerUsageByChat.set(workerId, initialUsage);
+    const observer = { sessionUri, close: () => subscription.close() };
+    workerUsageObservers.set(workerId, observer);
+
+    void (async () => {
+      try {
+        for await (const event of subscription) {
+          if (
+            disposed
+            || workerUsageObservers.get(workerId) !== observer
+            || event.type !== "action"
+          ) {
+            break;
+          }
+          const action = event.params.action as {
+            type?: string;
+            usage?: UsageInfo;
+          };
+          if (action.type === "chat/usage") {
+            const usage = sumWorkerUsage([
+              workerCompletedUsageByChat.get(workerId),
+              toWorkerUsage(action.usage),
+            ]);
+            if (usage) updateWorkerUsage(sessionUri, workerId, usage);
+          } else if (action.type === "chat/turnComplete") {
+            const usage = workerUsageByChat.get(workerId);
+            if (usage) workerCompletedUsageByChat.set(workerId, usage);
+          }
+        }
+      } catch (err) {
+        if (!disposed) {
+          debug("worker usage observer failed:", workerId, err instanceof Error ? err.message : err);
+        }
+      } finally {
+        if (workerUsageObservers.get(workerId) === observer) {
+          workerUsageObservers.delete(workerId);
+          void client?.unsubscribe(workerId).catch(() => {});
+        }
+      }
+    })();
+
+    return initialUsage;
+  }
+
   async function applyWorkerChats(sessionUri: string, chats: readonly WorkerChatSummary[]) {
     const workers = mapWorkerChats(chats);
+    const currentWorkerIds = new Set(workers.map((worker) => worker.id));
+    for (const [workerId, observer] of workerUsageObservers) {
+      if (observer.sessionUri === sessionUri && !currentWorkerIds.has(workerId)) {
+        stopWorkerUsageObserver(workerId);
+      }
+    }
+
     await Promise.all(workers.map(async (worker) => {
       try {
-        const chat = await readChatState(client!, worker.id);
-        const completedUsage = chat?.turns.at(-1)?.usage;
-        const usage = chat?.activeTurn?.usage ?? completedUsage;
-        if (
-          usage
-          && (usage.inputTokens !== undefined
-            || usage.outputTokens !== undefined
-            || usage.cacheReadTokens !== undefined)
-        ) {
-          worker.usage = {
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-            cacheReadTokens: usage.cacheReadTokens,
-          };
+        if (worker.isActive) {
+          await observeWorkerUsage(sessionUri, worker.id);
+        } else {
+          const wasObserved = workerUsageObservers.has(worker.id);
+          stopWorkerUsageObserver(worker.id);
+          if (wasObserved || !workerUsageByChat.has(worker.id)) {
+            const chat = await readChatState(client!, worker.id);
+            const completedUsage = completedUsageFromChat(chat);
+            const usage = usageFromChat(chat);
+            if (completedUsage) workerCompletedUsageByChat.set(worker.id, completedUsage);
+            if (usage) workerUsageByChat.set(worker.id, usage);
+          }
         }
+        worker.usage = workerUsageByChat.get(worker.id);
       } catch (err) {
         debug("worker usage read failed:", worker.id, err instanceof Error ? err.message : err);
       }
@@ -474,6 +645,9 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   }
 
   function stopWorkerObserver(sessionUri: string) {
+    for (const [workerId, observer] of workerUsageObservers) {
+      if (observer.sessionUri === sessionUri) stopWorkerUsageObserver(workerId);
+    }
     const observer = workerObservers.get(sessionUri);
     if (!observer) return;
     workerObservers.delete(sessionUri);

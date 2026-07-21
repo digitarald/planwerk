@@ -52,7 +52,7 @@ export function useLiveSessions() {
   const hasHandshakedRef = useRef(false);
 
   const setCards = useBoardStore((s) => s.setCards);
-  const updateCard = useBoardStore((s) => s.updateCard);
+  const replaceCard = useBoardStore((s) => s.replaceCard);
   const reconcileCard = useBoardStore((s) => s.reconcileCard);
   const addCard = useBoardStore((s) => s.addCard);
   const removeCard = useBoardStore((s) => s.removeCard);
@@ -127,8 +127,12 @@ export function useLiveSessions() {
           const card = data.card;
           const existing = useBoardStore.getState().getCard(card.id);
           if (existing) {
-            updateCard(card.id, card);
-            if (card.attention === "needs-human" && existing.attention !== "needs-human") {
+            replaceCard(card.id, card);
+            if (
+              card.activity
+              && card.attention === "needs-human"
+              && existing.attention !== "needs-human"
+            ) {
               addFeedItem({
                 type: "alert",
                 message: card.activity,
@@ -199,7 +203,7 @@ export function useLiveSessions() {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [shouldConnect, hostUrl, workspaceScope, setCards, updateCard, reconcileCard, addCard, removeCard, addFeedItem, setMonitoringStatus, setConnected, setError]);
+  }, [shouldConnect, hostUrl, workspaceScope, setCards, replaceCard, reconcileCard, addCard, removeCard, addFeedItem, setMonitoringStatus, setConnected, setError]);
 }
 
 interface HeartbeatActionData {
@@ -212,6 +216,7 @@ interface HeartbeatActionData {
   reason?: string;
   confirmed?: boolean;
   gateType?: string;
+  status?: string;
   iteration?: number;
   otherCardId?: string;
   summary?: string;

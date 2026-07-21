@@ -250,8 +250,14 @@ const GATE_TIMEOUT_MS = 5 * 60_000;
 export function executeGateCommand(
   runId: number,
   command: string,
-  cwd: string
+  cwd: string,
+  onComplete?: (status: "passed" | "failed") => void,
 ): void {
+  const complete = (status: "passed" | "failed", output: string): void => {
+    completeGateRun(runId, status, output);
+    onComplete?.(status);
+  };
+
   let cwdOk = false;
   try {
     cwdOk = existsSync(cwd) && statSync(cwd).isDirectory();
@@ -260,7 +266,7 @@ export function executeGateCommand(
   }
 
   if (!cwdOk) {
-    completeGateRun(runId, "failed", `Working directory not found: ${cwd}`);
+    complete("failed", `Working directory not found: ${cwd}`);
     return;
   }
 
@@ -271,16 +277,15 @@ export function executeGateCommand(
       (error, stdout, stderr) => {
         if (error) {
           const output = (stderr || stdout || error.message).slice(0, GATE_MAX_OUTPUT);
-          completeGateRun(runId, "failed", output);
+          complete("failed", output);
         } else {
           const output = (stdout || "All checks passed").slice(0, GATE_MAX_OUTPUT);
-          completeGateRun(runId, "passed", output);
+          complete("passed", output);
         }
       }
     );
   } catch (err) {
-    completeGateRun(
-      runId,
+    complete(
       "failed",
       err instanceof Error ? err.message : "Failed to start gate command"
     );

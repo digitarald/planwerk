@@ -3,6 +3,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 
 import { UNASSIGNED_WORKSPACE } from "@/lib/automation-scope";
 import { KanbanCard, Phase } from "@/lib/types";
+import { replaceAuthoritativeCard } from "./card-reconcile";
 
 // Sentinel value for filtering cards with no project
 export { UNASSIGNED_WORKSPACE };
@@ -14,6 +15,7 @@ interface BoardState {
   hideDone: boolean;
   setDetailCard: (id: string | null) => void;
   setCards: (cards: KanbanCard[]) => void;
+  replaceCard: (id: string, card: KanbanCard) => void;
   updateCard: (id: string, card: Partial<KanbanCard>) => void;
   reconcileCard: (id: string, card: Partial<KanbanCard>) => void;
   addCard: (card: KanbanCard) => void;
@@ -206,6 +208,14 @@ export const useBoardStore = create<BoardState>()(
           cards,
           workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters, state.hideDone),
         })),
+      replaceCard: (id, incoming) =>
+        set((state) => {
+          const cards = state.cards.map((existing) => {
+            if (existing.id !== id) return existing;
+            return replaceAuthoritativeCard(existing, incoming);
+          });
+          return { cards, workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters, state.hideDone) };
+        }),
       updateCard: (id, incoming) =>
         set((state) => {
           const cards = state.cards.map((existing) => {

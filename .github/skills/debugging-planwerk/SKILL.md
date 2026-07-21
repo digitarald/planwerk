@@ -170,6 +170,11 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
   permits all workspaces. A malformed supplied scope fails closed, while an omitted
   scope preserves compatibility with older clients. The browser's “hide done” setting
   does not further limit automation because archived cards are already excluded.
+  Heartbeat actions also re-project the affected card from `session_cache` plus current
+  SQLite gate/review state and emit `cardChanged`; gate completion therefore does not
+  wait for an unrelated AHP host event to refresh the board. Asynchronous deterministic
+  commands emit `gate-completed` after their `gate_runs` row is finalized, which is the
+  refresh signal that clears the evaluating state.
 - `lib/orchestrator/{heartbeat,gate-engine,triage,risk-*}.ts` — the autonomous loop.
   Note: a plain plan-phase card only gets its `plan-review` gate injected when
   **idle**. A card that stays `running` (heads-down coding) won't advance until it

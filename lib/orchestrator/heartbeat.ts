@@ -18,6 +18,7 @@ import { advanceReviewToShip } from "./phase-advance";
  */
 export type HeartbeatAction =
   | { type: "gate-triggered"; cardId: string; gateType: string }
+  | { type: "gate-completed"; cardId: string; gateType: string; status: "passed" | "failed" }
   | { type: "review-injected"; cardId: string; skillId: string; iteration: number }
   | { type: "phase-advanced"; cardId: string; from: Phase; to: Phase }
   | { type: "nudge-sent"; cardId: string; message: string }
@@ -488,7 +489,9 @@ async function runBuildPipeline(
 
       // Execute the gate command if available, otherwise nudge agent
       if (gate.command && card.workingDirectory) {
-        executeGateCommand(runId, gate.command, card.workingDirectory);
+        executeGateCommand(runId, gate.command, card.workingDirectory, (status) => {
+          emit({ type: "gate-completed", cardId: card.id, gateType: gate.gateType, status });
+        });
       } else if (gate.command) {
         // No working directory — nudge agent to run the check
         const nudge = `Please run: ${gate.command}`;
@@ -496,6 +499,7 @@ async function runBuildPipeline(
       } else {
         // No command (manual gate) — pass immediately
         completeGateRun(runId, "passed", "No command configured");
+        emit({ type: "gate-completed", cardId: card.id, gateType: gate.gateType, status: "passed" });
       }
     }
     return actions;

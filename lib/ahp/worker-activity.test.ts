@@ -49,8 +49,14 @@ test("user and fork chats never appear as workers", () => {
 
 test("workers pruned from the host catalog remain as inactive task history", () => {
   const current = mapWorkerChats([toolWorker]);
+  current[0].usage = {
+    inputTokens: 12_000,
+    outputTokens: 800,
+    cacheReadTokens: 10_000,
+  };
   const retained = retainInactiveWorkers(current, []);
   assert.equal(retained[0].id, toolWorker.resource);
   assert.equal(retained[0].isActive, false);
   assert.equal(retained[0].runtime, "idle");
+  assert.deepEqual(retained[0].usage, current[0].usage);
 });
