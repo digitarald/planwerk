@@ -28,6 +28,9 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-pw-success: var(--pw-success);
+  --color-pw-warning: var(--pw-warning);
+  --color-pw-info: var(--pw-info);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);

@@ -68,11 +68,11 @@ const artifactIcons: Record<ArtifactType, typeof FileText> = {
   decision: Scale,
 };
 
-/** Single source of truth for the modal's small-caps section-header typography.
+/** Single source of truth for the modal's compact section-header typography.
  *  Every panel label shares it so the rhythm can't drift; variants (icon row,
  *  amber "Awaiting Input", the collapsible Changed Files button) layer on top. */
 const SECTION_LABEL_CLASS =
-  "text-[10px] font-semibold uppercase tracking-widest text-muted-foreground";
+  "text-xs font-semibold leading-4 text-foreground/65";
 
 function SectionLabel({
   className,
@@ -207,55 +207,67 @@ function GateRunRow({
   };
 }) {
   const stale = run.status === "passed" && isGateRunStale(run, cardDiff);
+  const RunIcon =
+    run.status === "passed"
+      ? ShieldCheck
+      : run.status === "failed"
+        ? ShieldX
+        : Loader2;
 
   return (
     <div
       className={cn(
-        "rounded-lg border p-3",
-        run.status === "passed" && "border-emerald-200 bg-emerald-50/50 dark:border-emerald-800 dark:bg-emerald-950/20",
-        run.status === "failed" && "border-red-200 bg-red-50/50 dark:border-red-800 dark:bg-red-950/20",
-        run.status === "running" && "border-blue-200 bg-blue-50/50 dark:border-blue-800 dark:bg-blue-950/20",
-        stale && "border-amber-300 dark:border-amber-700"
+        "rounded-lg border border-border/70 bg-muted/15 p-3.5",
+        run.status === "failed" && "border-destructive/35 bg-destructive/[0.025]",
+        run.status === "running" && "border-primary/25 bg-primary/[0.025]",
+        stale && "border-pw-warning/55"
       )}
     >
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-1.5">
-          {run.status === "passed" && <ShieldCheck className="h-3 w-3 shrink-0 text-emerald-600" />}
-          {run.status === "failed" && <ShieldX className="h-3 w-3 shrink-0 text-red-600" />}
-          {run.status === "running" && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-blue-600" />}
-          <span className="truncate text-xs font-medium">{run.gateName ?? run.gateType}</span>
-          <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <RunIcon
+            aria-hidden="true"
+            strokeWidth={1.8}
+            className={cn(
+              "h-4 w-4 shrink-0",
+              run.status === "passed" && "text-pw-success",
+              run.status === "failed" && "text-destructive",
+              run.status === "running" && "animate-spin text-primary",
+            )}
+          />
+          <span className="truncate text-[13px] font-semibold leading-5">{run.gateName ?? run.gateType}</span>
+          <span className="text-[11px] font-medium text-muted-foreground">
             {run.fromPhase} → {run.toPhase}
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {stale && (
-            <span className="inline-flex items-center gap-0.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
-              <AlertTriangle className="h-2.5 w-2.5" />
+            <span className="inline-flex items-center gap-1 rounded-md bg-pw-warning/15 px-2 py-1 text-[11px] font-semibold text-foreground">
+              <AlertTriangle className="h-3 w-3 text-pw-warning" />
               Stale
             </span>
           )}
           <span
             className={cn(
-              "rounded px-1.5 py-0.5 text-[10px] font-medium capitalize",
-              run.status === "passed" && "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
-              run.status === "failed" && "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
-              run.status === "running" && "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300"
+              "rounded-md px-2 py-1 text-[11px] font-semibold capitalize",
+              run.status === "passed" && "bg-pw-success/12 text-foreground",
+              run.status === "failed" && "bg-destructive/10 text-destructive",
+              run.status === "running" && "bg-primary/10 text-primary"
             )}
           >
             {run.status}
           </span>
         </div>
       </div>
-      <p className="mt-1 text-[11px] text-muted-foreground">
+      <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
         Verified via {gateRunMethod(run)}
         {run.completedAt && ` · ${gateRunRelativeTime(run.completedAt)}`}
         {stale && (
-          <span className="text-amber-600 dark:text-amber-400"> · verified against older code</span>
+          <span className="text-foreground"> · verified against older code</span>
         )}
       </p>
       {run.output && (
-        <pre className="mt-1.5 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-muted/40 p-2 text-[10px] leading-snug text-muted-foreground">
+        <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap rounded-md border border-border/50 bg-background/55 p-2.5 text-[11px] leading-relaxed text-foreground/70">
           {run.output.length > 600 ? `${run.output.slice(0, 600)}…` : run.output}
         </pre>
       )}
@@ -283,57 +295,160 @@ function formatTokenCount(value: number): string {
   return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
 
+function workerTokenTotal(worker: NonNullable<KanbanCard["workers"]>[number]): number | undefined {
+  if (!worker.usage) return undefined;
+  const total = (worker.usage.inputTokens ?? 0) + (worker.usage.outputTokens ?? 0);
+  return total > 0 ? total : undefined;
+}
+
 function WorkerActivitySection({ card }: { card: KanbanCard }) {
   const workers = card.workers;
+  const [completedExpanded, setCompletedExpanded] = useState(false);
   if (!workers || workers.length === 0) return null;
+
+  const foregroundWorkers = workers.filter(
+    (worker) => worker.isActive || worker.runtime !== "idle",
+  );
+  const activeWorkerCount = workers.filter((worker) => worker.isActive).length;
+  const attentionWorkerCount = foregroundWorkers.length - activeWorkerCount;
+  const foregroundWorkerIds = new Set(foregroundWorkers.map((worker) => worker.id));
+  const completedWorkers = workers.filter(
+    (worker) => !worker.isActive && worker.runtime === "idle",
+  );
+  const completedTokens = completedWorkers.reduce(
+    (total, worker) => total + (workerTokenTotal(worker) ?? 0),
+    0,
+  );
 
   return (
     <section>
       <SectionLabel className="flex items-center gap-1.5">
-        <Bot className="h-3 w-3 text-primary" />
+        <Bot aria-hidden="true" className="h-3.5 w-3.5 text-primary" strokeWidth={1.8} />
         Worker activity
         <span className="font-normal normal-case tracking-normal text-muted-foreground">
-          ({workers.filter((worker) => worker.isActive).length} active)
+          ({activeWorkerCount} active
+          {attentionWorkerCount > 0 && ` · ${attentionWorkerCount} needs attention`}
+          {completedWorkers.length > 0 && ` · ${completedWorkers.length} completed`})
         </span>
       </SectionLabel>
-      <div className="space-y-2">
+      <div>
         {workers.map((worker) => (
-          <div key={worker.id} className="rounded-lg border border-border/60 bg-muted/20 p-3">
-            <div className="flex items-center justify-between gap-2">
-              <span className="truncate text-xs font-medium">{worker.title}</span>
-              <span className={cn(
-                "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
-                worker.runtime === "running" && "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
-                worker.runtime === "idle" && "bg-muted text-muted-foreground",
-                worker.runtime === "input-needed" && "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
-                worker.runtime === "error" && "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
-              )}>
-                {worker.runtime === "running" ? "working" : worker.runtime}
-              </span>
-            </div>
-            {worker.activity && (
-              <p className="mt-1 text-[11px] text-muted-foreground">{worker.activity}</p>
+          <div
+            key={worker.id}
+            aria-hidden={!foregroundWorkerIds.has(worker.id)}
+            className={cn(
+              "grid transition-[grid-template-rows,opacity,transform] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
+              foregroundWorkerIds.has(worker.id)
+                ? "grid-rows-[1fr] opacity-100"
+                : "pointer-events-none -translate-y-1 grid-rows-[0fr] opacity-0",
             )}
-            {worker.history.length > 0 && (
-              <div className="mt-2 border-l border-border pl-2">
-                {worker.history.slice(-3).reverse().map((entry) => (
-                  <p key={`${entry.timestamp}-${entry.message}`} className="text-[10px] leading-relaxed text-muted-foreground/75">
-                    {entry.message}
+          >
+            <div className="overflow-hidden">
+              <div
+                className={cn(
+                  "mb-2 rounded-lg border border-border/70 bg-muted/15 p-3.5",
+                  worker.runtime === "running" && "border-primary/25 bg-primary/[0.025]",
+                  worker.runtime === "input-needed" && "border-pw-warning/55",
+                  worker.runtime === "error" && "border-destructive/35 bg-destructive/[0.025]",
+                )}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex min-w-0 items-center gap-2 truncate text-[13px] font-semibold">
+                    {worker.runtime === "running" && (
+                      <Loader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-primary" strokeWidth={1.8} />
+                    )}
+                    <span className="truncate">{worker.title}</span>
+                  </span>
+                  <span className={cn(
+                    "shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold",
+                    worker.runtime === "running" && "bg-primary/10 text-primary",
+                    worker.runtime === "input-needed" && "bg-pw-warning/15 text-foreground",
+                    worker.runtime === "error" && "bg-destructive/10 text-destructive",
+                  )}>
+                    {worker.runtime === "running" ? "working" : worker.runtime}
+                  </span>
+                </div>
+                {worker.activity && (
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">{worker.activity}</p>
+                )}
+                {worker.history.length > 0 && (
+                  <div className="mt-2 border-l border-border pl-2">
+                    {worker.history.slice(-3).reverse().map((entry) => (
+                      <p key={`${entry.timestamp}-${entry.message}`} className="text-[10px] leading-relaxed text-muted-foreground/75">
+                        {entry.message}
+                      </p>
+                    ))}
+                  </div>
+                )}
+                {worker.usage && (
+                  <p
+                    className="mt-2 text-[11px] tabular-nums text-muted-foreground"
+                    title="Live usage reported by the worker chat"
+                  >
+                    {worker.usage.inputTokens !== undefined && `${formatTokenCount(worker.usage.inputTokens)} in`}
+                    {worker.usage.inputTokens !== undefined && worker.usage.outputTokens !== undefined && " · "}
+                    {worker.usage.outputTokens !== undefined && `${formatTokenCount(worker.usage.outputTokens)} out`}
+                    {worker.usage.cacheReadTokens !== undefined && ` · ${formatTokenCount(worker.usage.cacheReadTokens)} cached`}
                   </p>
-                ))}
+                )}
               </div>
-            )}
-            {worker.usage && (
-              <p className="mt-2 text-[10px] tabular-nums text-muted-foreground/70">
-                {worker.usage.inputTokens !== undefined && `${formatTokenCount(worker.usage.inputTokens)} in`}
-                {worker.usage.inputTokens !== undefined && worker.usage.outputTokens !== undefined && " · "}
-                {worker.usage.outputTokens !== undefined && `${formatTokenCount(worker.usage.outputTokens)} out`}
-                {worker.usage.cacheReadTokens !== undefined && ` · ${formatTokenCount(worker.usage.cacheReadTokens)} cached`}
-              </p>
-            )}
+            </div>
           </div>
         ))}
       </div>
+
+      {completedWorkers.length > 0 && (
+        <div className={cn(foregroundWorkers.length > 0 && "mt-1")}>
+          <button
+            type="button"
+            aria-expanded={completedExpanded}
+            onClick={() => setCompletedExpanded((expanded) => !expanded)}
+            className="flex h-8 w-full items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-2.5 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+          >
+            <ChevronDown
+              className={cn(
+                "h-3 w-3 shrink-0 -rotate-90 transition-transform duration-200",
+                completedExpanded && "rotate-0",
+              )}
+            />
+            <span className="font-medium text-foreground/80">
+              {completedWorkers.length} completed {completedWorkers.length === 1 ? "worker" : "workers"}
+            </span>
+            {completedTokens > 0 && (
+              <>
+                <span className="text-border">·</span>
+                <span className="tabular-nums">{formatTokenCount(completedTokens)} tokens</span>
+              </>
+            )}
+            <span className="ml-auto text-[10px]">
+              {completedExpanded ? "Hide" : "Show"}
+            </span>
+          </button>
+
+          {completedExpanded && (
+            <div className="scrollbar-thin mt-2 flex max-h-28 flex-wrap content-start gap-1.5 overflow-y-auto pr-1 animate-in fade-in slide-in-from-top-1 duration-150">
+              {completedWorkers.map((worker) => {
+                const tokens = workerTokenTotal(worker);
+                return (
+                  <span
+                    key={worker.id}
+                    title={worker.activity ?? worker.title}
+                    className="inline-flex h-6 max-w-full items-center gap-1.5 rounded-full border border-border/60 bg-muted/25 px-2 text-[10px] text-muted-foreground"
+                  >
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-muted-foreground/35" />
+                    <span className="max-w-48 truncate">{worker.title}</span>
+                    {tokens !== undefined && (
+                      <span className="shrink-0 tabular-nums text-muted-foreground/70">
+                        {formatTokenCount(tokens)}
+                      </span>
+                    )}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </section>
   );
 }
@@ -741,7 +856,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                   </div>
                 </section>
               )}
-              <WorkerActivitySection card={card} />
+              <WorkerActivitySection key={card.id} card={card} />
 
               {/* Changed Files */}
               {fileChanges.length > 0 && (
@@ -924,44 +1039,67 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                     Review Findings
                   </SectionLabel>
                   <div className="space-y-2">
-                    {card.reviewFindings.map((review) => (
-                      <div
-                        key={review.id}
-                        className={cn(
-                          "rounded-lg border p-3",
-                          review.status === "passed" && "border-emerald-200 bg-emerald-50/50 dark:border-emerald-800 dark:bg-emerald-950/20",
-                          review.status === "failed" && "border-red-200 bg-red-50/50 dark:border-red-800 dark:bg-red-950/20",
-                          review.status === "escalated" && "border-amber-200 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/20",
-                          review.status === "in-progress" && "border-blue-200 bg-blue-50/50 dark:border-blue-800 dark:bg-blue-950/20",
-                        )}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-medium">{review.skillId}</span>
-                          <span className={cn(
-                            "text-[10px] font-medium px-1.5 py-0.5 rounded capitalize",
-                            review.status === "passed" && "text-emerald-700 bg-emerald-100 dark:text-emerald-300 dark:bg-emerald-900/40",
-                            review.status === "failed" && "text-red-700 bg-red-100 dark:text-red-300 dark:bg-red-900/40",
-                            review.status === "escalated" && "text-amber-700 bg-amber-100 dark:text-amber-300 dark:bg-amber-900/40",
-                            review.status === "in-progress" && "text-blue-700 bg-blue-100 dark:text-blue-300 dark:bg-blue-900/40",
-                          )}>
-                            {review.status === "in-progress" ? `Reviewing (${review.iteration}/${review.maxIterations})` : review.status}
-                          </span>
+                    {card.reviewFindings.map((review) => {
+                      const ReviewIcon =
+                        review.status === "passed"
+                          ? ShieldCheck
+                          : review.status === "failed"
+                            ? ShieldX
+                            : review.status === "escalated"
+                              ? AlertTriangle
+                              : Loader2;
+
+                      return (
+                        <div
+                          key={review.id}
+                          className={cn(
+                            "rounded-lg border border-border/70 bg-muted/15 p-3.5",
+                            review.status === "failed" && "border-destructive/35 bg-destructive/[0.025]",
+                            review.status === "escalated" && "border-pw-warning/55",
+                            review.status === "in-progress" && "border-primary/25 bg-primary/[0.025]",
+                          )}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="flex min-w-0 items-center gap-2 text-[13px] font-semibold">
+                              <ReviewIcon
+                                aria-hidden="true"
+                                strokeWidth={1.8}
+                                className={cn(
+                                  "h-4 w-4 shrink-0",
+                                  review.status === "passed" && "text-pw-success",
+                                  review.status === "failed" && "text-destructive",
+                                  review.status === "escalated" && "text-pw-warning",
+                                  review.status === "in-progress" && "animate-spin text-primary",
+                                )}
+                              />
+                              <span className="truncate">{review.skillId}</span>
+                            </span>
+                            <span className={cn(
+                              "rounded-md px-2 py-1 text-[11px] font-semibold capitalize",
+                              review.status === "passed" && "bg-pw-success/12 text-foreground",
+                              review.status === "failed" && "bg-destructive/10 text-destructive",
+                              review.status === "escalated" && "bg-pw-warning/15 text-foreground",
+                              review.status === "in-progress" && "bg-primary/10 text-primary",
+                            )}>
+                              {review.status === "in-progress" ? `Reviewing (${review.iteration}/${review.maxIterations})` : review.status}
+                            </span>
+                          </div>
+                          {review.summary && (
+                            <p className="mt-1.5 text-xs leading-5 text-muted-foreground">{review.summary}</p>
+                          )}
+                          {review.findings && review.findings.length > 0 && (
+                            <ul className="mt-1.5 space-y-0.5">
+                              {review.findings.slice(0, 5).map((finding, i) => (
+                                <li key={i} className="flex gap-1 text-[11px] text-muted-foreground">
+                                  <span className="shrink-0">•</span>
+                                  <span>{finding}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
                         </div>
-                        {review.summary && (
-                          <p className="mt-1 text-[11px] text-muted-foreground">{review.summary}</p>
-                        )}
-                        {review.findings && review.findings.length > 0 && (
-                          <ul className="mt-1.5 space-y-0.5">
-                            {review.findings.slice(0, 5).map((finding, i) => (
-                              <li key={i} className="text-[11px] text-muted-foreground flex gap-1">
-                                <span className="shrink-0">•</span>
-                                <span>{finding}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </section>
               )}
