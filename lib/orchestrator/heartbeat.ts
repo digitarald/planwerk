@@ -5,6 +5,7 @@ import { KanbanCard, Phase, RiskLevel, PendingInput, normalizeChangesetRef } fro
 import { loadConfig } from "./skill-config";
 import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills, hasPlanRubberDuck, recordPlanRubberDuck, shouldStartReview } from "./review-executor";
 import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard, completeGateRun, executeGateCommand } from "./gate-engine";
+import { isRetryableGateFailure } from "./gate-command";
 import { getCardRisk } from "./risk-store";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
 import { injectMessage, answerInput, requestPlanChanges } from "@/lib/ahp/session-messenger";
@@ -458,13 +459,12 @@ async function runBuildPipeline(
       );
       if (alreadyRunning) continue;
 
-      // Skip if this gate already failed for the same code changeset. Re-running
-      // a deterministic gate against unchanged code just reproduces the failure,
-      // so we wait for the code (and thus the ref) to change. Without this the
-      // heartbeat re-triggers broken gates every cycle (thousands of dead runs).
+      // Skip unchanged command failures, but retry infrastructure failures that
+      // can recover without a code change (for example after a server restart).
       const alreadyFailed = existingRuns.find(
         (r) => r.gateType === gate.gateType && r.status === "failed" &&
-          normalizeChangesetRef(r.changesetRef) === currentCodeRef
+          normalizeChangesetRef(r.changesetRef) === currentCodeRef &&
+          !isRetryableGateFailure(r.output)
       );
       if (alreadyFailed) continue;
 

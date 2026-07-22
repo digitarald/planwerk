@@ -5,6 +5,7 @@ import { existsSync, statSync } from "node:fs";
 
 import { getDb } from "@/lib/db/schema";
 import { GateStatus, Phase, PHASE_ORDER, RiskLevel, normalizeChangesetRef } from "@/lib/types";
+import { resolveGateWorkingDirectory } from "./gate-command";
 
 export type GateType =
   | "lint"
@@ -258,22 +259,31 @@ export function executeGateCommand(
     onComplete?.(status);
   };
 
+  let resolvedCwd: string;
+  try {
+    resolvedCwd = resolveGateWorkingDirectory(cwd);
+  } catch (error) {
+    const detail = error instanceof Error ? ` (${error.message})` : "";
+    complete("failed", `Invalid working directory: ${cwd}${detail}`);
+    return;
+  }
+
   let cwdOk = false;
   try {
-    cwdOk = existsSync(cwd) && statSync(cwd).isDirectory();
+    cwdOk = existsSync(resolvedCwd) && statSync(resolvedCwd).isDirectory();
   } catch {
     cwdOk = false;
   }
 
   if (!cwdOk) {
-    complete("failed", `Working directory not found: ${cwd}`);
+    complete("failed", `Working directory not found: ${resolvedCwd}`);
     return;
   }
 
   try {
     exec(
       command,
-      { cwd, timeout: GATE_TIMEOUT_MS, maxBuffer: GATE_MAX_OUTPUT },
+      { cwd: resolvedCwd, timeout: GATE_TIMEOUT_MS, maxBuffer: GATE_MAX_OUTPUT },
       (error, stdout, stderr) => {
         if (error) {
           const output = (stderr || stdout || error.message).slice(0, GATE_MAX_OUTPUT);
