@@ -39,6 +39,14 @@ test("last agent message keeps existing trailing markdown behavior", () => {
   assert.equal(extractLastAgentMessage(turns), "Final response");
 });
 
+test("last agent message can opt out of the summary length cap", () => {
+  const content = "x".repeat(2500);
+  const turns = [{ responseParts: [{ kind: "markdown", content }] }];
+
+  assert.equal(extractLastAgentMessage(turns)?.length, 2000);
+  assert.equal(extractLastAgentMessage(turns, null), content);
+});
+
 test("markdown response extraction ignores system notification content and metadata", () => {
   const turns = [{
     responseParts: [

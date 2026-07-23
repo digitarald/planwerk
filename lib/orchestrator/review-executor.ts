@@ -1,9 +1,7 @@
 import "server-only";
 
-import type { Turn } from "@microsoft/agent-host-protocol";
-
 import { getDb } from "@/lib/db/schema";
-import { injectMessage, fetchLastTurns, fetchTurnById } from "@/lib/ahp/session-messenger";
+import { injectMessage, fetchTurnById } from "@/lib/ahp/session-messenger";
 import {
   loadConfig,
   getApplicableSkills,
@@ -11,17 +9,18 @@ import {
   shouldFollowEdits,
   type SkillConfig,
 } from "./skill-config";
-import { extractVerdict, type ReviewVerdict } from "./verdict-extractor";
 import {
   startGateRun,
   completeGateRun,
 } from "./gate-engine";
 import type { Phase, RiskLevel } from "@/lib/types";
 import { normalizeChangesetRef } from "@/lib/types";
+import { extractReviewEvidence } from "./review-evidence";
+import { decideReviewAction, type ReviewAction } from "./review-decision";
+import { judgeReviewResponse } from "./verdict-judge";
+import type { ReviewVerdict } from "./verdict-judge-core";
 
-const debug = (...args: unknown[]) => {
-  if (process.env.AHP_DEBUG) console.info("[review-executor]", ...args);
-};
+const reviewJudgmentsInFlight = new Set<number>();
 
 export type ReviewRunStatus =
   | "pending"
@@ -292,8 +291,8 @@ export async function startReview(
       // Persist turnId only when the prompt started a turn immediately —
       // a queued message's id isn't guaranteed by the protocol to become the
       // eventual Turn.id (see fetchTurnById's docs), so recording it would
-      // create a false sense of precision. NULL routes processReviewResult
-      // to the existing tail-scan fallback instead.
+      // create a false sense of precision. Without an exact id, verdict
+      // processing fails closed to human review.
       const persistedTurnId = queued ? null : turnId;
       db.prepare(
         "UPDATE review_runs SET status = 'injected', prompt_injected_at = datetime('now'), turn_id = ? WHERE id = ?"
@@ -324,7 +323,9 @@ export async function processReviewResult(
   sessionUri: string,
   reviewRunId: number,
   currentChangesetRef?: string
-): Promise<ReviewVerdict & { action: "passed" | "re-iterate" | "escalated" }> {
+): Promise<(ReviewVerdict & { action: ReviewAction }) | null> {
+  if (reviewJudgmentsInFlight.has(reviewRunId)) return null;
+
   const db = getDb();
   const row = db
     .prepare("SELECT * FROM review_runs WHERE id = ?")
@@ -341,126 +342,139 @@ export async function processReviewResult(
   }
 
   const run = mapRow(row);
-
-  // Mark as extracting
-  db.prepare("UPDATE review_runs SET status = 'extracting' WHERE id = ?").run(reviewRunId);
-
-  // Extract the verdict from the exact turn the review prompt started, when we
-  // recorded one (see startReview: only set for a turn started immediately,
-  // not a queued message). This avoids binding to the wrong transcript when
-  // other turns happen between injection and processing (concurrent skills,
-  // user chatting, retries). Falls back to the previous tail-scan heuristic
-  // when there's no persisted turn_id, or the turn isn't found in the current
-  // tail window (e.g. paged out — rare, since we process promptly).
-  let turns: Turn[];
-  if (run.turnId) {
-    const turn = await fetchTurnById(hostUrl, sessionUri, run.turnId);
-    if (turn) {
-      turns = [turn];
-    } else {
-      debug(`turn ${run.turnId} not found for run ${reviewRunId}, falling back to last-5 scan`);
-      turns = (await fetchLastTurns(hostUrl, sessionUri, 5)).turns;
-    }
-  } else {
-    turns = (await fetchLastTurns(hostUrl, sessionUri, 5)).turns;
-  }
-  const verdict = extractVerdict(turns);
-
-  // Store verdict
-  db.prepare(
-    `UPDATE review_runs SET
-      verdict_extracted_at = datetime('now'),
-      verdict_summary = ?,
-      findings_json = ?,
-      changeset_ref = ?
-    WHERE id = ?`
-  ).run(
-    verdict.summary,
-    JSON.stringify(verdict.findings),
-    currentChangesetRef ?? null,
-    reviewRunId
-  );
-
-  // Keep the linked gate_run's changeset_ref in lockstep with the review_run's.
-  // The verdict was rendered against the code state at *processing* time, not at
-  // injection time — recording the injection-time ref (from startGateRun) would
-  // leave the gate looking stale while shouldStartReview sees the review as fresh,
-  // deadlocking the card in its current phase. This matters most for the opt-in
-  // busy plan-review path, where the agent keeps editing during the review.
-  if (run.gateRunId) {
-    db.prepare("UPDATE gate_runs SET changeset_ref = ? WHERE id = ?").run(
-      currentChangesetRef ?? null,
-      run.gateRunId
-    );
+  if (run.status === "injected") {
+    const claimed = db
+      .prepare(
+        "UPDATE review_runs SET status = 'extracting' WHERE id = ? AND status = 'injected'"
+      )
+      .run(reviewRunId);
+    if (claimed.changes === 0) return null;
+  } else if (run.status !== "extracting") {
+    return null;
   }
 
-  // Decide action based on verdict
-  if (verdict.status === "passed") {
-    // Even an explicit pass respects the follow-edits policy: at risk levels that
-    // require re-review after auto-fixes (high risk), a pass that also made edits
-    // is re-iterated once (budget permitting) rather than trusting a self-verified
-    // pass. Low/medium (followEdits=false) pass immediately.
-    const cfgPass = loadConfig();
-    const riskPass = guessRiskFromPhaseTransition(run.cardId);
-    if (
-      verdict.madeEdits &&
-      shouldFollowEdits(riskPass, cfgPass) &&
-      run.iteration < getEffectiveMaxIterations(run.skillId, riskPass, cfgPass)
-    ) {
-      db.prepare("UPDATE review_runs SET status = 'failed' WHERE id = ?").run(reviewRunId);
-      if (run.gateRunId) {
-        completeGateRun(run.gateRunId, "failed", "Fixes applied — re-review required at this risk level.");
+  reviewJudgmentsInFlight.add(reviewRunId);
+  try {
+    let verdict: ReviewVerdict;
+    try {
+      if (!run.turnId) {
+        verdict = {
+          status: "needs-human",
+          summary: "Exact review turn is unavailable; human review required.",
+          findings: [],
+          madeEdits: false,
+        };
+      } else {
+        const turn = await fetchTurnById(hostUrl, sessionUri, run.turnId);
+        if (!turn) {
+          verdict = {
+            status: "needs-human",
+            summary: "Exact review turn could not be found; human review required.",
+            findings: [],
+            madeEdits: false,
+          };
+        } else {
+          const evidence = extractReviewEvidence(turn);
+          const judgment = await judgeReviewResponse(evidence.response);
+          verdict = { ...judgment, madeEdits: evidence.madeEdits };
+        }
       }
-      return { ...verdict, status: "failed", action: "re-iterate" };
+    } catch (error) {
+      console.warn(
+        `[review-executor] Failed to collect review evidence for run ${reviewRunId}:`,
+        error instanceof Error ? error.message : error
+      );
+      verdict = {
+        status: "needs-human",
+        summary: "Review evidence could not be processed; human review required.",
+        findings: [],
+        madeEdits: false,
+      };
     }
-    db.prepare("UPDATE review_runs SET status = 'passed' WHERE id = ?").run(reviewRunId);
+
+    // Store verdict
+    db.prepare(
+      `UPDATE review_runs SET
+        verdict_extracted_at = datetime('now'),
+        verdict_summary = ?,
+        findings_json = ?,
+        changeset_ref = ?
+      WHERE id = ?`
+    ).run(
+      verdict.summary,
+      JSON.stringify(verdict.findings),
+      currentChangesetRef ?? null,
+      reviewRunId
+    );
+
+    // Keep the linked gate_run's changeset_ref in lockstep with the review_run's.
+    // The verdict was rendered against the code state at *processing* time, not at
+    // injection time — recording the injection-time ref (from startGateRun) would
+    // leave the gate looking stale while shouldStartReview sees the review as fresh,
+    // deadlocking the card in its current phase. This matters most for the opt-in
+    // busy plan-review path, where the agent keeps editing during the review.
     if (run.gateRunId) {
-      completeGateRun(run.gateRunId, "passed", verdict.summary);
+      db.prepare("UPDATE gate_runs SET changeset_ref = ? WHERE id = ?").run(
+        currentChangesetRef ?? null,
+        run.gateRunId
+      );
     }
-    return { ...verdict, action: "passed" };
-  }
 
-  if (verdict.status === "needs-human") {
-    db.prepare("UPDATE review_runs SET status = 'escalated' WHERE id = ?").run(reviewRunId);
-    if (run.gateRunId) {
-      completeGateRun(run.gateRunId, "failed", "Escalated to human: " + verdict.summary);
-    }
-    return { ...verdict, action: "escalated" };
-  }
+    const config = loadConfig();
+    const riskLevel = guessRiskFromPhaseTransition(run.cardId);
+    const maxIterations = getEffectiveMaxIterations(run.skillId, riskLevel, config);
+    const action = decideReviewAction(
+      verdict,
+      run.iteration,
+      maxIterations,
+      shouldFollowEdits(riskLevel, config)
+    );
 
-  // Failed — check if we should re-iterate
-  const config = loadConfig();
-  const riskLevel = guessRiskFromPhaseTransition(run.cardId);
-  const maxIter = getEffectiveMaxIterations(run.skillId, riskLevel, config);
-  const followEdits = shouldFollowEdits(riskLevel, config);
-
-  if (run.iteration < maxIter) {
-    // If edits were made but we don't follow edits at this risk level, still pass
-    if (verdict.madeEdits && !followEdits) {
+    if (action === "passed") {
       db.prepare("UPDATE review_runs SET status = 'passed' WHERE id = ?").run(reviewRunId);
       if (run.gateRunId) {
-        completeGateRun(run.gateRunId, "passed", "Fixes applied; re-review not required at this risk level.");
+        completeGateRun(run.gateRunId, "passed", verdict.summary);
       }
-      return { ...verdict, status: "passed", action: "passed" };
+      return { ...verdict, action };
     }
 
-    // Mark as failed (will be re-iterated by heartbeat)
-    db.prepare("UPDATE review_runs SET status = 'failed' WHERE id = ?").run(reviewRunId);
+    if (action === "re-iterate") {
+      db.prepare("UPDATE review_runs SET status = 'failed' WHERE id = ?").run(reviewRunId);
+      if (run.gateRunId) {
+        completeGateRun(
+          run.gateRunId,
+          "failed",
+          verdict.status === "passed"
+            ? "Fixes applied — re-review required at this risk level."
+            : verdict.summary
+        );
+      }
+      return {
+        ...verdict,
+        status: verdict.status === "passed" ? "failed" : verdict.status,
+        action,
+      };
+    }
+
+    if (verdict.status === "needs-human") {
+      db.prepare("UPDATE review_runs SET status = 'escalated' WHERE id = ?").run(reviewRunId);
+      if (run.gateRunId) {
+        completeGateRun(run.gateRunId, "failed", "Escalated to human: " + verdict.summary);
+      }
+      return { ...verdict, action };
+    }
+
+    db.prepare("UPDATE review_runs SET status = 'escalated', verdict_summary = ? WHERE id = ?").run(
+      `Max iterations (${maxIterations}) reached: ${verdict.summary}`,
+      reviewRunId
+    );
     if (run.gateRunId) {
-      completeGateRun(run.gateRunId, "failed", verdict.summary);
+      completeGateRun(run.gateRunId, "failed", `Escalated after ${maxIterations} iterations: ${verdict.summary}`);
     }
-    return { ...verdict, action: "re-iterate" };
+    return { ...verdict, action };
+  } finally {
+    reviewJudgmentsInFlight.delete(reviewRunId);
   }
-
-  // Max iterations reached — escalate
-  db.prepare("UPDATE review_runs SET status = 'escalated', verdict_summary = ? WHERE id = ?").run(
-    `Max iterations (${maxIter}) reached: ${verdict.summary}`,
-    reviewRunId
-  );
-  if (run.gateRunId) {
-    completeGateRun(run.gateRunId, "failed", `Escalated after ${maxIter} iterations: ${verdict.summary}`);
-  }
-  return { ...verdict, action: "escalated" };
 }
 
 /**
@@ -483,15 +497,6 @@ function buildReviewPrompt(skill: SkillConfig, iteration: number, maxIterations:
   if (!skill.autoFix) {
     prompt += "\n\nReport findings only — do NOT make any code changes.";
   }
-
-  // Verdict contract: the review machinery parses this token deterministically
-  // (see verdict-parse.ts). Without it, a clean review can be misread as ambiguous
-  // and escalate needlessly.
-  prompt +=
-    '\n\nWhen finished, end your reply with exactly one line stating your verdict, ' +
-    'one of:\n"VERDICT: pass" (no blocking issues), ' +
-    '"VERDICT: fail" (issues that must be addressed), or ' +
-    '"VERDICT: needs-human" (cannot decide — human review required).';
 
   return prompt;
 }

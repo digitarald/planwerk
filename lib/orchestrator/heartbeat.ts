@@ -280,6 +280,30 @@ function emitCoherenceOutcome(o: {
   }
 }
 
+function kickReviewJudgment(
+  hostUrl: string,
+  cardId: string,
+  skillId: string,
+  reviewRunId: number,
+  changesetRef: string | undefined
+): void {
+  void processReviewResult(hostUrl, cardId, reviewRunId, changesetRef)
+    .then((verdict) => {
+      if (!verdict) return;
+      if (verdict.action === "passed") {
+        emit({ type: "review-passed", cardId, skillId });
+      } else if (verdict.action === "escalated") {
+        emit({ type: "escalated", cardId, reason: verdict.summary });
+      }
+    })
+    .catch((error) => {
+      console.warn(
+        `[heartbeat:review] Failed to process review ${reviewRunId}:`,
+        error instanceof Error ? error.message : error
+      );
+    });
+}
+
 async function processCard(
   hostUrl: string,
   card: KanbanCard,
@@ -518,18 +542,14 @@ async function runBuildPipeline(
     } else {
       // Active reviews exist — handle based on status
       for (const review of activeReviews) {
-        if (review.status === "injected") {
-          // Session should be idle now — extract verdict
-          const sessionUri = card.id;
-          const verdict = await processReviewResult(hostUrl, sessionUri, review.id, changesetRef);
-          if (verdict.action === "passed") {
-            emit({ type: "review-passed", cardId: card.id, skillId: review.skillId });
-            actions.push({ type: "review-passed", cardId: card.id, skillId: review.skillId });
-          } else if (verdict.action === "escalated") {
-            emit({ type: "escalated", cardId: card.id, reason: verdict.summary });
-            actions.push({ type: "escalated", cardId: card.id, reason: verdict.summary });
-          }
-          // re-iterate: status will be 'failed', picked up below on next tick
+        if (review.status === "injected" || review.status === "extracting") {
+          kickReviewJudgment(
+            hostUrl,
+            card.id,
+            review.skillId,
+            review.id,
+            changesetRef
+          );
         } else if (review.status === "failed") {
           // Failed review needs re-injection (re-iteration)
           const skills = getRequiredReviewSkills(transition, riskLevel);
@@ -822,32 +842,14 @@ async function runPlanPipeline(
     } else {
       // Process active reviews (verdict extraction, re-iteration, escalation)
       for (const review of activeReviews) {
-        if (review.status === "injected") {
-          const sessionUri = card.id;
-          const verdict = await processReviewResult(hostUrl, sessionUri, review.id, changesetRef);
-          if (verdict.action === "passed") {
-            emit({ type: "review-passed", cardId: card.id, skillId: review.skillId });
-            actions.push({ type: "review-passed", cardId: card.id, skillId: review.skillId });
-            // Same-tick advance: the review just satisfied the last pending gate,
-            // so advance plan->build now instead of waiting a full tick. Waiting
-            // let a flapping changeset ref re-invalidate the fresh pass and
-            // re-inject the review -- the loop this whole change fixes. Re-check
-            // gates freshly (other required gates may still be pending).
-            const recheck = canAdvancePhase(card.id, "plan", "build", card.workingDirectory, riskLevel, changesetRef);
-            if (
-              recheck.allowed &&
-              config.orchestrator.autoAdvancePhases &&
-              canEnterPhase("build", allCards, config)
-            ) {
-              setCardPhase(card.id, "build");
-              const advanced: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "plan", to: "build" };
-              emit(advanced);
-              actions.push(advanced);
-            }
-          } else if (verdict.action === "escalated") {
-            emit({ type: "escalated", cardId: card.id, reason: verdict.summary });
-            actions.push({ type: "escalated", cardId: card.id, reason: verdict.summary });
-          }
+        if (review.status === "injected" || review.status === "extracting") {
+          kickReviewJudgment(
+            hostUrl,
+            card.id,
+            review.skillId,
+            review.id,
+            changesetRef
+          );
         } else if (review.status === "failed") {
           const skills = getRequiredReviewSkills(transition, riskLevel);
           const skill = skills.find((s) => s.id === review.skillId);
@@ -923,16 +925,14 @@ async function runReviewPipeline(
     } else {
       // Process active reviews (verdict extraction, re-iteration, escalation)
       for (const review of activeReviews) {
-        if (review.status === "injected") {
-          const sessionUri = card.id;
-          const verdict = await processReviewResult(hostUrl, sessionUri, review.id, changesetRef);
-          if (verdict.action === "passed") {
-            emit({ type: "review-passed", cardId: card.id, skillId: review.skillId });
-            actions.push({ type: "review-passed", cardId: card.id, skillId: review.skillId });
-          } else if (verdict.action === "escalated") {
-            emit({ type: "escalated", cardId: card.id, reason: verdict.summary });
-            actions.push({ type: "escalated", cardId: card.id, reason: verdict.summary });
-          }
+        if (review.status === "injected" || review.status === "extracting") {
+          kickReviewJudgment(
+            hostUrl,
+            card.id,
+            review.skillId,
+            review.id,
+            changesetRef
+          );
         } else if (review.status === "failed") {
           const skills = getRequiredReviewSkills(transition, riskLevel);
           const skill = skills.find((s) => s.id === review.skillId);

@@ -5,6 +5,7 @@
 export interface ResponsePartLike {
   kind?: unknown;
   content?: unknown;
+  toolCall?: unknown;
 }
 
 export interface TurnWithResponsePartsLike {
@@ -42,8 +43,12 @@ const MAX_AGENT_MESSAGE_LENGTH = 2000;
  * after the final tool call is agent output; system notifications are ignored.
  */
 export function extractLastAgentMessage(
-  turns: readonly TurnWithResponsePartsLike[]
+  turns: readonly TurnWithResponsePartsLike[],
+  maxLength: number | null = MAX_AGENT_MESSAGE_LENGTH
 ): string | undefined {
+  const limit = (message: string) =>
+    maxLength === null ? message : message.slice(0, maxLength);
+
   for (let i = turns.length - 1; i >= 0; i--) {
     const parts = turns[i].responseParts;
     if (!parts?.length) continue;
@@ -64,12 +69,12 @@ export function extractLastAgentMessage(
       .trim();
 
     if (trailingMarkdown) {
-      return trailingMarkdown.slice(0, MAX_AGENT_MESSAGE_LENGTH);
+      return limit(trailingMarkdown);
     }
 
     const allMarkdown = parts.filter(isMarkdownPart);
     const last = allMarkdown.at(-1)?.content.trim();
-    if (last) return last.slice(0, MAX_AGENT_MESSAGE_LENGTH);
+    if (last) return limit(last);
   }
 
   return undefined;

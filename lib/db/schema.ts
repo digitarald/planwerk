@@ -169,8 +169,8 @@ export function getDb(): Database.Database {
 
     // review_runs.turn_id: the exact Turn.id the review prompt started (when
     // injectMessage started a turn immediately rather than queuing it), so
-    // processReviewResult can extract the verdict from that precise turn
-    // instead of guessing from the last few turns in the chat.
+    // processReviewResult can judge that precise turn. Missing correlation
+    // fails closed instead of guessing from nearby chat turns.
     const reviewRunsColumns = db
       .prepare("PRAGMA table_info(review_runs)")
       .all() as Array<{ name: string }>;
