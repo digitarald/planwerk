@@ -6,14 +6,31 @@ import { parse as parseYaml } from "yaml";
 
 import type { RiskLevel } from "@/lib/types";
 import type { CoherenceConfig } from "./coherence-engine";
+import { resolveReviewPrompt } from "./review-prompt";
 
 export interface SkillConfig {
   id: string;
   prompt: string;
+  promptByRisk?: Partial<Record<RiskLevel, string>>;
   description: string;
   riskThreshold: RiskLevel;
   maxIterations: number;
   autoFix: boolean;
+}
+
+function parseRiskPrompts(
+  raw: Record<string, unknown> | undefined,
+  fallback?: Partial<Record<RiskLevel, string>>
+): Partial<Record<RiskLevel, string>> | undefined {
+  const prompts = { ...fallback };
+  if (raw) {
+    for (const risk of ["low", "medium", "high"] as const) {
+      if (typeof raw[risk] === "string" && raw[risk].trim() !== "") {
+        prompts[risk] = raw[risk];
+      }
+    }
+  }
+  return Object.keys(prompts).length > 0 ? prompts : undefined;
 }
 
 export interface ReviewPolicy {
@@ -233,9 +250,11 @@ function mergeConfig(raw: Record<string, unknown>): PlanwerkConfig {
   if (rawSkills) {
     for (const [id, def] of Object.entries(rawSkills)) {
       const rawRisk = def.risk_threshold as string | undefined;
+      const rawPrompts = def.prompt_by_risk as Record<string, unknown> | undefined;
       skills[id] = {
         id,
         prompt: (def.prompt as string) ?? DEFAULT_SKILLS[id]?.prompt ?? `/review-areas`,
+        promptByRisk: parseRiskPrompts(rawPrompts, DEFAULT_SKILLS[id]?.promptByRisk),
         description: (def.description as string) ?? DEFAULT_SKILLS[id]?.description ?? id,
         riskThreshold: isValidRisk(rawRisk) ? rawRisk : (DEFAULT_SKILLS[id]?.riskThreshold ?? "low"),
         maxIterations: clampPositive(def.max_iterations, DEFAULT_SKILLS[id]?.maxIterations ?? 2),
@@ -369,8 +388,15 @@ export function getApplicableSkills(
       if (!ref.riskThreshold) return true;
       return cardRisk >= RISK_ORDER[ref.riskThreshold];
     })
-    .map((ref) => cfg.skills[ref.skill])
-    .filter(Boolean);
+    .map((ref) => {
+      const skill = cfg.skills[ref.skill];
+      if (!skill) return undefined;
+      return {
+        ...skill,
+        prompt: resolveReviewPrompt(skill.prompt, skill.promptByRisk, riskLevel),
+      };
+    })
+    .filter((skill): skill is SkillConfig => skill !== undefined);
 }
 
 /**

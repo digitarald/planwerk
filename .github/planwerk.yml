@@ -34,11 +34,11 @@ scripts:
     triggers: [session.create]
     background: true
 
-# Use rubber-duck for general stage reviews and the dedicated review command for
-# implementation-specific correctness, security, and architecture checks.
+# Use rubber-duck for general reviews and switch the same code-review gate to the
+# dedicated review command for medium/high-risk implementation checks.
 skills:
   plan-review:
-    prompt: /rubber-duck
+    prompt: /rubber-duck the plan and improve it based on feedback.
     description: Adversarial plan review — challenges assumptions and gaps
     risk_threshold: low
     max_iterations: 2
@@ -46,11 +46,21 @@ skills:
 
   code-review:
     prompt: >-
-      /review Review the implementation for correctness, regressions,
-      security vulnerabilities, unsafe trust boundaries, architectural coupling,
-      and scalability risks. Fix issues whenever possible, then report only
-      concrete, actionable blockers that remain.
-    description: Combined correctness, security, and architecture review
+      /rubber-duck Review the implementation holistically for readiness to ship.
+      Fix issues whenever possible, then report only concrete, actionable
+      blockers that remain.
+    prompt_by_risk:
+      medium: >-
+        /review Review the implementation for correctness, regressions,
+        security vulnerabilities, unsafe trust boundaries, architectural coupling,
+        and scalability risks. Fix issues whenever possible, then report only
+        concrete, actionable blockers that remain.
+      high: >-
+        /review Run 5+ parallel review agents against the implementation for correctness, regressions,
+        security vulnerabilities, unsafe trust boundaries, architectural coupling,
+        and scalability risks. Fix issues whenever possible, then report only
+        concrete, actionable blockers that remain.
+    description: Risk-adaptive implementation review
     risk_threshold: low
     max_iterations: 3
     auto_fix: true
@@ -83,7 +93,7 @@ gates:
     required:
       - type: review
         skill: code-review
-        description: Combined correctness, security, and architecture review
+        description: Risk-adaptive implementation review
     optional: []
 
 # Risk assessment hints for the orchestrator

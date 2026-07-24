@@ -233,6 +233,9 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
   idles — unless the opt-in `orchestrator.inject_reviews_while_busy` config is on
   (default off), which lets the heartbeat queue the review after
   `plan_busy_threshold` of continuous running. The gate still grades before advance.
+  Review skills may define `prompt_by_risk` in `.github/planwerk.yml`; `skill-config.ts`
+  resolves the current card risk to one prompt before the heartbeat injects the
+  single configured gate.
 - `lib/db/schema.ts` — tables + `getDb()`.
 - `scripts/ahp-smoke.ts` — reference for live-host connection.
 
