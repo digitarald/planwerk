@@ -34,6 +34,27 @@ scripts:
     triggers: [session.create]
     background: true
 
+# Use rubber-duck for general stage reviews and the dedicated review command for
+# implementation-specific correctness, security, and architecture checks.
+skills:
+  plan-review:
+    prompt: /rubber-duck
+    description: Adversarial plan review — challenges assumptions and gaps
+    risk_threshold: low
+    max_iterations: 2
+    auto_fix: true
+
+  code-review:
+    prompt: >-
+      /review Review the implementation for correctness, regressions,
+      security vulnerabilities, unsafe trust boundaries, architectural coupling,
+      and scalability risks. Fix issues whenever possible, then report only
+      concrete, actionable blockers that remain.
+    description: Combined correctness, security, and architecture review
+    risk_threshold: low
+    max_iterations: 3
+    auto_fix: true
+
 # Gate definitions per phase transition.
 # Required gates MUST pass before the orchestrator advances a card.
 gates:
@@ -46,10 +67,7 @@ gates:
       - type: review
         skill: plan-review
         description: Adversarial plan review — challenges assumptions and gaps
-    optional:
-      - type: review
-        skill: architecture-review
-        risk_threshold: high
+    optional: []
 
   build-to-review:
     required:
@@ -65,14 +83,8 @@ gates:
     required:
       - type: review
         skill: code-review
-        description: Code quality and correctness review
-    optional:
-      - type: review
-        skill: security-review
-        risk_threshold: medium
-      - type: review
-        skill: architecture-review
-        risk_threshold: high
+        description: Combined correctness, security, and architecture review
+    optional: []
 
 # Risk assessment hints for the orchestrator
 risk:
