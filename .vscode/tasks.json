@@ -4,7 +4,7 @@
     {
       "label": "Install dependencies",
       "type": "shell",
-      "command": "npm install",
+      "command": "npm ci",
       "inAgents": true,
       "runOptions": { "runOn": "worktreeCreated" }
     },
