@@ -2,11 +2,14 @@ import "server-only";
 
 import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import type {
-  ChangesetState,
   ChatState,
   SessionState,
   Snapshot,
 } from "@microsoft/agent-host-protocol";
+
+import { asChangesetState } from "./changeset-readiness";
+
+export { asChangesetState } from "./changeset-readiness";
 
 /**
  * Typed access to AHP channel snapshots.
@@ -39,19 +42,6 @@ export function asSessionState(snapshot: Snapshot | undefined): SessionState | u
 export function asChatState(snapshot: Snapshot | undefined): ChatState | undefined {
   if (!snapshot?.resource.startsWith("ahp-chat:")) return undefined;
   return snapshot.state as ChatState;
-}
-
-/** Narrow a changeset snapshot by its unique `files` array and lifecycle status. */
-export function asChangesetState(snapshot: Snapshot | undefined): ChangesetState | undefined {
-  const state = snapshot?.state;
-  if (
-    !state ||
-    !Array.isArray((state as Partial<ChangesetState>).files) ||
-    typeof (state as Partial<ChangesetState>).status !== "string"
-  ) {
-    return undefined;
-  }
-  return state as ChangesetState;
 }
 
 /**
@@ -88,7 +78,7 @@ export async function readChatState(
 export async function readChangesetState(
   client: AhpClient,
   changesetUri: string,
-): Promise<ChangesetState | undefined> {
+): Promise<ReturnType<typeof asChangesetState>> {
   const { result, subscription } = await client.subscribe(changesetUri);
   void subscription.close();
   await client.unsubscribe(changesetUri).catch(() => {});

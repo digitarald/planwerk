@@ -12,10 +12,12 @@ import type {
   Turn,
 } from "@microsoft/agent-host-protocol";
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
-import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 
 import { chatQueuedMessage, chatTurnStarted } from "../lib/ahp/actions.ts";
-import { OFFERED_PROTOCOL_VERSIONS } from "../lib/ahp/protocol.ts";
+import { connectAhpTransport } from "../lib/ahp/endpoint.ts";
+import { LOCAL_DESKTOP_HOST } from "../lib/ahp/endpoint-config.ts";
+import { initializeAhpClient } from "../lib/ahp/initialize.ts";
+import { readProtocolCompatibilityError } from "../lib/ahp/protocol-rpc.ts";
 import { AHPStatus, parseAHPStatus } from "../lib/ahp/types.ts";
 
 const ROOT_CHANNEL = "ahp-root://" as const;
@@ -106,17 +108,19 @@ async function loadSnapshotReaders(): Promise<SnapshotReaders> {
 }
 
 async function connect(hostUrl: string): Promise<{ client: AhpClient; protocolVersion: string }> {
-  const transport = await WebSocketTransport.connect(hostUrl);
+  const { transport, diagnostics } = await connectAhpTransport(hostUrl);
   const client = new AhpClient(transport);
   client.connect();
 
   try {
-    const init = await client.initialize({
+    const init = await initializeAhpClient(client, {
       clientId: randomUUID(),
-      protocolVersions: OFFERED_PROTOCOL_VERSIONS,
-      initialSubscriptions: [],
     });
 
+    log(
+      `connected via ${diagnostics.transport} (${diagnostics.resolvedTarget}); `
+      + `${diagnostics.candidateCount} local candidate(s) considered.`,
+    );
     return { client, protocolVersion: init.protocolVersion };
   } catch (error) {
     await client.shutdown().catch(() => {});
@@ -125,9 +129,10 @@ async function connect(hostUrl: string): Promise<{ client: AhpClient; protocolVe
 }
 
 function validateHostUrl(hostUrl: string) {
+  if (hostUrl === LOCAL_DESKTOP_HOST) return;
   const parsed = new URL(hostUrl);
   if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
-    throw new Error(`AHP_SMOKE_HOST must be a ws:// or wss:// URL, got ${hostUrl}`);
+    throw new Error(`AHP_SMOKE_HOST must be vscode-local://desktop, ws://, or wss://, got ${hostUrl}`);
   }
 }
 
@@ -298,6 +303,14 @@ async function run() {
 }
 
 run().catch((error) => {
+  const compatibilityError = readProtocolCompatibilityError(error);
+  if (compatibilityError) {
+    console.error(
+      `[ahp-smoke] protocol mismatch (${compatibilityError.relation}); `
+      + `host=${compatibilityError.hostSupportedVersions.join(", ") || "not provided"}; `
+      + `planwerk=${compatibilityError.offeredVersions.join(", ")}`,
+    );
+  }
   console.error(`[ahp-smoke] FAIL: ${errorMessage(error)}`);
   process.exitCode = 1;
 });

@@ -2,16 +2,60 @@ import "server-only";
 
 import { RpcError } from "@microsoft/agent-host-protocol/client";
 import { AhpErrorCodes } from "@microsoft/agent-host-protocol";
-import type { AhpErrorDetailsMap, PermissionDeniedErrorData } from "@microsoft/agent-host-protocol";
+import type { PermissionDeniedErrorData } from "@microsoft/agent-host-protocol";
 
 import { classifyError, ConnectionError } from "./connection-error";
+import { readProtocolCompatibilityError } from "./protocol-rpc";
+import type { ProtocolCompatibilityError } from "./protocol";
 
-/**
- * Data payload for the `UnsupportedProtocolVersion` (-32005) error. Not
- * re-exported as a named type from the package root — derived via the
- * indexed {@link AhpErrorDetailsMap} instead, which the SDK does export.
- */
-type UnsupportedProtocolVersionErrorData = AhpErrorDetailsMap[typeof AhpErrorCodes.UnsupportedProtocolVersion];
+function formatVersions(versions: readonly string[]): string {
+  return versions.length > 0 ? versions.join(", ") : "not provided";
+}
+
+function classifyProtocolCompatibilityError(error: ProtocolCompatibilityError): ConnectionError {
+  const hostVersions = formatVersions(error.hostSupportedVersions);
+  const planwerkVersions = formatVersions(error.offeredVersions);
+
+  if (error.failure === "selected-unoffered-version") {
+    return {
+      type: "error",
+      code: "unsupported_protocol_version",
+      message: "The AHP host returned an invalid protocol selection",
+      hint: `The host selected ${hostVersions}, but Planwerk offered ${planwerkVersions}. Update or restart the host before retrying.`,
+    };
+  }
+
+  switch (error.relation) {
+    case "host-older":
+      return {
+        type: "error",
+        code: "unsupported_protocol_version",
+        message: "This AHP host is older than Planwerk supports",
+        hint: `The host offers ${hostVersions}; Planwerk supports ${planwerkVersions}. Update the agent host before retrying.`,
+      };
+    case "host-newer":
+      return {
+        type: "error",
+        code: "unsupported_protocol_version",
+        message: "This AHP host is newer than Planwerk supports",
+        hint: `The host offers ${hostVersions}; Planwerk supports ${planwerkVersions}. Update Planwerk or use a supported agent host.`,
+      };
+    case "mixed":
+      return {
+        type: "error",
+        code: "unsupported_protocol_version",
+        message: "This AHP host has no tested protocol version in common with Planwerk",
+        hint: `The host offers ${hostVersions}; Planwerk supports ${planwerkVersions}. Update Planwerk or the agent host so the exact versions overlap.`,
+      };
+    case "unknown":
+      return {
+        type: "error",
+        code: "unsupported_protocol_version",
+        message: "This AHP host has no proven protocol overlap with Planwerk",
+        hint: `The host advertises ${hostVersions}; Planwerk supports ${planwerkVersions}. Version ranges or malformed values are not retried automatically.`,
+      };
+  }
+}
 
 /**
  * Classifies a caught error into a structured {@link ConnectionError}.
@@ -35,20 +79,11 @@ export function classifyAhpError(
   err: unknown,
   context: "connect" | "protocol" | "stream" | "request",
 ): ConnectionError {
+  const compatibilityError = readProtocolCompatibilityError(err);
+  if (compatibilityError) return classifyProtocolCompatibilityError(compatibilityError);
+
   if (err instanceof RpcError) {
     switch (err.code) {
-      case AhpErrorCodes.UnsupportedProtocolVersion: {
-        const data = err.data as UnsupportedProtocolVersionErrorData | undefined;
-        const versions = data?.supportedVersions?.join(", ");
-        return {
-          type: "error",
-          code: "unsupported_protocol_version",
-          message: "This AHP host speaks a version Planwerk doesn't support",
-          hint: versions
-            ? `The host supports: ${versions}. Update Planwerk or the agent host so their protocol versions overlap.`
-            : "Update Planwerk or the agent host so their protocol versions overlap.",
-        };
-      }
       case AhpErrorCodes.PermissionDenied: {
         const data = err.data as PermissionDeniedErrorData | undefined;
         return {

@@ -1,5 +1,4 @@
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
-import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 import type { SessionSummary, UsageInfo } from "@microsoft/agent-host-protocol";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
@@ -7,13 +6,16 @@ import { classifyError, ConnectionError } from "./connection-error";
 import { classifyAhpError } from "./rpc-error";
 import { enrichFromChangeset, ChangesetEnrichment, hashPlanContent } from "./changeset-enricher";
 import { fetchCopilotCliPlan, clearPlanCache } from "./plan-artifact";
-import { fetchSessionModel } from "./session-config";
+import { fetchSessionModel, fetchSessionPrimaryWorkingDirectory } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
 import { asChatState, asSessionState, readChatState, readSessionState } from "./snapshot";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT, type CachedSession } from "@/lib/db/session-cache";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
-import { OFFERED_PROTOCOL_VERSIONS } from "./protocol";
+import { listAllSessions } from "./catalog";
+import { connectAhpTransport, type AhpEndpointDiagnostics } from "./endpoint";
+import { initializeAhpClient } from "./initialize";
+import { sessionWorkingDirectories } from "./working-directories";
 import type { PendingInput, WorkerActivity } from "@/lib/types";
 import { mapWorkerChats, retainInactiveWorkers, type WorkerChatSummary } from "./worker-activity";
 import { getWorkerActivityHistory, recordWorkerActivity } from "@/lib/orchestrator/worker-activity-store";
@@ -22,7 +24,7 @@ import { getWorkerActivityHistory, recordWorkerActivity } from "@/lib/orchestrat
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
 
 export type BridgeEvent =
-  | { type: "init"; sessions: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment>; pendingInputs: Map<string, PendingInput>; workers: Map<string, WorkerActivity[]> }
+  | { type: "init"; sessions: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment>; pendingInputs: Map<string, PendingInput>; workers: Map<string, WorkerActivity[]>; connection: AhpEndpointDiagnostics & { protocolVersion: string; totalSessions: number; visibleSessions: number; filteredSessions: number } }
   | (AHPEvent & { enrichment?: ChangesetEnrichment | null; pendingInput?: PendingInput | null; workers?: WorkerActivity[] })
   | ConnectionError;
 
@@ -68,6 +70,8 @@ function mapSdkSession(summary: SessionSummary): AHPSessionSummary {
   if (summary.workingDirectory) {
     mapped.workingDirectory = summary.workingDirectory;
   }
+  const workingDirectories = sessionWorkingDirectories(summary);
+  if (workingDirectories) mapped.workingDirectories = workingDirectories;
   if (summary.changes) {
     mapped.changes = {
       additions: summary.changes.additions ?? 0,
@@ -184,14 +188,23 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     const modelPromise: Promise<string | undefined> = session.model
       ? Promise.resolve(session.model)
       : fetchSessionModel(client!, sessionUri).catch(() => undefined);
+    const primaryDirectoryPromise = fetchSessionPrimaryWorkingDirectory(client!, sessionUri)
+      .catch(() => undefined);
 
-    Promise.all([changesetPromise, planPromise, modelPromise])
-      .then(([changesetResult, planArtifact, model]) => {
+    Promise.all([changesetPromise, planPromise, modelPromise, primaryDirectoryPromise])
+      .then(([changesetResult, planArtifact, model, primaryDirectory]) => {
         if (disposed || !sessions.has(sessionUri)) return;
 
         if (model) {
           const current = sessions.get(sessionUri);
           if (current && !current.model) current.model = model;
+        }
+        if (primaryDirectory) {
+          const current = sessions.get(sessionUri);
+          if (current) {
+            current.primaryWorkingDirectory = primaryDirectory;
+            current.workingDirectory = primaryDirectory;
+          }
         }
 
         let enrichment = changesetResult ?? enrichments.get(sessionUri) ?? null;
@@ -734,9 +747,9 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   }
 
   // Connect WebSocket transport, wrapped with telemetry tap
-  let rawTransport: Awaited<ReturnType<typeof WebSocketTransport.connect>>;
+  let endpoint: Awaited<ReturnType<typeof connectAhpTransport>>;
   try {
-    rawTransport = await WebSocketTransport.connect(hostUrl);
+    endpoint = await connectAhpTransport(hostUrl);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to connect to AHP host";
     error("connect failed:", message);
@@ -745,14 +758,14 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   }
 
   if (disposed) {
-    rawTransport.close();
+    endpoint.transport.close();
     return dispose;
   }
 
   // Rotate telemetry logs before the tap starts receiving to avoid data loss
   await rotateLogs().catch(() => {});
 
-  const transport = new TelemetryTapTransport(rawTransport, (notification) => {
+  const transport = new TelemetryTapTransport(endpoint.transport, (notification) => {
     handleOtlpLogs(notification);
   });
 
@@ -760,12 +773,9 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   client.connect();
 
   // Initialize the protocol
-  const clientId = crypto.randomUUID();
   let initResult;
   try {
-    initResult = await client.initialize({
-      clientId,
-      protocolVersions: OFFERED_PROTOCOL_VERSIONS,
+    initResult = await initializeAhpClient(client, {
       initialSubscriptions: ["ahp-root://"],
     });
   } catch (err) {
@@ -818,17 +828,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     // enrichment reads below. Unchanged sessions are served entirely from cache.
     const staleUris = new Set<string>();
 
-    // Page through the full catalogue. Pagination is additive (a server that
-    // doesn't paginate just returns everything with no `nextCursor`), but a
-    // host that does impose a page cap would otherwise silently hide older
-    // sessions from the board if we only read the first page.
-    const allSummaries: SessionSummary[] = [];
-    let cursor: string | undefined;
-    do {
-      const page = await client.request("listSessions", { channel: "ahp-root://", cursor });
-      allSummaries.push(...page.items);
-      cursor = page.nextCursor;
-    } while (cursor);
+    const allSummaries = await listAllSessions(client);
 
     for (const summary of allSummaries) {
       const mapped = mapSdkSession(summary);
@@ -867,7 +867,20 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       sessions.set(summary.resource, mapped);
     }
     info(`loaded ${sessions.size} sessions (${allSummaries.length} total, archived without changes filtered); ${staleUris.size} new/changed`);
-    onEvent({ type: "init", sessions: Array.from(sessions.values()), enrichments, pendingInputs, workers: workersBySession });
+    onEvent({
+      type: "init",
+      sessions: Array.from(sessions.values()),
+      enrichments,
+      pendingInputs,
+      workers: workersBySession,
+      connection: {
+        ...endpoint.diagnostics,
+        protocolVersion: initResult.protocolVersion,
+        totalSessions: allSummaries.length,
+        visibleSessions: sessions.size,
+        filteredSessions: allSummaries.length - sessions.size,
+      },
+    });
 
     // Cache all sessions and remove stale entries
     for (const [uri, session] of sessions) {
@@ -933,6 +946,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
             if (changes.activity !== undefined) existing.activity = changes.activity;
             if (changes.modifiedAt !== undefined) existing.modifiedAt = new Date(changes.modifiedAt).toISOString();
             if (changes.workingDirectory !== undefined) existing.workingDirectory = changes.workingDirectory;
+            const changedDirectories = sessionWorkingDirectories(changes as SessionSummary);
+            if (changedDirectories) existing.workingDirectories = changedDirectories;
             if (changes.project !== undefined) {
               existing.project = changes.project
                 ? { name: changes.project.displayName, path: changes.project.uri }

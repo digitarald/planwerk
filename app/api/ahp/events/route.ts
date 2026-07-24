@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { createAHPBridge, BridgeEvent } from "@/lib/ahp/client-bridge";
+import type { AhpEndpointDiagnostics } from "@/lib/ahp/endpoint";
 import { enrichSessionToCard, type EnrichOptions } from "@/lib/ahp/enrich-card";
 import { mapSessionToCard } from "@/lib/ahp/map-session";
 import type { ChangesetEnrichment } from "@/lib/ahp/changeset-enricher";
@@ -18,7 +19,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type CardStreamEvent =
-  | { type: "init"; cards: KanbanCard[] }
+  | { type: "init"; cards: KanbanCard[]; connection?: AhpEndpointDiagnostics & { protocolVersion: string; totalSessions: number; visibleSessions: number; filteredSessions: number } }
   | { type: "cardChanged"; card: KanbanCard; triage?: TriageEvent }
   | { type: "cardRemoved"; cardId: string }
   | { type: "heartbeat"; action: HeartbeatAction }
@@ -114,7 +115,7 @@ async function projectRemoteEvent(event: BridgeEvent): Promise<CardStreamEvent> 
       if (pi) card.pendingInput = pi;
       return card;
     });
-    return { type: "init", cards };
+    return { type: "init", cards, connection: event.connection };
   }
 
   if (event.type === "sessionRemoved") {

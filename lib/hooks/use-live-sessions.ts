@@ -116,7 +116,7 @@ export function useLiveSessions() {
           console.info("[ahp:sse]", `init: ${data.cards.length} cards`);
           setCards(data.cards);
           hasHandshakedRef.current = true;
-          setConnected();
+          setConnected(data.connection);
           // Hydrate persisted phases from SQLite so a reload shows the stored
           // truth (not an AHP-derived default) and matches the gate engine.
           void hydratePersistedPhases(data.cards, reconcileCard);
@@ -190,7 +190,7 @@ export function useLiveSessions() {
         setError({
           message: "Could not connect to the AHP host",
           code: "connection_refused",
-          hint: "Make sure the agent host server is running. In VS Code, enable \"Chat: Agent Host\" in settings, or start it manually.",
+          hint: "For VS Code local, open a desktop Agent Host socket in VS Code. For a manual host, verify its ws:// or wss:// endpoint.",
         });
         es.close();
         eventSourceRef.current = null;

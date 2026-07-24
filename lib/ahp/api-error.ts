@@ -4,6 +4,8 @@ import { NextResponse } from "next/server";
 import { RpcError } from "@microsoft/agent-host-protocol/client";
 import { AhpErrorCodes } from "@microsoft/agent-host-protocol";
 
+import { readProtocolCompatibilityError } from "./protocol-rpc";
+
 /**
  * HTTP status overrides for AHP error codes that map cleanly onto standard
  * REST semantics. Everything else — including generic/transport failures —
@@ -27,6 +29,20 @@ const STATUS_BY_AHP_CODE: Partial<Record<number, number>> = {
  */
 export function ahpErrorResponse(err: unknown, fallbackMessage: string): NextResponse {
   const message = err instanceof Error ? err.message : fallbackMessage;
+  const compatibilityError = readProtocolCompatibilityError(err);
+
+  if (compatibilityError) {
+    return NextResponse.json({
+      error: message,
+      code: AhpErrorCodes.UnsupportedProtocolVersion,
+      data: {
+        supportedVersions: compatibilityError.hostSupportedVersions,
+        offeredVersions: compatibilityError.offeredVersions,
+        relation: compatibilityError.relation,
+        failure: compatibilityError.failure,
+      },
+    }, { status: 502 });
+  }
 
   if (err instanceof RpcError) {
     const status = STATUS_BY_AHP_CODE[err.code] ?? 502;

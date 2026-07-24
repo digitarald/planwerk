@@ -8,8 +8,9 @@ import { Input } from "@/components/ui/input";
 import { useConnectionStore, ConnectionErrorInfo } from "@/lib/store/connection-store";
 import { usePersistentState } from "@/lib/hooks/use-persistent-state";
 import type { ConnectionErrorCode } from "@/lib/ahp/connection-error";
+import { LOCAL_DESKTOP_HOST } from "@/lib/ahp/endpoint-config";
 
-const DEFAULT_HOST = process.env.NEXT_PUBLIC_AHP_DEFAULT_HOST ?? "ws://localhost:8082";
+const DEFAULT_HOST = process.env.NEXT_PUBLIC_AHP_DEFAULT_HOST ?? LOCAL_DESKTOP_HOST;
 
 function isValidWsUrl(url: string): boolean {
   try {
@@ -66,6 +67,7 @@ export function Onboarding() {
   const isConnecting = status === "reconnecting";
   const remoteUrlValid = useMemo(() => isValidWsUrl(remoteUrl), [remoteUrl]);
   const defaultHostLabel = useMemo(() => {
+    if (DEFAULT_HOST === LOCAL_DESKTOP_HOST) return "Discover desktop Agent Host";
     try {
       const parsed = new URL(DEFAULT_HOST);
       const defaultPort = parsed.protocol === "wss:" ? "443" : "80";
@@ -102,7 +104,7 @@ export function Onboarding() {
               <Monitor className="h-4 w-4 text-primary" />
               <div>
                 <div className="text-sm font-medium">VS Code (local)</div>
-                <div className="text-xs text-muted-foreground">Connect to {defaultHostLabel}</div>
+                <div className="text-xs text-muted-foreground">{defaultHostLabel}</div>
               </div>
             </div>
           </button>

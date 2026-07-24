@@ -4,6 +4,7 @@ import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import type { SessionState } from "@microsoft/agent-host-protocol";
 
 import { readSessionState } from "./snapshot";
+import { primaryWorkingDirectory } from "./working-directories";
 
 /**
  * As of AHP 0.5 the selected model is no longer a first-class `SessionSummary`
@@ -43,4 +44,12 @@ export async function fetchSessionModel(
 ): Promise<string | undefined> {
   const state = await readSessionState(client, sessionUri);
   return extractModelFromConfig(state?.config);
+}
+
+export async function fetchSessionPrimaryWorkingDirectory(
+  client: AhpClient,
+  sessionUri: string,
+): Promise<string | undefined> {
+  const state = await readSessionState(client, sessionUri);
+  return state ? primaryWorkingDirectory(state) : undefined;
 }

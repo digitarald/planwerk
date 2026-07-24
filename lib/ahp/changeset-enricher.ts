@@ -1,6 +1,5 @@
 import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import type {
-  ChangesetState,
   ChangesetFile,
   Changeset,
 } from "@microsoft/agent-host-protocol";
@@ -9,6 +8,7 @@ import { createHash } from "node:crypto";
 import type { Artifact, ArtifactType, ChangesetReview, FileChange } from "@/lib/types";
 
 import { readChatState, readSessionState } from "./snapshot";
+import { readReadyChangesetState } from "./changeset-readiness";
 import { readTextResource } from "./resource-read";
 import { changesetReviewSummary, isChangesetFileReviewed } from "./changeset-review";
 import { extractLastAgentMessage } from "./response-parts";
@@ -110,15 +110,9 @@ function titleFromPath(filePath: string): string {
 
 /**
  * Find the session-level changeset from a session's changeset catalogue.
- * Prefers changeKind "session", falls back to first static URI (no template vars).
  */
 export function findSessionChangeset(changesets: Changeset[]): Changeset | undefined {
-  // Prefer explicit session-kind changeset
-  const sessionKind = changesets.find((c) => c.changeKind === "session");
-  if (sessionKind) return sessionKind;
-
-  // Fall back to first static URI (no {variables})
-  return changesets.find((c) => !c.uriTemplate.includes("{"));
+  return changesets.find((changeset) => changeset.changeKind === "session");
 }
 
 /**
@@ -174,25 +168,11 @@ export async function enrichFromChangeset(
       return null;
     }
 
-    // Subscribe to the changeset to get file list
-    const { result: csResult, subscription: csSub } =
-      await client.subscribe(changesetUri);
-    csSub.close();
-    await client.unsubscribe(changesetUri).catch(() => {});
-
-    const csState = csResult.snapshot?.state as ChangesetState | undefined;
+    const csState = await readReadyChangesetState(client, changesetUri);
     if (!csState?.files) {
       debug("changeset has no files:", changesetUri);
       // Files not readable — treat as unknown, not a verified zero.
       return { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], additions: 0, deletions: 0, changesetVerified: false, lastAgentMessage };
-    }
-
-    // If changeset is still computing, or failed, return null to retry later.
-    // Files may be stale/partial in either status (error's cause is in
-    // ChangesetState.error, not usable here).
-    if (csState.status === "computing" || csState.status === "error") {
-      debug("changeset not ready (status:", csState.status, "):", changesetUri);
-      return null;
     }
 
     // Classify files

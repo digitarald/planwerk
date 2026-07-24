@@ -1,9 +1,9 @@
 import "server-only";
 
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
-import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 
-import { OFFERED_PROTOCOL_VERSIONS } from "./protocol";
+import { connectAhpTransport } from "./endpoint";
+import { initializeAhpClient } from "./initialize";
 
 interface ClientEntry {
   client: AhpClient;
@@ -35,19 +35,19 @@ export async function getAHPClient(hostUrl: string): Promise<AhpClient> {
 
   // Create with mutex via promise, scoped per host
   const init = (async () => {
-    const transport = await WebSocketTransport.connect(hostUrl);
+    const { transport } = await connectAhpTransport(hostUrl);
     const client = new AhpClient(transport);
     client.connect();
 
-    await client.initialize({
-      clientId: crypto.randomUUID(),
-      protocolVersions: OFFERED_PROTOCOL_VERSIONS,
-      initialSubscriptions: [],
-    });
-
-    clients.set(hostUrl, { client, refs: 1 });
-    pendingInits.delete(hostUrl);
-    return client;
+    try {
+      await initializeAhpClient(client);
+      clients.set(hostUrl, { client, refs: 1 });
+      pendingInits.delete(hostUrl);
+      return client;
+    } catch (error) {
+      await client.shutdown().catch(() => {});
+      throw error;
+    }
   })();
   pendingInits.set(hostUrl, init);
 

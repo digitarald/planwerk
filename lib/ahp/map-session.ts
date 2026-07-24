@@ -335,6 +335,8 @@ export function mapSessionToCard(
     model: session.model,
     branch: undefined,
     workingDirectory: session.workingDirectory,
+    workingDirectories: session.workingDirectories,
+    primaryWorkingDirectory: session.primaryWorkingDirectory,
     project: session.project,
     artifacts: artifacts.length > 0 ? artifacts : undefined,
     lastAgentMessage: enrichment?.lastAgentMessage,

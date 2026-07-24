@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type { ConnectionErrorCode } from "@/lib/ahp/connection-error";
+import { isSupportedAhpEndpoint } from "@/lib/ahp/endpoint-config";
 
 export type ConnectionStatus = "connected" | "reconnecting" | "disconnected";
 
@@ -11,13 +12,28 @@ export interface ConnectionErrorInfo {
   hint?: string;
 }
 
+export interface ConnectionDiagnostics {
+  logicalUrl: string;
+  transport: "unix-websocket" | "websocket";
+  resolvedTarget: string;
+  candidateCount: number;
+  compatibleCandidateCount: number;
+  selectedSessionCount?: number;
+  selectionReason?: string;
+  protocolVersion: string;
+  totalSessions: number;
+  visibleSessions: number;
+  filteredSessions: number;
+}
+
 interface ConnectionState {
   status: ConnectionStatus;
   hostUrl: string | null;
   error: ConnectionErrorInfo | null;
+  diagnostics: ConnectionDiagnostics | null;
   connect: (url: string) => void;
   disconnect: () => void;
-  setConnected: () => void;
+  setConnected: (diagnostics?: ConnectionDiagnostics) => void;
   setError: (error: ConnectionErrorInfo) => void;
 }
 
@@ -27,35 +43,37 @@ export const useConnectionStore = create<ConnectionState>()(
       status: "disconnected",
       hostUrl: null,
       error: null,
+      diagnostics: null,
       connect: (url: string) => {
-        try {
-          const parsed = new URL(url);
-          if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
-            set({ status: "disconnected", error: { message: "URL must use ws:// or wss:// protocol", code: "unknown" } });
-            return;
-          }
-        } catch {
+        if (!isSupportedAhpEndpoint(url)) {
           console.error("[ahp:conn]", "invalid URL:", url);
-          set({ status: "disconnected", error: { message: "Invalid connection URL", code: "unknown" } });
+          set({
+            status: "disconnected",
+            error: { message: "Use VS Code local, ws://, or wss://", code: "unknown" },
+          });
           return;
         }
         console.info("[ahp:conn]", "connecting →", url);
-        set({ status: "reconnecting", hostUrl: url, error: null });
+        set({ status: "reconnecting", hostUrl: url, error: null, diagnostics: null });
       },
       disconnect: () => {
         console.info("[ahp:conn]", "disconnecting");
-        set({ status: "disconnected", hostUrl: null, error: null });
+        set({ status: "disconnected", hostUrl: null, error: null, diagnostics: null });
       },
-      setConnected: () => {
+      setConnected: (diagnostics) => {
         set((state) => {
-          if (state.status === "connected" && state.error === null) return state;
+          if (
+            state.status === "connected"
+            && state.error === null
+            && (!diagnostics || state.diagnostics === diagnostics)
+          ) return state;
           console.info("[ahp:conn]", "connected");
-          return { status: "connected", error: null };
+          return { status: "connected", error: null, diagnostics: diagnostics ?? state.diagnostics };
         });
       },
       setError: (error: ConnectionErrorInfo) => {
         console.error("[ahp:conn]", `error [${error.code}]:`, error.message);
-        set({ status: "disconnected", error });
+        set({ status: "disconnected", error, diagnostics: null });
       },
     }),
     {

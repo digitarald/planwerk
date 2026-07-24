@@ -182,6 +182,9 @@ export function enrichSessionToCard(
       changesetRef
     );
   }
+  if (card.workingDirectories && card.workingDirectories.length > 1 && !card.primaryWorkingDirectory) {
+    card.gateBlocker = "Waiting for the default chat to choose a primary working directory";
+  }
 
   // Parked-on-escalation overlay: when the *latest* review run for a skill on the
   // card's current transition is escalated, the heartbeat has parked it for a human

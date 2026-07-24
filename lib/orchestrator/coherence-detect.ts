@@ -53,6 +53,7 @@ export interface DetectFile {
 export interface DetectCard {
   id: string;
   workingDirectory?: string;
+  workingDirectories?: string[];
   risk: RiskLevel;
   files: DetectFile[];
 }
@@ -198,7 +199,9 @@ export function detectPairs(cards: DetectCard[], opts: DetectOptions): DetectedP
         const a = byId.get(ids[i])!;
         const b = byId.get(ids[j])!;
         // Same-repo guard: only pair cards in the same working directory.
-        if ((a.workingDirectory ?? "") !== (b.workingDirectory ?? "")) continue;
+        const aDirectories = a.workingDirectories ?? (a.workingDirectory ? [a.workingDirectory] : []);
+        const bDirectories = b.workingDirectories ?? (b.workingDirectory ? [b.workingDirectory] : []);
+        if (!aDirectories.some((directory) => bDirectories.includes(directory))) continue;
         const [ka, kb] = pairKey(ids[i], ids[j]);
         const k = `${ka}\u0000${kb}`;
         (into.get(k) ?? into.set(k, new Set()).get(k)!).add(value);

@@ -14,12 +14,15 @@ export function ConnectionDot() {
   const status = useConnectionStore((state) => state.status);
   const hostUrl = useConnectionStore((state) => state.hostUrl);
   const error = useConnectionStore((state) => state.error);
+  const diagnostics = useConnectionStore((state) => state.diagnostics);
   const connect = useConnectionStore((state) => state.connect);
   const config = statusConfig[status];
 
   const canRetry = status === "disconnected" && hostUrl;
 
-  const tooltip = hostUrl || "No AHP host configured";
+  const tooltip = diagnostics?.transport === "unix-websocket"
+    ? `VS Code desktop · AHP ${diagnostics.protocolVersion}`
+    : hostUrl || "No AHP host configured";
 
   return (
     <TooltipProvider>
@@ -38,6 +41,12 @@ export function ConnectionDot() {
         </TooltipTrigger>
         <TooltipContent className="max-w-64">
           <p>{tooltip}</p>
+          {diagnostics && (
+            <p className="mt-1 text-muted-foreground">
+              {diagnostics.visibleSessions} visible of {diagnostics.totalSessions} sessions
+              {diagnostics.filteredSessions > 0 ? ` · ${diagnostics.filteredSessions} archived hidden` : ""}
+            </p>
+          )}
           {error && (
             <p className="mt-1 text-destructive">{error.message}</p>
           )}

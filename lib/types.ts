@@ -191,6 +191,9 @@ export interface KanbanCard {
   modifiedAt: number;
   model?: string;
   branch?: string;
+  workingDirectories?: string[];
+  /** The default chat's explicit operational cwd, if the host provided one. */
+  primaryWorkingDirectory?: string;
   workingDirectory?: string;
   project?: { name: string; path: string };
   artifacts?: Artifact[];

@@ -30,6 +30,11 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) and connect to your Agent Host Protocol endpoint to start managing sessions.
 
+> **Security:** Planwerk's default commands bind only to `127.0.0.1`. This is
+> required when using **VS Code (local)** because that endpoint can control the
+> desktop Agent Host and its Copilot sessions. Do not expose Planwerk on a
+> network interface unless you add authentication and a separate trust boundary.
+
 ## Learn more
 
 - [`zettelkasten/vision.md`](zettelkasten/vision.md) — the problem, principles, and north star

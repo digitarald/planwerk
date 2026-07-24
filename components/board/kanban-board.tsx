@@ -1,11 +1,13 @@
 "use client";
 
 import { DragDropContext, type DropResult } from "@hello-pangea/dnd";
+import { Archive, MonitorCheck } from "lucide-react";
 
 import { CardDetailModal } from "@/components/board/card-detail-modal";
 import { KanbanColumn } from "@/components/board/kanban-column";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import { useBoardStore } from "@/lib/store/board-store";
+import { useConnectionStore } from "@/lib/store/connection-store";
 import { COLUMNS, PHASE_ORDER, type GateStatus, type KanbanCard, type Phase } from "@/lib/types";
 
 interface TransitionArgs {
@@ -98,9 +100,11 @@ async function persistTransition({
 }
 
 export function KanbanBoard() {
+  const cards = useBoardStore((state) => state.cards);
   const getCard = useBoardStore((state) => state.getCard);
   const reconcileCard = useBoardStore((state) => state.reconcileCard);
   const addFeedItem = useOrchestratorStore((state) => state.addFeedItem);
+  const diagnostics = useConnectionStore((state) => state.diagnostics);
 
   // Subscribe to the actual card object (not just its id) so the open detail
   // modal re-renders when live SSE updates mutate the card — e.g. a sent
@@ -186,6 +190,29 @@ export function KanbanBoard() {
       original,
     });
   };
+
+  if (cards.length === 0) {
+    const filtered = diagnostics?.filteredSessions ?? 0;
+    return (
+      <div className="flex h-full items-center justify-center px-6">
+        <div className="max-w-md text-center">
+          <div className="mx-auto mb-3 flex h-9 w-9 items-center justify-center rounded-full bg-muted">
+            {filtered > 0
+              ? <Archive className="h-4 w-4 text-muted-foreground" />
+              : <MonitorCheck className="h-4 w-4 text-muted-foreground" />}
+          </div>
+          <h2 className="text-sm font-medium">
+            {filtered > 0 ? "No active sessions to show" : "The connected host has no sessions"}
+          </h2>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            {filtered > 0
+              ? `${filtered} archived session${filtered === 1 ? " is" : "s are"} hidden because they contain no code changes.`
+              : "Start an agent task in VS Code or create one from Planwerk."}
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">

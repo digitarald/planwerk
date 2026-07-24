@@ -11,6 +11,11 @@ export interface AHPSessionSummary {
     path: string;
   };
   model?: string;
+  /** Every workspace the AHP 0.7 session has access to. */
+  workingDirectories?: string[];
+  /** Cwd explicitly selected by the default chat, when safe for automation. */
+  primaryWorkingDirectory?: string;
+  /** @deprecated Retained for old cached summaries and hosts. */
   workingDirectory?: string;
   changes?: {
     additions: number;

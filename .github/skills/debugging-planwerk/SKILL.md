@@ -91,6 +91,42 @@ The built-in smoke harness connects, lists sessions, and reads one session's
 ```bash
 AHP_SMOKE_HOST=ws://127.0.0.1:PORT npm run ahp:smoke
 ```
+For the real catalog owned by the running VS Code desktop process, use Planwerk's
+logical local endpoint:
+```bash
+AHP_SMOKE_HOST=vscode-local://desktop npm run ahp:smoke
+```
+It discovers `vscode-agent-host-*.sock` only in the current user's temporary directory,
+tests each candidate through an AHP handshake, and chooses the compatible host with the
+largest full paginated catalog (then newest socket, then path). The logical endpoint is
+stable even when VS Code rotates the socket; its cache key is intentionally not the
+ephemeral filesystem path.
+
+The standalone TCP server is still useful for an explicit, isolated host:
+```bash
+code agent host --host 127.0.0.1 --port 8082 --without-connection-token
+```
+It creates a distinct Agent Host and can therefore have a separate, empty session
+catalogue. Do **not** use it as evidence that the desktop catalog is empty.
+
+When the board is empty, distinguish these diagnostic states before changing code:
+- `vscode-local://desktop` reports no socket: VS Code has not exposed its on-demand
+  Agent Host socket. Enable **Chat: Agent Host** and retry; Planwerk intentionally does
+  not fall back to port 8082.
+- The selected host has `totalSessions: 0`: the host catalog itself is empty.
+- `totalSessions > 0` with `visibleSessions: 0`: every catalog entry was filtered
+  because it is archived without code changes. This is an intentional board filter.
+- Multiple compatible socket candidates: diagnostics record the chosen catalog size and
+  selection rule. A host with more sessions wins, so an empty standalone instance cannot
+  hide an active desktop catalog.
+- No compatible socket candidates: Planwerk preserves structured handshake evidence. When
+  every candidate proves a protocol mismatch and exact versions make the direction
+  provable, the connection error says whether every host is older or newer than Planwerk;
+  mixed exact versions are reported as no tested overlap. If any candidate instead fails
+  for transport/auth reasons, Planwerk keeps the generic connection failure rather than
+  overstating the version evidence.
+  SemVer ranges, malformed values, or missing version data stay explicitly indeterminate.
+  Planwerk never retries by advertising a host version it has not tested.
 For a specific session, subscribe to its `resource` and inspect `snapshot.state`:
 `inputNeeded` (pending input / approvals / OAuth handoffs), `changesets` (file changes),
 `defaultChat`, `status`, `lifecycle`. For changeset-review state, subscribe to the selected
@@ -100,6 +136,15 @@ static session changeset and inspect its `ChangesetState.files[].reviewed`; its 
 `readChangesetState`) to narrow the snapshot union. Standalone SDK scripts run under
 `node --experimental-strip-types` and can import `../lib/ahp/*.ts` **relatively** (the
 `@/` alias does not resolve outside Next/tsc).
+
+VS Code's **All Changes** entry is the static catalogue item whose
+`changeKind === "session"`. Its subscribed snapshot can initially be
+`status:"computing"`; a client must briefly reduce the subsequent `changeset/*` actions
+into that snapshot until `changeset/statusChanged` reports `ready`, or keep the result
+unknown and retry. Do **not** re-subscribe to get a fresh snapshot after readiness:
+current VS Code starts another computation for each subscription. Closing immediately
+on the computing snapshot can leave `changesetVerified:false` even though VS Code later
+renders the completed All Changes view.
 
 ### 4. Copilot CLI per-session files — what the agent actually did
 `~/.copilot/session-state/<session-uuid>/` (the UUID is the tail of a `copilotcli:/<uuid>`
@@ -156,10 +201,17 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
   human-readable "why isn't this advancing" reason shown when `gateStatus` is a
   silent `pending`, e.g. "Plan review not started").
 - `lib/ahp/changeset-enricher.ts`, `lib/ahp/plan-artifact.ts` — file/artifact enrichment.
+- `lib/ahp/protocol.ts`, `lib/ahp/protocol-rpc.ts`, and `lib/ahp/initialize.ts` —
+  protocol negotiation. VS Code currently requires AHP 0.7, while npm still supplies
+  the 0.5 SDK; Planwerk offers tested 0.7 and 0.6 compatibility versions ahead of the
+  SDK's canonical list. Every client path uses the shared initializer, which rejects a
+  host-selected version that was not offered. Unsupported-version errors preserve host
+  offers and classify provably older/newer exact versions without auto-negotiating an
+  untested version.
 - `lib/ahp/changeset-review.ts` and `app/api/ahp/sessions/review/route.ts` — the narrow
-  **AHP 0.6 compatibility adapter** and mutation path for host-owned file review bits.
-  They are not an official SDK migration: npm still supplies the 0.5 SDK, so the adapter
-  uses structural 0.6 wire shapes until the SDK publishes 0.6.
+  **AHP compatibility adapter** and mutation path for host-owned file review bits.
+  This is not an official SDK migration: the adapter uses structural newer wire shapes
+  until the SDK publishes matching releases.
 - `lib/ahp/tool-safety.ts` — redacts `toolAuthentication` to a VS Code handoff and validates
   host-provided confirmation options/tool-safety state. Host tool safety is not Planwerk
   card risk and never advances a phase.
@@ -210,10 +262,10 @@ differs from the ref the gate ran against (`gate_runs.changeset_ref`,
 - **Code ref** `files:additions:deletions:modifiedAt` (modifiedAt dropped when normalized).
   Used for `build->review` and `review->ship`. Derived from the card's diff counts —
   which now come from the **session-scoped** changeset (`changeKind:"session"`, isolated
-  per agent) via `changeset-enricher.ts`, **not** the host's shared working-tree summary
-  (`SessionSummary.changes`, which accumulates across every agent in a shared dir/`main`).
-  `card.changesetVerified` is `true` only when the counts are session-scoped; when `false`
-  the ref is treated as **unknown** (`undefined`) and never marks a verdict stale.
+  per agent) via `changeset-enricher.ts`. Current VS Code also derives
+  `SessionSummary.changes` from that session changeset, but Planwerk marks counts verified
+  only after reading a ready per-file snapshot itself. When `card.changesetVerified` is
+  false, the ref is treated as **unknown** (`undefined`) and never marks a verdict stale.
 - **Plan ref** `plan:<hash>` (opaque identity of `plan.md` content, hashed in
   `changeset-enricher.ts` / merged in `client-bridge.ts`). Used for `plan->build` reviews
   (`plan-review` = `/rubber-duck`) so unrelated code churn — or another agent's edits —

@@ -116,6 +116,7 @@ export function syncCoherence(cards: KanbanCard[], config: CoherenceConfig): Coh
   const detectCards: DetectCard[] = inFlight.map((c) => ({
     id: c.id,
     workingDirectory: c.workingDirectory,
+    workingDirectories: c.workingDirectories,
     risk: riskOf(c.id),
     files: (c.fileChanges ?? []).map((f) => ({ path: f.path, added: f.added, removed: f.removed })),
   }));

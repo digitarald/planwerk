@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
-import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 
 import { AHPSessionSummary, shouldShowSession } from "@/lib/ahp/types";
-import { OFFERED_PROTOCOL_VERSIONS } from "@/lib/ahp/protocol";
+import { listAllSessions } from "@/lib/ahp/catalog";
+import { connectAhpTransport } from "@/lib/ahp/endpoint";
+import { sessionWorkingDirectories } from "@/lib/ahp/working-directories";
+import { initializeAhpClient } from "@/lib/ahp/initialize";
 import { injectMessage } from "@/lib/ahp/session-messenger";
 import { ahpErrorResponse } from "@/lib/ahp/api-error";
 
@@ -26,25 +28,21 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ sessions: [] });
   }
 
-  let transport: Awaited<ReturnType<typeof WebSocketTransport.connect>>;
+  let endpoint: Awaited<ReturnType<typeof connectAhpTransport>>;
   try {
-    transport = await WebSocketTransport.connect(hostUrl);
+    endpoint = await connectAhpTransport(hostUrl);
   } catch (err) {
     return ahpErrorResponse(err, "Failed to connect to AHP host");
   }
 
-  const client = new AhpClient(transport);
+  const client = new AhpClient(endpoint.transport);
   client.connect();
 
   try {
-    await client.initialize({
-      clientId: crypto.randomUUID(),
-      protocolVersions: OFFERED_PROTOCOL_VERSIONS,
-      initialSubscriptions: [],
-    });
+    const initialized = await initializeAhpClient(client);
 
-    const result = await client.request("listSessions", { channel: "ahp-root://" });
-    const sessions: AHPSessionSummary[] = result.items
+    const allSessions = await listAllSessions(client);
+    const sessions: AHPSessionSummary[] = allSessions
       .filter((s) => shouldShowSession(s.status, s.changes?.files ?? 0))
       .map((s) => {
         const mapped: AHPSessionSummary = {
@@ -58,6 +56,8 @@ export async function GET(request: NextRequest) {
         if (s.activity) mapped.activity = s.activity;
         if (s.project) mapped.project = { name: s.project.displayName, path: s.project.uri };
         if (s.workingDirectory) mapped.workingDirectory = s.workingDirectory;
+        const workingDirectories = sessionWorkingDirectories(s);
+        if (workingDirectories) mapped.workingDirectories = workingDirectories;
         if (s.changes) {
           mapped.changes = {
             additions: s.changes.additions ?? 0,
@@ -69,7 +69,16 @@ export async function GET(request: NextRequest) {
       });
 
     await client.shutdown();
-    return NextResponse.json({ sessions });
+    return NextResponse.json({
+      sessions,
+      connection: {
+        ...endpoint.diagnostics,
+        protocolVersion: initialized.protocolVersion,
+        totalSessions: allSessions.length,
+        visibleSessions: sessions.length,
+        filteredSessions: allSessions.length - sessions.length,
+      },
+    });
   } catch (err) {
     await client.shutdown().catch(() => {});
     return ahpErrorResponse(err, "Failed to list sessions");

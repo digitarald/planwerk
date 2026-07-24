@@ -37,6 +37,15 @@ export function classifyError(rawMessage: string, context: "connect" | "protocol
     };
   }
 
+  if (lower.includes("has not exposed a desktop agent host socket")) {
+    return {
+      type: "error",
+      code: "connection_refused",
+      message: "VS Code has not exposed a desktop Agent Host socket",
+      hint: "Enable \"Chat: Agent Host\" in VS Code, then retry VS Code (local).",
+    };
+  }
+
   if (
     lower.includes("econnrefused") ||
     lower.includes("enotfound") ||
@@ -51,7 +60,7 @@ export function classifyError(rawMessage: string, context: "connect" | "protocol
       type: "error",
       code: "connection_refused",
       message: "Could not reach the AHP host",
-      hint: "Make sure the agent host server is running. In VS Code, enable \"Chat: Agent Host\" in settings, or start it manually with: node scripts/code-agent-host.js --host 0.0.0.0",
+      hint: "Make sure the agent host server is running. In VS Code, enable \"Chat: Agent Host\" in settings, or start it manually with: code agent host --host 127.0.0.1 --port 8082 --without-connection-token",
     };
   }
 
