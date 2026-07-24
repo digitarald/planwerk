@@ -96,18 +96,6 @@ gates:
         description: Risk-adaptive implementation review
     optional: []
 
-# Risk assessment hints for the orchestrator
-risk:
-  high_keywords:
-    - database
-    - migration
-    - auth
-    - payment
-    - security
-    - encryption
-  file_threshold: 10
-  line_threshold: 200
-
 # WIP limits per phase (orchestrator enforces these)
 wip_limits:
   build: 3
