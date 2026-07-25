@@ -272,17 +272,17 @@ function formatHeartbeatAction(action: HeartbeatActionData): { type: "interventi
     case "plan-review-passed":
       return {
         type: "intervention",
-        message: "Independent rubber-duck review passed; plan remains ready for approval.",
+        message: "Configured plan review gates passed; plan remains ready for approval.",
       };
     case "plan-feedback-delivered":
       return {
         type: "intervention",
-        message: "Returned independent rubber-duck findings on the original plan request.",
+        message: "Returned configured plan-gate findings on the original plan request.",
       };
     case "plan-review-failed":
       return {
         type: "alert",
-        message: `Plan review needs attention: ${action.reason ?? "independent review or feedback delivery failed."}`,
+        message: `Plan review needs attention: ${action.reason ?? "configured gate execution or feedback delivery failed."}`,
       };
     case "stale-gate-invalidated":
       return {

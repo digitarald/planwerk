@@ -1,7 +1,13 @@
 import "server-only";
 
 import { getDb } from "@/lib/db/schema";
-import { injectMessage, fetchTurnById } from "@/lib/ahp/session-messenger";
+import {
+  fetchChatTurnById,
+  fetchTurnById,
+  injectMessage,
+  startPeerChatReview,
+  disposePeerChat,
+} from "@/lib/ahp/session-messenger";
 import {
   loadConfig,
   getApplicableSkills,
@@ -20,7 +26,6 @@ import { extractReviewEvidence } from "./review-evidence";
 import { decideReviewAction, type ReviewAction } from "./review-decision";
 import { judgeReviewResponse } from "./verdict-judge";
 import type { ReviewVerdict } from "./verdict-judge-core";
-import type { PlanReviewVerdict } from "./plan-review-core";
 
 const reviewJudgmentsInFlight = new Set<number>();
 
@@ -47,6 +52,7 @@ export interface ReviewRun {
   gateRunId: number | null;
   changesetRef: string | null;
   turnId: string | null;
+  chatUri: string | null;
 }
 
 interface ReviewRunRow {
@@ -64,6 +70,7 @@ interface ReviewRunRow {
   gate_run_id: number | null;
   changeset_ref: string | null;
   turn_id: string | null;
+  chat_uri: string | null;
 }
 
 function mapRow(row: ReviewRunRow): ReviewRun {
@@ -82,6 +89,7 @@ function mapRow(row: ReviewRunRow): ReviewRun {
     gateRunId: row.gate_run_id,
     changesetRef: row.changeset_ref,
     turnId: row.turn_id,
+    chatUri: row.chat_uri,
   };
 }
 
@@ -157,61 +165,6 @@ export function shouldStartReview(
 }
 
 /**
- * Persist an independent review of the plan artifact. The reviewer executes in
- * a separate, read-only SDK session, so there is no source-session turn ID.
- * A linked terminal gate run exposes the verdict to phase advancement.
- */
-export function recordIndependentPlanReview(
-  cardId: string,
-  changesetRef: string,
-  verdict: PlanReviewVerdict,
-  maxIterations: number,
-): number {
-  const db = getDb();
-  const prior = getLatestReviewRun(cardId, "plan-review", "plan->build");
-  const iteration = prior && normalizeChangesetRef(prior.changesetRef ?? undefined) !== normalizeChangesetRef(changesetRef)
-    ? Math.min(prior.iteration + 1, maxIterations)
-    : 1;
-  const status = verdict.status === "passed"
-    ? "passed"
-    : verdict.status === "failed"
-      ? "failed"
-      : "escalated";
-  return db.transaction(() => {
-    const gateRunId = startGateRun(
-      cardId,
-      "plan",
-      "build",
-      "review",
-      "plan-review",
-      changesetRef,
-    );
-    completeGateRun(
-      gateRunId,
-      verdict.status === "passed" ? "passed" : "failed",
-      verdict.summary,
-    );
-    const result = db.prepare(
-      `INSERT INTO review_runs (
-         card_id, skill_id, phase_transition, status, iteration, max_iterations,
-         prompt_injected_at, verdict_extracted_at, verdict_summary, findings_json,
-         changeset_ref, gate_run_id
-       ) VALUES (?, 'plan-review', 'plan->build', ?, ?, ?, datetime('now'), datetime('now'), ?, ?, ?, ?)`
-    ).run(
-      cardId,
-      status,
-      iteration,
-      maxIterations,
-      verdict.summary,
-      JSON.stringify(verdict.findings),
-      changesetRef,
-      gateRunId,
-    );
-    return Number(result.lastInsertRowid);
-  })();
-}
-
-/**
  * Check if a card has all required review gates passing for a transition.
  */
 export function hasPassingReviews(
@@ -257,7 +210,8 @@ export async function startReview(
   skill: SkillConfig,
   phaseTransition: string,
   riskLevel: RiskLevel,
-  changesetRef?: string
+  changesetRef?: string,
+  options?: { pendingRequestId?: string },
 ): Promise<{ reviewRunId: number; success: boolean }> {
   const db = getDb();
   const maxIterations = getEffectiveMaxIterations(skill.id, riskLevel);
@@ -313,7 +267,17 @@ export async function startReview(
   // Inject the review prompt into the session (failure-safe: always terminalize on error)
   const prompt = buildReviewPrompt(skill, iteration, maxIterations, cardId);
   try {
-    const { success, turnId, queued } = await injectMessage(hostUrl, sessionUri, prompt);
+    const injection = options?.pendingRequestId
+      ? await startPeerChatReview(
+          hostUrl,
+          sessionUri,
+          options.pendingRequestId,
+          prompt,
+        )
+      : await injectMessage(hostUrl, sessionUri, prompt);
+    const { success, turnId } = injection;
+    const queued = "queued" in injection ? injection.queued : false;
+    const chatUri = "chatUri" in injection ? injection.chatUri : undefined;
 
     if (success) {
       // Persist turnId only when the prompt started a turn immediately —
@@ -323,11 +287,15 @@ export async function startReview(
       // processing fails closed to human review.
       const persistedTurnId = queued ? null : turnId;
       db.prepare(
-        "UPDATE review_runs SET status = 'injected', prompt_injected_at = datetime('now'), turn_id = ? WHERE id = ?"
-      ).run(persistedTurnId, reviewRunId);
+        "UPDATE review_runs SET status = 'injected', prompt_injected_at = datetime('now'), turn_id = ?, chat_uri = ? WHERE id = ?"
+      ).run(persistedTurnId, chatUri ?? null, reviewRunId);
     } else {
-      db.prepare("UPDATE review_runs SET status = 'failed', verdict_summary = 'Failed to inject prompt' WHERE id = ?").run(reviewRunId);
-      completeGateRun(gateRunId, "failed", "Failed to inject review prompt into session");
+      const reason = "reason" in injection && injection.reason
+        ? injection.reason
+        : "Failed to inject review prompt into session";
+      db.prepare("UPDATE review_runs SET status = 'escalated', verdict_summary = ? WHERE id = ?")
+        .run(reason, reviewRunId);
+      completeGateRun(gateRunId, "failed", reason);
     }
 
     return { reviewRunId, success };
@@ -350,7 +318,8 @@ export async function processReviewResult(
   hostUrl: string,
   sessionUri: string,
   reviewRunId: number,
-  currentChangesetRef?: string
+  currentChangesetRef?: string,
+  projectPath?: string,
 ): Promise<(ReviewVerdict & { action: ReviewAction }) | null> {
   if (reviewJudgmentsInFlight.has(reviewRunId)) return null;
 
@@ -393,7 +362,9 @@ export async function processReviewResult(
           madeEdits: false,
         };
       } else {
-        const turn = await fetchTurnById(hostUrl, sessionUri, run.turnId);
+        const turn = run.chatUri
+          ? await fetchChatTurnById(hostUrl, run.chatUri, run.turnId)
+          : await fetchTurnById(hostUrl, sessionUri, run.turnId);
         if (!turn) {
           verdict = {
             status: "needs-human",
@@ -448,9 +419,9 @@ export async function processReviewResult(
       );
     }
 
-    const config = loadConfig();
+    const config = loadConfig(projectPath);
     const riskLevel = guessRiskFromPhaseTransition(run.cardId);
-    const maxIterations = getEffectiveMaxIterations(run.skillId, riskLevel, config);
+    const maxIterations = run.maxIterations;
     const action = decideReviewAction(
       verdict,
       run.iteration,
@@ -463,6 +434,7 @@ export async function processReviewResult(
       if (run.gateRunId) {
         completeGateRun(run.gateRunId, "passed", verdict.summary);
       }
+      if (run.chatUri) await disposePeerChat(hostUrl, run.chatUri).catch(() => {});
       return { ...verdict, action };
     }
 
@@ -477,6 +449,7 @@ export async function processReviewResult(
             : verdict.summary
         );
       }
+      if (run.chatUri) await disposePeerChat(hostUrl, run.chatUri).catch(() => {});
       return {
         ...verdict,
         status: verdict.status === "passed" ? "failed" : verdict.status,
@@ -489,6 +462,7 @@ export async function processReviewResult(
       if (run.gateRunId) {
         completeGateRun(run.gateRunId, "failed", "Escalated to human: " + verdict.summary);
       }
+      if (run.chatUri) await disposePeerChat(hostUrl, run.chatUri).catch(() => {});
       return { ...verdict, action };
     }
 
@@ -499,10 +473,20 @@ export async function processReviewResult(
     if (run.gateRunId) {
       completeGateRun(run.gateRunId, "failed", `Escalated after ${maxIterations} iterations: ${verdict.summary}`);
     }
+    if (run.chatUri) await disposePeerChat(hostUrl, run.chatUri).catch(() => {});
     return { ...verdict, action };
   } finally {
     reviewJudgmentsInFlight.delete(reviewRunId);
   }
+}
+
+/** Whether the exact peer-chat review turn has completed and can be judged. */
+export async function isReviewResultReady(
+  hostUrl: string,
+  run: ReviewRun,
+): Promise<boolean> {
+  if (!run.chatUri || !run.turnId) return false;
+  return Boolean(await fetchChatTurnById(hostUrl, run.chatUri, run.turnId));
 }
 
 /**

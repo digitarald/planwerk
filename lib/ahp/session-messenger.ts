@@ -3,9 +3,13 @@ import "server-only";
 import type { SessionChatInputRequest, SessionLifecycle, SessionState, Turn } from "@microsoft/agent-host-protocol";
 
 import { getAHPClient, releaseAHPClient } from "./client-manager";
-import { asSessionState, readChatState, readSessionState } from "./snapshot";
+import { asSessionState, readChatState, readRootState, readSessionState } from "./snapshot";
 import { AHPStatus, parseAHPStatus } from "./types";
 import { buildPlanFeedbackAnswer } from "./answer-value";
+import {
+  buildCreatePeerChatParams,
+  supportsPeerChats,
+} from "./peer-chat-core";
 import {
   findChatInputEntry,
   hasObservedInputNeeded,
@@ -82,6 +86,83 @@ export async function injectMessage(
 
     debug("Injected message into", sessionUri, "turnId:", messageId);
     return { turnId: messageId, success: true };
+  } finally {
+    releaseAHPClient(hostUrl);
+  }
+}
+
+export interface PeerChatReviewStart {
+  success: boolean;
+  chatUri?: string;
+  turnId?: string;
+  reason?: string;
+}
+
+/**
+ * Start a configured review command in a peer chat of the session that owns a
+ * pending input request. Chats in the session share its workspace,
+ * customizations, and plan artifact, so Planwerk does not copy plan content.
+ */
+export async function startPeerChatReview(
+  hostUrl: string,
+  sessionUri: string,
+  requestId: string,
+  message: string,
+): Promise<PeerChatReviewStart> {
+  const client = await getAHPClient(hostUrl);
+  let reviewChatUri: string | undefined;
+
+  try {
+    const [sessionState, rootState] = await Promise.all([
+      readSessionState(client, sessionUri),
+      readRootState(client),
+    ]);
+    if (!sessionState) {
+      return { success: false, reason: "Session state is unavailable." };
+    }
+    if (!supportsPeerChats(rootState, sessionState.provider)) {
+      return {
+        success: false,
+        reason: `Agent provider ${sessionState.provider} does not advertise multi-chat support.`,
+      };
+    }
+
+    const input = findChatInput(sessionState.inputNeeded, requestId);
+    if (!input) {
+      return { success: false, reason: "The pending plan request is stale." };
+    }
+
+    const params = buildCreatePeerChatParams(sessionUri, crypto.randomUUID());
+    reviewChatUri = params.chat;
+    await client.request("createChat", params);
+
+    const turnId = crypto.randomUUID();
+    client.dispatch(reviewChatUri, chatTurnStarted(turnId, message));
+    await client.ping();
+    debug(
+      "Started peer-chat review",
+      { sessionUri, requestChat: input.chat, reviewChatUri, turnId },
+    );
+    return { success: true, chatUri: reviewChatUri, turnId };
+  } catch (error) {
+    if (reviewChatUri) {
+      await client.request("disposeChat", { channel: reviewChatUri }).catch(() => {});
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn("[ahp:review] Failed to start peer chat:", reason);
+    return { success: false, reason };
+  } finally {
+    releaseAHPClient(hostUrl);
+  }
+}
+
+export async function disposePeerChat(
+  hostUrl: string,
+  chatUri: string,
+): Promise<void> {
+  const client = await getAHPClient(hostUrl);
+  try {
+    await client.request("disposeChat", { channel: chatUri });
   } finally {
     releaseAHPClient(hostUrl);
   }
@@ -312,6 +393,21 @@ export async function fetchTurnById(
 ): Promise<Turn | undefined> {
   const { turns } = await fetchLastTurns(hostUrl, sessionUri, searchWindow);
   return turns.find((t) => t.id === turnId);
+}
+
+/** Fetch an exact completed turn from a known chat channel. */
+export async function fetchChatTurnById(
+  hostUrl: string,
+  chatUri: string,
+  turnId: string,
+): Promise<Turn | undefined> {
+  const client = await getAHPClient(hostUrl);
+  try {
+    const chatState = await readChatState(client, chatUri);
+    return chatState?.turns.find((turn) => turn.id === turnId);
+  } finally {
+    releaseAHPClient(hostUrl);
+  }
 }
 
 /**

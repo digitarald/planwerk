@@ -228,14 +228,17 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
   commands emit `gate-completed` after their `gate_runs` row is finalized, which is the
   refresh signal that clears the evaluating state.
 - `lib/orchestrator/{heartbeat,gate-engine,triage,risk-*}.ts` — the autonomous loop.
-  A card blocked on Copilot's plan-review input is reviewed out-of-band by
-  `plan-reviewer.ts`; the verdict is stored in `review_runs` against the current
-  `plan:<hash>`. Blocking findings are returned on the **original** AHP input as
+  A card blocked on Copilot's plan-review input resolves its required `plan->build`
+  review gates from `.github/planwerk.yml`. Each configured skill prompt runs in a
+  peer chat in the owning AHP session, so the reviewer
+  reads that session's `plan.md` and workspace context without Planwerk embedding the
+  plan in a separate SDK prompt. The exact peer `chat_uri` and `turn_id` are stored in
+  `review_runs` against the current `plan:<hash>`, with a linked `gate_runs` row.
+  Blocking findings are returned on the **original** AHP input as
   `chat/inputCompleted(response:"accept")` with a selected answer carrying
   `freeformValues`. VS Code maps that to Copilot's
   `{ approved:false, feedback, selectedAction }`, which revises the plan without
-  Planwerk declining first or waiting for a second elicitation. A passing medium/
-  high-risk plan remains pending for human approval by default; inspect
+  Planwerk declining first or waiting for a second elicitation.   A passing medium/high-risk plan remains pending for human approval by default; inspect
   `review_policy.<risk>.auto_approve_plan` for overrides.
   A plain idle plan-phase card can still use the normal injected `plan-review` gate.
   A card that stays `running` (heads-down coding) won't advance until it idles —
@@ -264,9 +267,11 @@ that action in `heartbeat_log`/the orchestrator feed.
 **Plan-review feedback not applied** — look for `plan-feedback-delivered` versus
 `plan-review-failed` in `heartbeat_log`. The former is emitted only after the
 original request disappears from `SessionState.inputNeeded`. For the latter, inspect
-the latest `review_runs` row: `changeset_ref` must match the card's current
-`planContentHash`, `verdict_summary`/`findings_json` contain the independent review,
-and `status` distinguishes a passing review, blocking findings, and escalation.
+the latest YAML-configured `review_runs` rows: `changeset_ref` must match the card's
+`planContentHash`; `chat_uri`/`turn_id` identify the exact peer review turn;
+`verdict_summary`/`findings_json` contain the gate evidence; and `status` distinguishes
+a passing review, blocking findings, and escalation. If no peer chat was created, check
+the provider's advertised `multipleChats` capability and the recorded failure.
 Do not look for a follow-up ask-user request: the old decline-then-follow-up flow was
 removed because AHP decline intentionally carries no plan feedback.
 

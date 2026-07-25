@@ -82,6 +82,7 @@ export function getDb(): Database.Database {
         gate_run_id INTEGER,
         changeset_ref TEXT,
         turn_id TEXT,
+        chat_uri TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
 
@@ -167,16 +168,18 @@ export function getDb(): Database.Database {
       db.exec("ALTER TABLE gate_runs ADD COLUMN changeset_ref TEXT;");
     }
 
-    // review_runs.turn_id: the exact Turn.id the review prompt started (when
-    // injectMessage started a turn immediately rather than queuing it), so
-    // processReviewResult can judge that precise turn. Missing correlation
-    // fails closed instead of guessing from nearby chat turns.
+    // review_runs.turn_id/chat_uri identify the exact review turn. chat_uri is
+    // populated for peer-chat plan gates; older/default-chat reviews leave it
+    // null and resolve through the session's default chat.
     const reviewRunsColumns = db
       .prepare("PRAGMA table_info(review_runs)")
       .all() as Array<{ name: string }>;
 
     if (!reviewRunsColumns.some((column) => column.name === "turn_id")) {
       db.exec("ALTER TABLE review_runs ADD COLUMN turn_id TEXT;");
+    }
+    if (!reviewRunsColumns.some((column) => column.name === "chat_uri")) {
+      db.exec("ALTER TABLE review_runs ADD COLUMN chat_uri TEXT;");
     }
 
     // Migrate card_risk: remove legacy FK constraint on card_id → card_phases

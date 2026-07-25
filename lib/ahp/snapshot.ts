@@ -3,6 +3,7 @@ import "server-only";
 import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import type {
   ChatState,
+  RootState,
   SessionState,
   Snapshot,
 } from "@microsoft/agent-host-protocol";
@@ -38,10 +39,26 @@ export function asSessionState(snapshot: Snapshot | undefined): SessionState | u
   return state as SessionState;
 }
 
+/** Narrow the root-channel snapshot to {@link RootState}. */
+export function asRootState(snapshot: Snapshot | undefined): RootState | undefined {
+  if (snapshot?.resource !== "ahp-root://") return undefined;
+  const state = snapshot.state;
+  if (!state || !Array.isArray((state as Partial<RootState>).agents)) return undefined;
+  return state as RootState;
+}
+
 /** Narrow a chat-channel (`ahp-chat:`) snapshot to {@link ChatState}. */
 export function asChatState(snapshot: Snapshot | undefined): ChatState | undefined {
   if (!snapshot?.resource.startsWith("ahp-chat:")) return undefined;
   return snapshot.state as ChatState;
+}
+
+/** One-shot read of the host root state and agent capabilities. */
+export async function readRootState(client: AhpClient): Promise<RootState | undefined> {
+  const { result, subscription } = await client.subscribe("ahp-root://");
+  void subscription.close();
+  await client.unsubscribe("ahp-root://").catch(() => {});
+  return asRootState(result.snapshot);
 }
 
 /**

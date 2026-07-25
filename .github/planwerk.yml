@@ -87,8 +87,8 @@ skills:
     auto_fix: true
 
 # Review iteration and post-review plan approval policy.
-# Medium/high plans receive an independent review but remain pending for a human
-# by default. Set auto_approve_plan to true to accept a passing reviewed plan.
+# YAML-defined plan gates run in a peer chat of the owning session. Medium/high
+# plans remain pending for a human by default after those gates pass.
 review_policy:
   low:
     max_iterations: 1

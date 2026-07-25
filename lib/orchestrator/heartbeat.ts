@@ -3,7 +3,7 @@ import "server-only";
 import { getDb } from "@/lib/db/schema";
 import { KanbanCard, Phase, RiskLevel, PendingInput, normalizeChangesetRef } from "@/lib/types";
 import { loadConfig } from "./skill-config";
-import { getActiveReviewRuns, getLatestReviewRun, startReview, processReviewResult, getRequiredReviewSkills, recordIndependentPlanReview, shouldStartReview } from "./review-executor";
+import { getActiveReviewRuns, getLatestReviewRun, startReview, processReviewResult, getRequiredReviewSkills, isReviewResultReady, shouldStartReview } from "./review-executor";
 import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard, completeGateRun, executeGateCommand } from "./gate-engine";
 import { isRetryableGateFailure } from "./gate-command";
 import { getCardRisk } from "./risk-store";
@@ -13,8 +13,7 @@ import { syncCoherence } from "./coherence-engine";
 import { runCoherenceExecutor, type ReviewCardCtx } from "./coherence-reviewer";
 import { advanceReviewToShip } from "./phase-advance";
 import { hasReadableArtifact } from "./artifact-gate";
-import { formatPlanReviewFeedback, type PlanReviewVerdict } from "./plan-review-core";
-import { reviewPlan } from "./plan-reviewer";
+import { selectPendingReviewSkills } from "./plan-gate-selection";
 
 /**
  * Heartbeat action types emitted to the orchestrator feed.
@@ -680,15 +679,32 @@ function readStoredReviewFindings(json: string | null): string[] | null {
     );
     return null;
   }
+
+}
+
+function formatPlanGateFeedback(
+  reviews: Array<{ skillId: string; summary: string; findings: string[] }>,
+): string {
+  const sections = reviews.map((review) => {
+    const findings = review.findings.map((finding) => `- ${finding}`).join("\n");
+    return [`[${review.skillId}] ${review.summary}`, findings].filter(Boolean).join("\n");
+  });
+  return [
+    "Configured plan gates found blockers that must be addressed before implementation:",
+    "",
+    sections.join("\n\n"),
+    "",
+    "Revise plan.md to address these findings, then present the plan for approval again.",
+  ].join("\n");
 }
 
 /**
  * Plan-approval pipeline for input-needed cards sitting on a copilotcli
  * plan-approval:
- * - Auto-approve when the risk policy permits it.
- * - Otherwise independently review the current plan artifact.
- * - Return blocking findings as feedback on the original plan request.
- * - Leave a passing reviewed plan pending when policy requires human approval.
+ * - Resolve required plan->build review gates from project YAML.
+ * - Run configured review commands in peer chats of the owning session.
+ * - Return gate findings as feedback on the original plan request.
+ * - Approve a passing gated plan only when risk policy permits it.
  */
 async function runPlanApprovalPipeline(
   hostUrl: string,
@@ -736,72 +752,134 @@ async function runPlanApprovalPipeline(
     }
   };
 
-  // Never trust the card's display default for automatic approval. An
-  // un-triaged plan must first receive a persisted risk assessment.
-  if (assessedRisk === "low" && config.reviewPolicy.low.autoApprovePlan) {
-    await approvePlan();
-    return actions;
-  }
-
   const riskLevel = assessedRisk ?? "medium";
   const policy = config.reviewPolicy[riskLevel];
   const planRef = normalizeChangesetRef(card.planContentHash);
-  const planContent = card.artifacts?.find(
-    (artifact) => artifact.type === "plan" && artifact.contentRef,
-  )?.contentRef;
-  if (!planRef || !planContent) {
+  if (!planRef) {
     const action: HeartbeatAction = {
       type: "plan-review-failed",
       cardId: card.id,
-      reason: "The current plan artifact is unavailable; human review is required.",
+      reason: "The current plan hash is unavailable; human review is required.",
     };
     emit(action);
     actions.push(action);
     return actions;
   }
 
-  let latest = getLatestReviewRun(card.id, "plan-review", "plan->build");
-  const fresh = latest
-    && normalizeChangesetRef(latest.changesetRef ?? undefined) === planRef;
-  let verdict: PlanReviewVerdict | undefined;
-  let justReviewed = false;
-
-  if (latest && fresh) {
-    const findings = readStoredReviewFindings(latest.findingsJson);
-    verdict = {
-      status: findings === null
-        ? "needs-human"
-        : latest.status === "passed"
-          ? "passed"
-          : latest.status === "failed"
-            ? "failed"
-            : "needs-human",
-      summary: findings === null
-        ? "Stored plan-review findings are invalid; human review is required."
-        : latest.verdictSummary ?? "Independent plan review completed.",
-      findings: findings ?? [],
-    };
-  } else {
-    if (latest && latest.iteration >= policy.maxIterations) {
-      verdict = {
-        status: "needs-human",
-        summary: `Plan review reached the ${policy.maxIterations}-iteration limit.`,
-        findings: [],
-      };
-    } else {
-      verdict = await reviewPlan(planContent);
-    }
-    recordIndependentPlanReview(card.id, planRef, verdict, policy.maxIterations);
-    latest = getLatestReviewRun(card.id, "plan-review", "plan->build");
-    justReviewed = true;
+  const transition = "plan->build";
+  const { allowed, pendingGates } = canAdvancePhase(
+    card.id,
+    "plan",
+    "build",
+    card.workingDirectory,
+    riskLevel,
+    planRef,
+  );
+  if (allowed) {
+    if (policy.autoApprovePlan) await approvePlan();
+    return actions;
   }
 
-  if (verdict.status === "passed") {
+  const configuredSkills = getRequiredReviewSkills(
+    transition,
+    riskLevel,
+    card.workingDirectory,
+  );
+  const selection = selectPendingReviewSkills(pendingGates, configuredSkills);
+  if (selection.nonReviewNames.length > 0) {
     const action: HeartbeatAction = {
-      type: "plan-review-passed",
+      type: "plan-review-failed",
       cardId: card.id,
+      reason: `Required plan gates are pending outside the review pipeline: ${selection.nonReviewNames.join(", ")}.`,
     };
-    if (justReviewed) {
+    emit(action);
+    actions.push(action);
+    return actions;
+  }
+  const skills = selection.skills;
+  if (selection.missingReviewNames.length > 0) {
+    const action: HeartbeatAction = {
+      type: "plan-review-failed",
+      cardId: card.id,
+      reason: `Configured review skills are unavailable: ${selection.missingReviewNames.join(", ")}.`,
+    };
+    emit(action);
+    actions.push(action);
+    return actions;
+  }
+
+  let processedPass = false;
+  for (const skill of skills) {
+    const latest = getLatestReviewRun(card.id, skill.id, transition);
+    const fresh = latest
+      && normalizeChangesetRef(latest.changesetRef ?? undefined) === planRef;
+    if (latest && fresh && (latest.status === "injected" || latest.status === "extracting")) {
+      if (await isReviewResultReady(hostUrl, latest)) {
+        const verdict = await processReviewResult(
+          hostUrl,
+          card.id,
+          latest.id,
+          planRef,
+          card.workingDirectory,
+        );
+        processedPass ||= verdict?.action === "passed";
+      }
+      continue;
+    }
+    if (latest && fresh) continue;
+    if (!config.orchestrator.autoInjectReviews) continue;
+
+    const { success } = await startReview(
+      hostUrl,
+      card.id,
+      card.id,
+      skill,
+      transition,
+      riskLevel,
+      planRef,
+      { pendingRequestId: input.requestId },
+    );
+    if (success) {
+      const action: HeartbeatAction = {
+        type: "review-injected",
+        cardId: card.id,
+        skillId: skill.id,
+        iteration: getLatestReviewRun(card.id, skill.id, transition)?.iteration ?? 1,
+      };
+      emit(action);
+      actions.push(action);
+    } else {
+      const failed = getLatestReviewRun(card.id, skill.id, transition);
+      const action: HeartbeatAction = {
+        type: "plan-review-failed",
+        cardId: card.id,
+        reason: failed?.verdictSummary ?? `Failed to start configured review gate ${skill.id}.`,
+      };
+      emit(action);
+      actions.push(action);
+    }
+  }
+
+  const refreshed = skills.map((skill) => ({
+    skill,
+    run: getLatestReviewRun(card.id, skill.id, transition),
+  }));
+  const stillRunning = refreshed.some(
+    ({ run }) => run && (run.status === "injected" || run.status === "extracting"),
+  );
+  if (stillRunning) return actions;
+
+  const passing = canAdvancePhase(
+    card.id,
+    "plan",
+    "build",
+    card.workingDirectory,
+    riskLevel,
+    planRef,
+  ).allowed;
+  if (passing) {
+    if (processedPass) {
+      const action: HeartbeatAction = { type: "plan-review-passed", cardId: card.id };
       emit(action);
       actions.push(action);
     }
@@ -809,20 +887,19 @@ async function runPlanApprovalPipeline(
     return actions;
   }
 
-  if (verdict.status === "needs-human") {
-    if (justReviewed) {
-      const action: HeartbeatAction = {
-        type: "plan-review-failed",
-        cardId: card.id,
-        reason: verdict.summary,
-      };
-      emit(action);
-      actions.push(action);
-    }
-    return actions;
-  }
+  const blocking = refreshed.flatMap(({ skill, run }) => {
+    if (!run || run.status !== "failed") return [];
+    const findings = readStoredReviewFindings(run.findingsJson);
+    if (!findings || findings.length === 0) return [];
+    return [{
+      skillId: skill.id,
+      summary: run.verdictSummary ?? "Configured review gate failed.",
+      findings,
+    }];
+  });
+  if (blocking.length === 0) return actions;
 
-  const feedback = formatPlanReviewFeedback(verdict);
+  const feedback = formatPlanGateFeedback(blocking);
   let result = await submitPlanFeedback(
     hostUrl,
     card.id,
