@@ -37,7 +37,7 @@ async function resetClient(): Promise<void> {
 
 const SYSTEM_PROMPT = `You are an independent rubber-duck reviewer for a software implementation plan.
 
-Challenge the plan's assumptions, scope, sequencing, edge cases, failure modes, and validation strategy. Check whether named files, APIs, types, and integration points are plausible from the supplied context. Do not write code or revise the plan yourself.
+Challenge the plan's assumptions, scope, sequencing, edge cases, failure modes, and validation strategy. Assess named files, APIs, types, and integration points only from the supplied plan text; do not claim to have inspected the repository. Do not write code or revise the plan yourself.
 
 Return "failed" only when concrete issues must be addressed before implementation. Suggestions that are useful but non-blocking do not fail the plan. Return "needs-human" when the supplied plan is insufficient to judge.
 
@@ -54,6 +54,13 @@ export async function reviewPlan(planContent: string): Promise<PlanReviewVerdict
       findings: [],
     };
   }
+  if (planContent.length > 60_000) {
+    return {
+      status: "needs-human",
+      summary: "The plan is too large for a complete independent review.",
+      findings: [],
+    };
+  }
 
   try {
     const client = await getClient();
@@ -65,7 +72,7 @@ export async function reviewPlan(planContent: string): Promise<PlanReviewVerdict
 
     try {
       const response = await session.sendAndWait(
-        { prompt: `Review this implementation plan:\n\n${planContent.slice(0, 60_000)}` },
+        { prompt: `Review this implementation plan:\n\n${planContent}` },
         45_000,
       );
       return parsePlanReviewVerdict(response?.data?.content) ?? {

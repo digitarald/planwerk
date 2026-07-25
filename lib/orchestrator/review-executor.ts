@@ -157,9 +157,9 @@ export function shouldStartReview(
 }
 
 /**
- * Persist an independent review of the plan artifact. Unlike injected reviews,
- * this run has no gate-run or turn ID: the reviewer executes in a separate,
- * read-only SDK session and the structured verdict is the evidence.
+ * Persist an independent review of the plan artifact. The reviewer executes in
+ * a separate, read-only SDK session, so there is no source-session turn ID.
+ * A linked terminal gate run exposes the verdict to phase advancement.
  */
 export function recordIndependentPlanReview(
   cardId: string,
@@ -177,21 +177,38 @@ export function recordIndependentPlanReview(
     : verdict.status === "failed"
       ? "failed"
       : "escalated";
-  const result = db.prepare(
-    `INSERT INTO review_runs (
-       card_id, skill_id, phase_transition, status, iteration, max_iterations,
-       prompt_injected_at, verdict_extracted_at, verdict_summary, findings_json, changeset_ref
-     ) VALUES (?, 'plan-review', 'plan->build', ?, ?, ?, datetime('now'), datetime('now'), ?, ?, ?)`
-  ).run(
-    cardId,
-    status,
-    iteration,
-    maxIterations,
-    verdict.summary,
-    JSON.stringify(verdict.findings),
-    changesetRef,
-  );
-  return Number(result.lastInsertRowid);
+  return db.transaction(() => {
+    const gateRunId = startGateRun(
+      cardId,
+      "plan",
+      "build",
+      "review",
+      "plan-review",
+      changesetRef,
+    );
+    completeGateRun(
+      gateRunId,
+      verdict.status === "passed" ? "passed" : "failed",
+      verdict.summary,
+    );
+    const result = db.prepare(
+      `INSERT INTO review_runs (
+         card_id, skill_id, phase_transition, status, iteration, max_iterations,
+         prompt_injected_at, verdict_extracted_at, verdict_summary, findings_json,
+         changeset_ref, gate_run_id
+       ) VALUES (?, 'plan-review', 'plan->build', ?, ?, ?, datetime('now'), datetime('now'), ?, ?, ?, ?)`
+    ).run(
+      cardId,
+      status,
+      iteration,
+      maxIterations,
+      verdict.summary,
+      JSON.stringify(verdict.findings),
+      changesetRef,
+      gateRunId,
+    );
+    return Number(result.lastInsertRowid);
+  })();
 }
 
 /**
