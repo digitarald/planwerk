@@ -132,10 +132,10 @@ Config: `coherence.{enabled, module_depth, block_high_risk_ship}` in `planwerk.y
 | Column | What Happens | Gate to Exit |
 | --- | --- | --- |
 | **Define** | Idea captured, being refined | Scope sufficiently clear → PLAN |
-| **Plan** | Agent produces spec/plan | Adversarial review passes → BUILD |
-| **Build** | Agent writing code | Lint + typecheck + tests pass → REVIEW |
-| **Review** | AI code review + human review (qualitative) | Verdict: approved → SHIP |
-| **Ship** | All gates passed, ready to merge | Archive ✓ |
+| **Plan** | Agent captures the intended outcome in `plan.md` | Adversarial intent review passes → BUILD |
+| **Build** | Agent implements and corrects the change | Lint + typecheck + tests + build + independent correctness/architecture review pass → REVIEW |
+| **Review** | System synthesizes final implementation and prior evidence against the original intent | Independent handoff assessment passes and readable sibling `review.md` captures validation, divergences, risks, and recommendation → SHIP |
+| **Ship** | Review evidence is complete; ready for accountable human merge decision | Archive ✓ |
 
 ---
 

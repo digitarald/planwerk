@@ -5,7 +5,7 @@ import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./typ
 import { classifyError, ConnectionError } from "./connection-error";
 import { classifyAhpError } from "./rpc-error";
 import { enrichFromChangeset, ChangesetEnrichment, hashPlanContent } from "./changeset-enricher";
-import { fetchCopilotCliPlan, clearPlanCache } from "./plan-artifact";
+import { fetchCopilotCliArtifacts, clearPlanCache } from "./plan-artifact";
 import { fetchSessionModel, fetchSessionPrimaryWorkingDirectory } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
 import { asChatState, asSessionState, readChatState, readSessionState } from "./snapshot";
@@ -178,11 +178,11 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
     const hasFileChanges = (session.changes?.files ?? 0) > 0;
 
-    // Run changeset enrichment and plan fetch in parallel
+    // Run changeset enrichment and session-state artifact fetch in parallel
     const changesetPromise = hasFileChanges
       ? enrichFromChangeset(client!, sessionUri)
       : Promise.resolve(null);
-    const planPromise = fetchCopilotCliPlan(client!, sessionUri, session.modifiedAt);
+    const artifactPromise = fetchCopilotCliArtifacts(client!, sessionUri, session.modifiedAt);
     // The selected model is provider config on SessionState (not the summary), so
     // derive it once per session and cache it on the summary entry.
     const modelPromise: Promise<string | undefined> = session.model
@@ -191,8 +191,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     const primaryDirectoryPromise = fetchSessionPrimaryWorkingDirectory(client!, sessionUri)
       .catch(() => undefined);
 
-    Promise.all([changesetPromise, planPromise, modelPromise, primaryDirectoryPromise])
-      .then(([changesetResult, planArtifact, model, primaryDirectory]) => {
+    Promise.all([changesetPromise, artifactPromise, modelPromise, primaryDirectoryPromise])
+      .then(([changesetResult, sessionArtifacts, model, primaryDirectory]) => {
         if (disposed || !sessions.has(sessionUri)) return;
 
         if (model) {
@@ -209,33 +209,47 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
         let enrichment = changesetResult ?? enrichments.get(sessionUri) ?? null;
 
-        // Merge plan artifact into enrichment if no plan was found in changeset
-        if (planArtifact) {
-          const hasPlan = enrichment?.artifacts.some((a) => a.type === "plan");
-          if (!hasPlan) {
-            // Derive the plan freshness ref from the on-disk plan content so the
-            // plan->build review keys on the plan, not the code diff.
-            const planContentHash = planArtifact.contentRef
-              ? hashPlanContent(planArtifact.contentRef)
-              : undefined;
-            if (enrichment) {
-              enrichment = {
-                ...enrichment,
-                artifacts: [...enrichment.artifacts, planArtifact],
-                planContentHash: enrichment.planContentHash ?? planContentHash,
-              };
-            } else {
-              enrichment = {
-                artifacts: [planArtifact],
-                codeFileCount: 0,
-                totalFileCount: 0,
-                fileChanges: [],
-                additions: 0,
-                deletions: 0,
-                changesetVerified: false,
-                planContentHash,
-              };
-            }
+        const mergedSessionArtifacts = sessionArtifacts.filter((artifact) => {
+          const existing = enrichment?.artifacts.find(
+            (candidate) => candidate.type === artifact.type
+          );
+          return (
+            !existing ||
+            (!existing.contentRef?.trim() && Boolean(artifact.contentRef?.trim()))
+          );
+        });
+        if (mergedSessionArtifacts.length > 0) {
+          const planArtifact = mergedSessionArtifacts.find(
+            (artifact) => artifact.type === "plan"
+          );
+          const planContentHash = planArtifact?.contentRef
+            ? hashPlanContent(planArtifact.contentRef)
+            : undefined;
+          if (enrichment) {
+            const replacedTypes = new Set(
+              mergedSessionArtifacts.map((artifact) => artifact.type)
+            );
+            enrichment = {
+              ...enrichment,
+              artifacts: [
+                ...enrichment.artifacts.filter(
+                  (artifact) => !replacedTypes.has(artifact.type)
+                ),
+                ...mergedSessionArtifacts,
+              ],
+              planContentHash: enrichment.planContentHash ?? planContentHash,
+            };
+          } else {
+            enrichment = {
+              artifacts: mergedSessionArtifacts,
+              codeFileCount: 0,
+              totalFileCount: 0,
+              fileChanges: [],
+              additions: 0,
+              deletions: 0,
+              changesetVerified: false,
+              planContentHash,
+            };
           }
         }
 

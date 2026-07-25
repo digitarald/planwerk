@@ -8,7 +8,7 @@ export type AttentionLevel =
   | "error"
   | "conflict";
 export type RiskLevel = "low" | "medium" | "high";
-export type ArtifactType = "plan" | "research" | "design" | "spec" | "test-plan" | "decision";
+export type ArtifactType = "plan" | "review" | "research" | "design" | "spec" | "test-plan" | "decision";
 export type ArtifactStatus = "draft" | "approved" | "superseded";
 
 export interface Artifact {

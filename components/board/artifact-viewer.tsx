@@ -33,6 +33,7 @@ interface ArtifactViewerProps {
 
 const artifactIcons: Record<ArtifactType, typeof FileText> = {
   plan: FileText,
+  review: ClipboardCheck,
   research: FlaskConical,
   design: Lightbulb,
   spec: BookOpen,
@@ -42,6 +43,7 @@ const artifactIcons: Record<ArtifactType, typeof FileText> = {
 
 const artifactTypeLabels: Record<ArtifactType, string> = {
   plan: "Plan",
+  review: "Review",
   research: "Research",
   design: "Design",
   spec: "Specification",

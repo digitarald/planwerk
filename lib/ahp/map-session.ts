@@ -206,6 +206,8 @@ function inferArtifacts(session: AHPSessionSummary): Artifact[] {
       const type =
         kind === "plan" || title.toLowerCase().includes("plan")
           ? "plan"
+          : kind === "review" || title.toLowerCase().includes("review")
+            ? "review"
           : kind === "research"
             ? "research"
             : kind === "design"

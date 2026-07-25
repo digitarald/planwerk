@@ -187,6 +187,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (gate.gateType === "artifact" || gate.gateType === "review") {
+      return NextResponse.json(
+        {
+          error:
+            gate.gateType === "artifact"
+              ? `${gate.artifactType ?? "Required"} artifact gates pass only after Planwerk reads the artifact`
+              : "Review gates must run through the independent review executor",
+        },
+        { status: 409 }
+      );
+    }
+
+    if (!gate.command) {
+      return NextResponse.json(
+        { error: `No command configured for gate "${gate.gateName ?? gate.gateType}"` },
+        { status: 409 }
+      );
+    }
+
     const runId = startGateRun(
       cardId,
       currentPhase,
@@ -196,13 +215,9 @@ export async function POST(request: NextRequest) {
       body.changesetRef
     );
 
-    if (!gate.command) {
-      completeGateRun(runId, "passed", "Manual review gate — no command to execute");
-    } else {
-      // gate.command is trusted: sourced from DEFAULT_GATES or admin gate_configs table
-      const cwd = body.workingDirectory || process.cwd();
-      executeGateCommand(runId, gate.command, cwd);
-    }
+    // Commands are trusted project/admin configuration, never request input.
+    const cwd = body.workingDirectory || process.cwd();
+    executeGateCommand(runId, gate.command, cwd);
 
     return NextResponse.json({ runId, status: "running" });
   }

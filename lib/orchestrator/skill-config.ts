@@ -4,7 +4,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 
-import type { RiskLevel } from "@/lib/types";
+import type { ArtifactType, RiskLevel } from "@/lib/types";
 import type { CoherenceConfig } from "./coherence-engine";
 import { resolveReviewPrompt } from "./review-prompt";
 
@@ -36,6 +36,7 @@ function parseRiskPrompts(
 export interface ReviewPolicy {
   maxIterations: number;
   followEdits: boolean;
+  autoApprovePlan: boolean;
 }
 
 export interface GateSkillRef {
@@ -50,7 +51,13 @@ export interface GateScriptRef {
   name: string;
 }
 
-export type GateRef = GateSkillRef | GateScriptRef;
+export interface GateArtifactRef {
+  type: "artifact";
+  artifact: ArtifactType;
+  description?: string;
+}
+
+export type GateRef = GateSkillRef | GateScriptRef | GateArtifactRef;
 
 export interface GateTransitionConfig {
   required: GateRef[];
@@ -81,6 +88,7 @@ export interface OrchestratorConfig {
 }
 
 export interface PlanwerkConfig {
+  scripts: Record<string, string>;
   skills: Record<string, SkillConfig>;
   gates: Record<string, GateTransitionConfig>;
   reviewPolicy: Record<RiskLevel, ReviewPolicy>;
@@ -103,7 +111,19 @@ const DEFAULT_SKILLS: Record<string, SkillConfig> = {
   "code-review": {
     id: "code-review",
     prompt: "/rubber-duck",
-    description: "Code quality and correctness review",
+    description: "Implementation correctness and architecture review",
+    riskThreshold: "low",
+    maxIterations: 2,
+    autoFix: true,
+  },
+  "review-report": {
+    id: "review-report",
+    prompt:
+      "Independently assess the final implementation against plan.md and prior gate evidence. " +
+      "Create or update review.md beside plan.md with the intended outcome, implemented result, " +
+      "validation evidence, divergences, unresolved risks, human-attention items, and ship recommendation. " +
+      "Keep plan.md unchanged and do not modify implementation code.",
+    description: "Final intent-to-implementation review and durable human handoff",
     riskThreshold: "low",
     maxIterations: 2,
     autoFix: true,
@@ -127,9 +147,9 @@ const DEFAULT_SKILLS: Record<string, SkillConfig> = {
 };
 
 const DEFAULT_REVIEW_POLICY: Record<RiskLevel, ReviewPolicy> = {
-  low: { maxIterations: 1, followEdits: false },
-  medium: { maxIterations: 2, followEdits: false },
-  high: { maxIterations: 3, followEdits: true },
+  low: { maxIterations: 1, followEdits: false, autoApprovePlan: true },
+  medium: { maxIterations: 2, followEdits: false, autoApprovePlan: false },
+  high: { maxIterations: 3, followEdits: true, autoApprovePlan: false },
 };
 
 const DEFAULT_ORCHESTRATOR: OrchestratorConfig = {
@@ -159,16 +179,26 @@ const DEFAULT_GATES: Record<string, GateTransitionConfig> = {
     required: [
       { type: "script", name: "Lint" },
       { type: "script", name: "Type Check" },
+      { type: "script", name: "Build" },
+      { type: "script", name: "Test" },
+      { type: "review", skill: "code-review" },
     ],
     optional: [],
   },
   "review-to-ship": {
-    required: [{ type: "review", skill: "code-review" }],
-    optional: [
-      { type: "review", skill: "security-review", riskThreshold: "medium" },
-      { type: "review", skill: "architecture-review", riskThreshold: "high" },
+    required: [
+      { type: "review", skill: "review-report" },
+      { type: "artifact", artifact: "review" },
     ],
+    optional: [],
   },
+};
+
+const DEFAULT_SCRIPTS: Record<string, string> = {
+  Lint: "npm run lint",
+  "Type Check": "npm run typecheck",
+  Build: "npm run build",
+  Test: "npm test",
 };
 
 const DEFAULT_WIP_LIMITS: Record<string, number> = {
@@ -235,6 +265,7 @@ export function loadConfig(projectPath?: string): PlanwerkConfig {
 
   // Return defaults
   return {
+    scripts: DEFAULT_SCRIPTS,
     skills: DEFAULT_SKILLS,
     gates: DEFAULT_GATES,
     reviewPolicy: DEFAULT_REVIEW_POLICY,
@@ -245,6 +276,21 @@ export function loadConfig(projectPath?: string): PlanwerkConfig {
 }
 
 function mergeConfig(raw: Record<string, unknown>): PlanwerkConfig {
+  const scripts = { ...DEFAULT_SCRIPTS };
+  const rawScripts = raw.scripts as Array<Record<string, unknown>> | undefined;
+  if (Array.isArray(rawScripts)) {
+    for (const script of rawScripts) {
+      if (
+        typeof script.name === "string" &&
+        script.name.trim() !== "" &&
+        typeof script.command === "string" &&
+        script.command.trim() !== ""
+      ) {
+        scripts[script.name] = script.command;
+      }
+    }
+  }
+
   const skills = { ...DEFAULT_SKILLS };
   const rawSkills = raw.skills as Record<string, Record<string, unknown>> | undefined;
   if (rawSkills) {
@@ -287,6 +333,9 @@ function mergeConfig(raw: Record<string, unknown>): PlanwerkConfig {
         reviewPolicy[risk] = {
           maxIterations: clampPositive(def.max_iterations, DEFAULT_REVIEW_POLICY[risk].maxIterations),
           followEdits: typeof def.follow_edits === "boolean" ? def.follow_edits : DEFAULT_REVIEW_POLICY[risk].followEdits,
+          autoApprovePlan: typeof def.auto_approve_plan === "boolean"
+            ? def.auto_approve_plan
+            : DEFAULT_REVIEW_POLICY[risk].autoApprovePlan,
         };
       }
     }
@@ -328,7 +377,7 @@ function mergeConfig(raw: Record<string, unknown>): PlanwerkConfig {
         : DEFAULT_COHERENCE.blockHighRiskShip,
   };
 
-  return { skills, gates, reviewPolicy, orchestrator, wipLimits, coherence };
+  return { scripts, skills, gates, reviewPolicy, orchestrator, wipLimits, coherence };
 }
 
 function parseGateRefs(raw: unknown[] | undefined): GateRef[] {
@@ -336,7 +385,23 @@ function parseGateRefs(raw: unknown[] | undefined): GateRef[] {
   return raw.map((item) => {
     const obj = item as Record<string, unknown>;
     if (obj.type === "script") {
+      if (typeof obj.name !== "string" || obj.name.trim() === "") {
+        throw new Error("Script gate requires a non-empty name");
+      }
       return { type: "script", name: obj.name as string } satisfies GateScriptRef;
+    }
+    if (obj.type === "artifact") {
+      if (!isArtifactType(obj.artifact)) {
+        throw new Error(`Artifact gate has invalid artifact type: ${String(obj.artifact)}`);
+      }
+      return {
+        type: "artifact",
+        artifact: obj.artifact,
+        description: obj.description as string | undefined,
+      } satisfies GateArtifactRef;
+    }
+    if (obj.type !== "review" || typeof obj.skill !== "string" || obj.skill.trim() === "") {
+      throw new Error(`Unsupported gate reference: ${JSON.stringify(obj)}`);
     }
     const riskThreshold = obj.risk_threshold as string | undefined;
     return {
@@ -346,6 +411,18 @@ function parseGateRefs(raw: unknown[] | undefined): GateRef[] {
       description: obj.description as string | undefined,
     } satisfies GateSkillRef;
   });
+}
+
+function isArtifactType(value: unknown): value is ArtifactType {
+  return (
+    value === "plan" ||
+    value === "review" ||
+    value === "research" ||
+    value === "design" ||
+    value === "spec" ||
+    value === "test-plan" ||
+    value === "decision"
+  );
 }
 
 function isValidRisk(value: unknown): value is RiskLevel {

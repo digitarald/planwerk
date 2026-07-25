@@ -5,6 +5,7 @@ import {
   parseBoolean,
   buildAnswer,
   buildFreeformAnswer,
+  buildPlanFeedbackAnswer,
   canCarryFreeform,
   type AnswerQuestion,
 } from "./answer-value.ts";
@@ -120,4 +121,15 @@ test("canCarryFreeform mirrors buildFreeformAnswer", () => {
   assert.equal(canCarryFreeform(single([{ id: "a", label: "A" }], true)), true);
   assert.equal(canCarryFreeform(single([{ id: "a", label: "A" }], false)), false);
   assert.equal(canCarryFreeform({ kind: "boolean" }), false);
+});
+
+test("buildPlanFeedbackAnswer preserves the action and carries review feedback", () => {
+  assert.deepEqual(
+    buildPlanFeedbackAnswer("interactive", "Address the stale-request race."),
+    {
+      kind: "selected",
+      value: "interactive",
+      freeformValues: ["Address the stale-request race."],
+    },
+  );
 });

@@ -1,6 +1,7 @@
 export type SkillType =
   | "plan-review"
   | "code-review"
+  | "review-report"
   | "security-review"
   | "architecture-review";
 
@@ -28,6 +29,15 @@ export const SKILLS: Skill[] = [
     name: "Code Quality Review",
     description:
       "Reviews implementation for correctness, maintainability, and adherence to project conventions.",
+    triggerPhases: ["build->review"],
+    riskThreshold: "low",
+    estimatedDuration: "~45s",
+  },
+  {
+    id: "review-report",
+    name: "Review Handoff",
+    description:
+      "Compares final implementation and gate evidence with the original intent and writes the durable review artifact.",
     triggerPhases: ["review->ship"],
     riskThreshold: "low",
     estimatedDuration: "~45s",
@@ -37,7 +47,7 @@ export const SKILLS: Skill[] = [
     name: "Security Review",
     description:
       "Scans for vulnerabilities, injection risks, auth issues, and sensitive data exposure.",
-    triggerPhases: ["review->ship"],
+    triggerPhases: ["build->review"],
     riskThreshold: "medium",
     estimatedDuration: "~60s",
   },
@@ -46,7 +56,7 @@ export const SKILLS: Skill[] = [
     name: "Architecture Review",
     description:
       "Evaluates design decisions, coupling, scalability concerns, and alignment with system architecture.",
-    triggerPhases: ["plan->build", "review->ship"],
+    triggerPhases: ["plan->build", "build->review"],
     riskThreshold: "high",
     estimatedDuration: "~90s",
   },

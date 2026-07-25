@@ -123,3 +123,18 @@ export function buildFreeformAnswer(
 export function canCarryFreeform(question: AnswerQuestion): boolean {
   return buildFreeformAnswer(question, "probe") !== null;
 }
+
+/**
+ * Build the answer shape VS Code's AHP plan-review adapter maps to
+ * `{ approved: false, feedback, selectedAction }`.
+ */
+export function buildPlanFeedbackAnswer(
+  selectedAction: string,
+  feedback: string,
+): AnswerValue {
+  return {
+    kind: "selected",
+    value: selectedAction,
+    freeformValues: [feedback],
+  };
+}

@@ -61,6 +61,7 @@ import {
 
 const artifactIcons: Record<ArtifactType, typeof FileText> = {
   plan: FileText,
+  review: ClipboardCheck,
   research: FlaskConical,
   design: Lightbulb,
   spec: BookOpen,
@@ -598,6 +599,12 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   const planArtifact = artifacts.find(
     (a) => a.type === "plan" && a.contentRef
   );
+  const reviewArtifact = artifacts.find(
+    (a) => a.type === "review" && a.contentRef
+  );
+  const handoffArtifacts = [reviewArtifact, planArtifact].filter(
+    (artifact): artifact is NonNullable<typeof artifact> => Boolean(artifact)
+  );
   // Drop generic placeholders (e.g. stale "Thinking" rows) from the timeline.
   const visibleStatusHistory = statusHistory.filter(
     (entry) => !isGenericStatus(entry.message)
@@ -793,7 +800,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
         {/* Body: split pane */}
         <div className={cn(
           "grid min-h-0 grid-cols-1",
-          planArtifact && "md:grid-cols-[1.1fr_1px_0.9fr]"
+          handoffArtifacts.length > 0 && "md:grid-cols-[1.1fr_1px_0.9fr]"
         )}>
           {/* Left pane */}
           <ScrollArea className="min-h-0">
@@ -1132,15 +1139,15 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 </section>
               )}
 
-              {/* Artifacts (non-plan) */}
-              {artifacts.filter((a) => a.type !== "plan").length > 0 && (
+              {/* Supporting artifacts */}
+              {artifacts.filter((a) => a.type !== "plan" && a.type !== "review").length > 0 && (
                 <section>
                   <SectionLabel>
                     Artifacts
                   </SectionLabel>
                   <div className="space-y-1">
                     {artifacts
-                      .filter((a) => a.type !== "plan")
+                      .filter((a) => a.type !== "plan" && a.type !== "review")
                       .map((artifact) => {
                         const Icon = artifactIcons[artifact.type];
                         return (
@@ -1197,28 +1204,38 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
             </div>
           </ScrollArea>
 
-          {/* Divider + Right pane — only when plan exists */}
-          {planArtifact && (
+          {/* Divider + intent/review handoff pane */}
+          {handoffArtifacts.length > 0 && (
             <>
               <div className="hidden bg-border/60 md:block" />
               <ScrollArea className="hidden min-h-0 md:block">
                 <div className="p-6">
-                  <div className="mb-4 flex items-center gap-2">
-                    <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary/10">
-                      <FileText className="h-3.5 w-3.5 text-primary" />
-                    </div>
-                    <h3 className="text-sm font-semibold">
-                      {planArtifact.title}
-                    </h3>
+                  <div className="space-y-8">
+                    {handoffArtifacts.map((artifact) => {
+                      const Icon = artifactIcons[artifact.type];
+                      const isPlan = artifact.type === "plan";
+                      return (
+                        <section key={artifact.id}>
+                          <div className="mb-4 flex items-center gap-2">
+                            <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary/10">
+                              <Icon className="h-3.5 w-3.5 text-primary" />
+                            </div>
+                            <h3 className="text-sm font-semibold">
+                              {isPlan ? "Original intent" : artifact.title}
+                            </h3>
+                          </div>
+                          <article className="prose prose-sm dark:prose-invert max-w-none prose-headings:font-semibold prose-h1:text-base prose-h2:text-sm prose-h2:mt-5 prose-h2:mb-2 prose-h3:text-xs prose-p:text-[13px] prose-p:leading-relaxed prose-li:text-[13px] prose-table:text-xs prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-[12px] prose-strong:font-semibold">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={markdownComponents}
+                            >
+                              {artifact.contentRef!}
+                            </ReactMarkdown>
+                          </article>
+                        </section>
+                      );
+                    })}
                   </div>
-                  <article className="prose prose-sm dark:prose-invert max-w-none prose-headings:font-semibold prose-h1:text-base prose-h2:text-sm prose-h2:mt-5 prose-h2:mb-2 prose-h3:text-xs prose-p:text-[13px] prose-p:leading-relaxed prose-li:text-[13px] prose-table:text-xs prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-[12px] prose-strong:font-semibold">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      components={markdownComponents}
-                    >
-                      {planArtifact.contentRef!}
-                    </ReactMarkdown>
-                  </article>
                 </div>
               </ScrollArea>
             </>

@@ -11,15 +11,20 @@ import { AhpErrorCodes } from "@microsoft/agent-host-protocol";
 import type { Artifact } from "@/lib/types";
 import { readTextResource } from "./resource-read";
 
-const LOG_PREFIX = "[ahp:plan]";
+const LOG_PREFIX = "[ahp:artifact]";
 const debug = (...args: unknown[]) => {
   if (process.env.AHP_DEBUG) console.debug(LOG_PREFIX, ...args);
 };
 
 const UUID_RE = /^copilotcli:\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/i;
 
-// Negative cache: sessionUri → modifiedAt when plan.md was confirmed missing
-const missingPlanCache = new Map<string, string>();
+const SESSION_ARTIFACTS = [
+  { filename: "plan.md", type: "plan", title: "Plan" },
+  { filename: "review.md", type: "review", title: "Review" },
+] as const;
+
+// Negative cache: sessionUri + filename → modifiedAt when an artifact was missing.
+const missingArtifactCache = new Map<string, string>();
 
 
 /**
@@ -38,51 +43,84 @@ function extractSessionId(sessionUri: string): string | null {
  * ~/.copilot/session-state/{id}/ rather than in the git working tree.
  * Returns a plan Artifact with content, or null if no plan exists.
  */
-export async function fetchCopilotCliPlan(
+async function fetchCopilotCliArtifact(
   client: AhpClient,
   sessionUri: string,
   modifiedAt: string,
+  definition: (typeof SESSION_ARTIFACTS)[number],
 ): Promise<Artifact | null> {
   const sessionId = extractSessionId(sessionUri);
   if (!sessionId) return null;
 
-  // Skip if we already know this session has no plan at this modifiedAt
-  const cachedMissAt = missingPlanCache.get(sessionUri);
+  const cacheKey = `${sessionUri}:${definition.filename}`;
+  const cachedMissAt = missingArtifactCache.get(cacheKey);
   if (cachedMissAt === modifiedAt) return null;
 
-  const planPath = join(homedir(), ".copilot", "session-state", sessionId, "plan.md");
-  const planUri = pathToFileURL(planPath).toString();
+  const artifactPath = join(
+    homedir(),
+    ".copilot",
+    "session-state",
+    sessionId,
+    definition.filename
+  );
+  const artifactUri = pathToFileURL(artifactPath).toString();
 
   try {
-    const content = await readTextResource(client, planUri);
+    const content = await readTextResource(client, artifactUri);
 
-    debug("found plan.md for", sessionUri, `(${content.length} chars)`);
-    missingPlanCache.delete(sessionUri);
+    debug("found", definition.filename, "for", sessionUri, `(${content.length} chars)`);
+    missingArtifactCache.delete(cacheKey);
 
     return {
-      id: "session-state-plan",
-      type: "plan",
-      title: "Plan",
+      id: `session-state-${definition.type}`,
+      type: definition.type,
+      title: definition.title,
       contentRef: content,
       createdAt: Date.now(),
       createdBy: "agent",
       status: "draft",
     };
   } catch (err) {
-    // NotFound (-32008) is expected — most sessions don't have a plan.md.
+    // NotFound (-32008) is expected — artifacts appear as the session progresses.
     // Checked via the SDK's structured RpcError.code rather than sniffing
     // err.message for the numeric code as a substring.
     const isNotFound = err instanceof RpcError && err.code === AhpErrorCodes.NotFound;
     if (isNotFound) {
-      missingPlanCache.set(sessionUri, modifiedAt);
+      missingArtifactCache.set(cacheKey, modifiedAt);
     } else {
-      debug("resourceRead failed for plan.md:", err instanceof Error ? err.message : err);
+      debug(
+        `resourceRead failed for ${definition.filename}:`,
+        err instanceof Error ? err.message : err
+      );
     }
     return null;
   }
 }
 
+export async function fetchCopilotCliArtifacts(
+  client: AhpClient,
+  sessionUri: string,
+  modifiedAt: string,
+): Promise<Artifact[]> {
+  const artifacts = await Promise.all(
+    SESSION_ARTIFACTS.map((definition) =>
+      fetchCopilotCliArtifact(client, sessionUri, modifiedAt, definition)
+    )
+  );
+  return artifacts.filter((artifact): artifact is Artifact => artifact !== null);
+}
+
+/** Backward-compatible single-artifact helper for existing callers/tests. */
+export async function fetchCopilotCliPlan(
+  client: AhpClient,
+  sessionUri: string,
+  modifiedAt: string,
+): Promise<Artifact | null> {
+  const artifacts = await fetchCopilotCliArtifacts(client, sessionUri, modifiedAt);
+  return artifacts.find((artifact) => artifact.type === "plan") ?? null;
+}
+
 /** Clear the negative cache (e.g., on reconnect). */
 export function clearPlanCache(): void {
-  missingPlanCache.clear();
+  missingArtifactCache.clear();
 }

@@ -57,7 +57,9 @@ Define → Plan → Build → Review → Ship
 
 Each card is a live agent session. The orchestrator ("CTO agent") runs persistently — detecting stuck sessions, assigning risk levels, managing WIP, and escalating to humans only when judgment is needed.
 
-**Quality gates** block every phase transition. Deterministic checks (lint, test, typecheck) must pass before leaving Build. Indeterministic reviews (code review, security) run as sub-agents in the Review phase with maker-checker separation. Failed reviews feed back into Build — the agent fixes and re-attempts until pass or escalation.
+**Quality gates** block every phase transition. Before leaving Build, deterministic checks (lint, test, typecheck, build) and an independent implementation reviewer establish correctness and architectural soundness with maker-checker separation. Failed implementation reviews feed back into Build — the agent fixes and re-attempts until pass or escalation.
+
+The Review phase is the human handoff, not the first correctness check. It synthesizes the original intent in `plan.md`, the final implementation, and prior gate evidence into a durable sibling `review.md`. That artifact records what was implemented, how it was validated, where reality diverged from intent, what still needs human attention, and whether the change is ready to ship. Ship remains blocked until the review assessment passes and the artifact is readable.
 
 **The coherence gate** runs horizontally across the board: when two in-flight cards touch overlapping code, an external reviewer checks whether their changes still cohere before either ships. High-risk clashes block the Ship transition (pair-level, with a logged human override); lower-risk ones surface as an advisory. It's the one check that judges the ensemble, not the card.
 

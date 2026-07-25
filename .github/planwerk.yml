@@ -29,6 +29,11 @@ scripts:
     triggers: [gate.build-to-review]
     gate: true
 
+  - name: Test
+    command: npm test
+    triggers: [gate.build-to-review]
+    gate: true
+
   - name: Dev Server
     command: npm run dev
     triggers: [session.create]
@@ -46,9 +51,10 @@ skills:
 
   code-review:
     prompt: >-
-      /rubber-duck Review the implementation holistically for readiness to ship.
-      Fix issues whenever possible, then report only concrete, actionable
-      blockers that remain.
+      /rubber-duck Review the implementation for correctness and architectural
+      soundness before it enters Review. Verify that it satisfies the intent in
+      plan.md and follows repository invariants. Fix implementation issues when
+      possible, then report concrete blockers that remain.
     prompt_by_risk:
       medium: >-
         /review Review the implementation for correctness, regressions,
@@ -60,10 +66,42 @@ skills:
         security vulnerabilities, unsafe trust boundaries, architectural coupling,
         and scalability risks. Fix issues whenever possible, then report only
         concrete, actionable blockers that remain.
-    description: Risk-adaptive implementation review
+    description: Risk-adaptive implementation correctness and architecture review
     risk_threshold: low
     max_iterations: 3
     auto_fix: true
+
+  review-report:
+    prompt: >-
+      Independently assess the final implementation for human review and shipping.
+      Read the original plan.md, the final changes, and all available build and
+      review evidence. Verify that the change works as expected, gather any missing
+      review evidence, and create or update review.md beside plan.md. review.md must
+      summarize the intended outcome, implemented result, validation evidence and
+      prior gate signals, divergences or decision changes, unresolved risks and
+      human-attention items, and a ship recommendation. Keep plan.md as the original
+      high-level intent. Do not change implementation code; report blockers instead.
+    description: Final intent-to-implementation review and durable human handoff
+    risk_threshold: low
+    max_iterations: 2
+    auto_fix: true
+
+# Review iteration and post-review plan approval policy.
+# Medium/high plans receive an independent review but remain pending for a human
+# by default. Set auto_approve_plan to true to accept a passing reviewed plan.
+review_policy:
+  low:
+    max_iterations: 1
+    follow_edits: false
+    auto_approve_plan: true
+  medium:
+    max_iterations: 2
+    follow_edits: false
+    auto_approve_plan: false
+  high:
+    max_iterations: 3
+    follow_edits: true
+    auto_approve_plan: false
 
 # Gate definitions per phase transition.
 # Required gates MUST pass before the orchestrator advances a card.
@@ -87,13 +125,21 @@ gates:
         name: Type Check
       - type: script
         name: Build
+      - type: script
+        name: Test
+      - type: review
+        skill: code-review
+        description: Independent implementation correctness and architecture review
     optional: []
 
   review-to-ship:
     required:
       - type: review
-        skill: code-review
-        description: Risk-adaptive implementation review
+        skill: review-report
+        description: Final evidence synthesis and human-review handoff
+      - type: artifact
+        artifact: review
+        description: Readable review.md beside plan.md
     optional: []
 
 # WIP limits per phase (orchestrator enforces these)

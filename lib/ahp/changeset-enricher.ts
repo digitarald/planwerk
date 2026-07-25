@@ -5,46 +5,19 @@ import type {
 } from "@microsoft/agent-host-protocol";
 import { createHash } from "node:crypto";
 
-import type { Artifact, ArtifactType, ChangesetReview, FileChange } from "@/lib/types";
+import type { Artifact, ArtifactType, ChangesetReview, FileChange } from "../types";
 
 import { readChatState, readSessionState } from "./snapshot";
 import { readReadyChangesetState } from "./changeset-readiness";
 import { readTextResource } from "./resource-read";
 import { changesetReviewSummary, isChangesetFileReviewed } from "./changeset-review";
 import { extractLastAgentMessage } from "./response-parts";
+import { classifyArtifactFile, isNonCodeFile } from "./artifact-classification";
 
 const LOG_PREFIX = "[ahp:changeset]";
 const debug = (...args: unknown[]) => {
   if (process.env.AHP_DEBUG) console.debug(LOG_PREFIX, ...args);
 };
-
-/** Patterns that indicate non-code files (session artifacts, temp, etc.) */
-const NON_CODE_PATTERNS = [
-  /^\.copilot\//,
-  /\/\.copilot\//,
-  /\/session-state\//,
-  /\/plan\.md$/,
-  /\/research\.md$/,
-  /\/spec\.md$/,
-  /\/specification\.md$/,
-  /\/design\.md$/,
-  /\/decision\.md$/,
-  /\/test-plan\.md$/,
-  /\.tmp$/,
-  /^\/tmp\//,
-];
-
-/** File path patterns → artifact types */
-const ARTIFACT_FILE_PATTERNS: Array<{ pattern: RegExp; type: ArtifactType }> = [
-  { pattern: /\/plan\.md$/i, type: "plan" },
-  { pattern: /plan\.md$/i, type: "plan" },
-  { pattern: /\/research\.md$/i, type: "research" },
-  { pattern: /\/spec\.md$/i, type: "spec" },
-  { pattern: /\/specification\.md$/i, type: "spec" },
-  { pattern: /\/design\.md$/i, type: "design" },
-  { pattern: /\/decision\.md$/i, type: "decision" },
-  { pattern: /\/test-plan\.md$/i, type: "test-plan" },
-];
 
 export interface ChangesetEnrichment {
   artifacts: Artifact[];
@@ -77,17 +50,6 @@ export function hashPlanContent(content: string): string {
 }
 
 
-
-function isNonCodeFile(filePath: string): boolean {
-  return NON_CODE_PATTERNS.some((p) => p.test(filePath));
-}
-
-function classifyArtifactFile(filePath: string): ArtifactType | null {
-  for (const { pattern, type } of ARTIFACT_FILE_PATTERNS) {
-    if (pattern.test(filePath)) return type;
-  }
-  return null;
-}
 
 function extractFilePath(file: ChangesetFile): string {
   // Use after.uri for creates/edits, before.uri for deletions

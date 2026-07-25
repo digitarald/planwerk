@@ -107,6 +107,8 @@ Examples:
 Low-risk cards get a small panel and nearly invisible execution. High-risk cards get deeper, parallel, and adversarial passes. Use cheap constrained classification for routing and reserve expensive autonomous agent loops for selected dimensions. Persist the generated plan so humans can challenge not only a finding, but also what the system chose not to inspect.
 
 ### B3. Review Artifact and deliberation record
+**Status:** Minimal durable-artifact slice implemented — `review.md` is required beside `plan.md` before Ship and captures intent-versus-implementation evidence and divergences. Full provenance, structured findings, and deliberation remain backlog work.
+
 **Why:** Accountability requires more than the final decision. Humans need to know what was reviewed, against which code, by whom, using what evidence, and why a threshold or override applied.
 **Idea:** Persist every review as a durable artifact tied to an exact plan/diff/commit reference. Borrow the shape of a provenance attestation:
 

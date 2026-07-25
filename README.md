@@ -15,7 +15,7 @@ AI agents write 4x more code — but most of that speed gets eaten by the verifi
 
 ## How it works
 
-Cards are live agent sessions. A persistent orchestrator ("CTO agent") detects stuck sessions, assigns risk levels, manages WIP, and escalates to you only when judgment is needed. Automated checks must pass before a card leaves Build; independent reviews run in Review, and failed reviews loop back until they pass or escalate.
+Cards are live agent sessions. A persistent orchestrator ("CTO agent") detects stuck sessions, assigns risk levels, manages WIP, and escalates to you only when judgment is needed. Before leaving Build, deterministic checks and an independent implementation review establish that the code builds, is correct, and is architecturally sound. Review then compares the final implementation and gate evidence with the original intent in `plan.md`, producing a required sibling `review.md` that records validation, divergences, unresolved risks, and the ship recommendation.
 
 A conversational sidebar lets you command the orchestrator in plain language — *"start a task for rate limiting,"* *"why is auth stuck?"*, *"pause all sessions."*
 

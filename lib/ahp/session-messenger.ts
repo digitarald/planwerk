@@ -5,11 +5,9 @@ import type { SessionChatInputRequest, SessionLifecycle, SessionState, Turn } fr
 import { getAHPClient, releaseAHPClient } from "./client-manager";
 import { asSessionState, readChatState, readSessionState } from "./snapshot";
 import { AHPStatus, parseAHPStatus } from "./types";
-import { buildFreeformAnswer } from "./answer-value";
-import type { PlanChangeResult } from "./plan-change-result";
+import { buildPlanFeedbackAnswer } from "./answer-value";
 import {
   findChatInputEntry,
-  findUniqueNewChatInputEntry,
   hasObservedInputNeeded,
   isInputObservedRemoved,
 } from "./input-presence";
@@ -200,133 +198,25 @@ export async function answerInput(
 }
 
 /**
- * Force a plan revision ("rubber duck") on a session that is blocked on a
- * copilotcli plan-approval input.
- *
- * The plan-approval input offers approve/execute options. Declining it makes
- * the agent surface a follow-up asking what to change — historically a plain
- * text input, but the Copilot CLI agent now commonly asks via its `ask_user`
- * tool, which the host renders as a single/multi-select that permits free text.
- * We answer whichever shape appears with the rubber-duck critique (carried as
- * free text). The agent then revises its plan and presents a new plan-approval.
- *
- * Both steps run on one connection so the dispatches are flushed in order.
- *
- * `confirmed` means a later snapshot observed the feedback input disappear.
- * `delivered-unconfirmed` means the feedback was dispatched and pinged but the
- * shared deadline left no time to observe removal; callers must record it to
- * avoid sending a second rubber-duck to the revised plan.
+ * Return review findings on the original plan-review input. VS Code's AHP
+ * adapter interprets an accepted select answer with `freeformValues` as an
+ * exit-plan-mode revision request.
  */
-export async function requestPlanChanges(
+export function submitPlanFeedback(
   hostUrl: string,
   sessionUri: string,
-  planRequestId: string,
+  requestId: string,
+  questionId: string,
+  selectedAction: string,
   feedback: string,
-  options?: { timeoutMs?: number; pollIntervalMs?: number },
-): Promise<PlanChangeResult> {
-  // Allow generous time for the agent to surface the follow-up text input —
-  // declining the plan is irreversible, so we must answer the "what changes?"
-  // input that follows. If it never appears in time the heartbeat's stuck-card
-  // nudging is the backstop.
-  const timeoutMs = options?.timeoutMs ?? 60_000;
-  const pollMs = options?.pollIntervalMs ?? 500;
-  const client = await getAHPClient(hostUrl);
-
-  try {
-    const sessionState = await readSessionState(client, sessionUri);
-    const initialInputs = sessionState?.inputNeeded;
-    if (!hasObservedInputNeeded(initialInputs)) {
-      debug("Input aggregate unavailable; not declining plan:", planRequestId);
-      return { outcome: "undelivered" };
-    }
-
-    // The plan-approval input and its owning chat must still be present in the
-    // server-derived aggregate. Never use defaultChat as a routing fallback.
-    const planEntry = findChatInput(initialInputs, planRequestId);
-    if (!planEntry) {
-      debug("Plan-approval request not found (stale):", planRequestId);
-      return { outcome: "stale" };
-    }
-    const chatUri = planEntry.chat;
-    const knownRequestIds = new Set(
-      initialInputs.flatMap((entry) =>
-        entry.kind === "chatInput" && typeof entry.request.id === "string"
-          ? [entry.request.id]
-          : [],
-      ),
-    );
-
-    // Step 1 — decline the plan-approval; the agent will ask what to change.
-    client.dispatch(chatUri, chatInputCompleted(planRequestId, "decline"));
-    await client.ping();
-
-    // Step 2 — wait for the follow-up input and answer it with the critique.
-    // The agent may surface a plain text input *or* (via its `ask_user` tool) a
-    // single/multi-select that allows free text — both can carry the feedback.
-    // `buildFreeformAnswer` returns the right typed value per question shape, or
-    // null for shapes that can't carry prose (which we skip and keep polling).
-    const deadline = Date.now() + timeoutMs;
-    let sawPlanRemoval = false;
-    let dispatchedFollowUpId: string | undefined;
-    while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
-      const after = await readSessionState(client, sessionUri);
-      const inputs = after?.inputNeeded;
-      if (!hasObservedInputNeeded(inputs)) continue;
-
-      if (dispatchedFollowUpId) {
-        if (isInputObservedRemoved(inputs, dispatchedFollowUpId)) {
-          debug("Requested plan changes on", sessionUri, "follow-up:", dispatchedFollowUpId);
-          return { outcome: "confirmed", followUpRequestId: dispatchedFollowUpId };
-        }
-        continue;
-      }
-
-      if (!sawPlanRemoval) {
-        if (!isInputObservedRemoved(inputs, planRequestId)) continue;
-        sawPlanRemoval = true;
-      }
-
-      // Only accept a single new request on the original owning chat. If other
-      // inputs arrive concurrently, their identity is ambiguous; leave all of
-      // them for a later snapshot or a human rather than consuming one blindly.
-      const followUp = findUniqueNewChatInputEntry(
-        inputs,
-        chatUri,
-        knownRequestIds,
-      ) as SessionChatInputRequest | undefined;
-      const request = followUp?.request;
-      const question = request?.questions?.[0];
-      if (!followUp || !request || !question) continue;
-
-      const value = buildFreeformAnswer(
-        { kind: question.kind, allowFreeform: (question as { allowFreeformInput?: boolean }).allowFreeformInput },
-        feedback,
-      );
-      if (!value) continue;
-
-      const answer = { state: "submitted", value };
-      client.dispatch(followUp.chat, chatInputAnswerChanged(request.id, question.id, answer));
-      client.dispatch(followUp.chat, chatInputCompleted(request.id, "accept", { [question.id]: answer }));
-      await client.ping();
-      dispatchedFollowUpId = request.id;
-    }
-
-    if (dispatchedFollowUpId) {
-      debug(
-        "Plan-change feedback delivered but host consumption was not observed before the deadline:",
-        dispatchedFollowUpId,
-        "on",
-        sessionUri,
-      );
-      return { outcome: "delivered-unconfirmed", followUpRequestId: dispatchedFollowUpId };
-    }
-
-    debug("Plan-change follow-up input never appeared for", sessionUri);
-    return { outcome: "undelivered" };
-  } finally {
-    releaseAHPClient(hostUrl);
-  }
+): Promise<{ success: boolean; stale?: boolean }> {
+  const answer = {
+    state: "submitted",
+    value: buildPlanFeedbackAnswer(selectedAction, feedback),
+  };
+  return answerInput(hostUrl, sessionUri, requestId, "accept", {
+    [questionId]: answer,
+  });
 }
 
 /**

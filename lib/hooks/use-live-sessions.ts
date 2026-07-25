@@ -269,17 +269,20 @@ function formatHeartbeatAction(action: HeartbeatActionData): { type: "interventi
         type: "alert",
         message: `Plan approval not confirmed: ${action.reason ?? "the agent may still be stuck awaiting input."}`,
       };
-    case "plan-rubber-ducked":
+    case "plan-review-passed":
       return {
         type: "intervention",
-        message: action.confirmed
-          ? "Sent plan back for a rubber-duck review before approval."
-          : "Sent plan back for a rubber-duck review; host consumption was not confirmed before the deadline.",
+        message: "Independent rubber-duck review passed; plan remains ready for approval.",
       };
-    case "plan-rubber-duck-failed":
+    case "plan-feedback-delivered":
+      return {
+        type: "intervention",
+        message: "Returned independent rubber-duck findings on the original plan request.",
+      };
+    case "plan-review-failed":
       return {
         type: "alert",
-        message: `Plan feedback not delivered: ${action.reason ?? "the agent may be stuck awaiting input."}`,
+        message: `Plan review needs attention: ${action.reason ?? "independent review or feedback delivery failed."}`,
       };
     case "stale-gate-invalidated":
       return {

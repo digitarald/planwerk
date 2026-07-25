@@ -228,11 +228,20 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
   commands emit `gate-completed` after their `gate_runs` row is finalized, which is the
   refresh signal that clears the evaluating state.
 - `lib/orchestrator/{heartbeat,gate-engine,triage,risk-*}.ts` — the autonomous loop.
-  Note: a plain plan-phase card only gets its `plan-review` gate injected when
-  **idle**. A card that stays `running` (heads-down coding) won't advance until it
-  idles — unless the opt-in `orchestrator.inject_reviews_while_busy` config is on
-  (default off), which lets the heartbeat queue the review after
-  `plan_busy_threshold` of continuous running. The gate still grades before advance.
+  A card blocked on Copilot's plan-review input is reviewed out-of-band by
+  `plan-reviewer.ts`; the verdict is stored in `review_runs` against the current
+  `plan:<hash>`. Blocking findings are returned on the **original** AHP input as
+  `chat/inputCompleted(response:"accept")` with a selected answer carrying
+  `freeformValues`. VS Code maps that to Copilot's
+  `{ approved:false, feedback, selectedAction }`, which revises the plan without
+  Planwerk declining first or waiting for a second elicitation. A passing medium/
+  high-risk plan remains pending for human approval by default; inspect
+  `review_policy.<risk>.auto_approve_plan` for overrides.
+  A plain idle plan-phase card can still use the normal injected `plan-review` gate.
+  A card that stays `running` (heads-down coding) won't advance until it idles —
+  unless the opt-in `orchestrator.inject_reviews_while_busy` config is on (default
+  off), which lets the heartbeat queue the review after `plan_busy_threshold` of
+  continuous running. The gate still grades before advance.
   Review skills may define `prompt_by_risk` in `.github/planwerk.yml`; `skill-config.ts`
   resolves the current card risk to one prompt before the heartbeat injects the
   single configured gate.
@@ -251,6 +260,15 @@ dispatches but never gets consumed, `runPlanApprovalPipeline` retries once then
 emits a **`plan-approve-failed`** heartbeat action (mirror of
 `plan-rubber-duck-failed`) instead of a phantom `plan-approved` — so look for
 that action in `heartbeat_log`/the orchestrator feed.
+
+**Plan-review feedback not applied** — look for `plan-feedback-delivered` versus
+`plan-review-failed` in `heartbeat_log`. The former is emitted only after the
+original request disappears from `SessionState.inputNeeded`. For the latter, inspect
+the latest `review_runs` row: `changeset_ref` must match the card's current
+`planContentHash`, `verdict_summary`/`findings_json` contain the independent review,
+and `status` distinguishes a passing review, blocking findings, and escalation.
+Do not look for a follow-up ask-user request: the old decline-then-follow-up flow was
+removed because AHP decline intentionally carries no plan feedback.
 
 **AHP status bits** (`lib/ahp/types.ts`) — decode a raw `status` number:
 `Idle=1`, `Error=2`, `InProgress=8`, `InputNeeded=24` (**composite** `8|16`),

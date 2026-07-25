@@ -12,6 +12,7 @@ import {
 import {
   startGateRun,
   completeGateRun,
+  getGateRunsForCard,
 } from "./gate-engine";
 import type { Phase, RiskLevel } from "@/lib/types";
 import { normalizeChangesetRef } from "@/lib/types";
@@ -19,6 +20,7 @@ import { extractReviewEvidence } from "./review-evidence";
 import { decideReviewAction, type ReviewAction } from "./review-decision";
 import { judgeReviewResponse } from "./verdict-judge";
 import type { ReviewVerdict } from "./verdict-judge-core";
+import type { PlanReviewVerdict } from "./plan-review-core";
 
 const reviewJudgmentsInFlight = new Set<number>();
 
@@ -154,33 +156,42 @@ export function shouldStartReview(
   return !fresh;
 }
 
-/** Skill ID used to record a forced plan rubber-duck pass. */
-const PLAN_REVIEW_SKILL = "plan-review";
-
 /**
- * Whether this card's plan has already been rubber-ducked once. Used to force
- * a single plan revision on un-reviewed plans without looping.
+ * Persist an independent review of the plan artifact. Unlike injected reviews,
+ * this run has no gate-run or turn ID: the reviewer executes in a separate,
+ * read-only SDK session and the structured verdict is the evidence.
  */
-export function hasPlanRubberDuck(cardId: string): boolean {
+export function recordIndependentPlanReview(
+  cardId: string,
+  changesetRef: string,
+  verdict: PlanReviewVerdict,
+  maxIterations: number,
+): number {
   const db = getDb();
-  const row = db
-    .prepare(
-      "SELECT 1 FROM review_runs WHERE card_id = ? AND skill_id = ? LIMIT 1"
-    )
-    .get(cardId, PLAN_REVIEW_SKILL) as { 1: number } | undefined;
-  return row !== undefined;
-}
-
-/**
- * Record that a forced plan rubber-duck was injected for a card. Stored as a
- * terminal `passed` review run so it is not re-processed by the review machinery.
- */
-export function recordPlanRubberDuck(cardId: string): void {
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO review_runs (card_id, skill_id, phase_transition, status, iteration, max_iterations, verdict_summary, prompt_injected_at, verdict_extracted_at)
-     VALUES (?, ?, 'plan->build', 'passed', 1, 1, 'Forced rubber-duck of un-reviewed plan', datetime('now'), datetime('now'))`
-  ).run(cardId, PLAN_REVIEW_SKILL);
+  const prior = getLatestReviewRun(cardId, "plan-review", "plan->build");
+  const iteration = prior && normalizeChangesetRef(prior.changesetRef ?? undefined) !== normalizeChangesetRef(changesetRef)
+    ? Math.min(prior.iteration + 1, maxIterations)
+    : 1;
+  const status = verdict.status === "passed"
+    ? "passed"
+    : verdict.status === "failed"
+      ? "failed"
+      : "escalated";
+  const result = db.prepare(
+    `INSERT INTO review_runs (
+       card_id, skill_id, phase_transition, status, iteration, max_iterations,
+       prompt_injected_at, verdict_extracted_at, verdict_summary, findings_json, changeset_ref
+     ) VALUES (?, 'plan-review', 'plan->build', ?, ?, ?, datetime('now'), datetime('now'), ?, ?, ?)`
+  ).run(
+    cardId,
+    status,
+    iteration,
+    maxIterations,
+    verdict.summary,
+    JSON.stringify(verdict.findings),
+    changesetRef,
+  );
+  return Number(result.lastInsertRowid);
 }
 
 /**
@@ -283,7 +294,7 @@ export async function startReview(
   db.prepare("UPDATE review_runs SET gate_run_id = ? WHERE id = ?").run(gateRunId, reviewRunId);
 
   // Inject the review prompt into the session (failure-safe: always terminalize on error)
-  const prompt = buildReviewPrompt(skill, iteration, maxIterations);
+  const prompt = buildReviewPrompt(skill, iteration, maxIterations, cardId);
   try {
     const { success, turnId, queued } = await injectMessage(hostUrl, sessionUri, prompt);
 
@@ -482,13 +493,41 @@ export async function processReviewResult(
  */
 export function getRequiredReviewSkills(
   phaseTransition: string,
-  riskLevel: RiskLevel
+  riskLevel: RiskLevel,
+  projectPath?: string
 ): SkillConfig[] {
-  return getApplicableSkills(phaseTransition, riskLevel);
+  return getApplicableSkills(phaseTransition, riskLevel, loadConfig(projectPath));
 }
 
-function buildReviewPrompt(skill: SkillConfig, iteration: number, maxIterations: number): string {
+function buildReviewPrompt(
+  skill: SkillConfig,
+  iteration: number,
+  maxIterations: number,
+  cardId: string
+): string {
   let prompt = skill.prompt;
+
+  if (skill.id === "review-report") {
+    const latestByGate = new Map<string, ReturnType<typeof getGateRunsForCard>[number]>();
+    for (const run of getGateRunsForCard(cardId)) {
+      if (run.fromPhase !== "build" || run.toPhase !== "review") continue;
+      const key = `${run.gateType}:${run.gateName ?? ""}`;
+      if (!latestByGate.has(key)) latestByGate.set(key, run);
+    }
+    const evidence = [...latestByGate.values()]
+      .map((run) => {
+        const output = run.output?.trim();
+        return [
+          `- ${run.gateName ?? run.gateType}: ${run.status}`,
+          run.completedAt ? `completed ${run.completedAt}` : undefined,
+          output ? `evidence: ${output.slice(0, 1_000)}` : undefined,
+        ].filter(Boolean).join("; ");
+      })
+      .join("\n");
+    prompt +=
+      "\n\nPlanwerk build-to-review gate evidence:\n" +
+      (evidence || "- No completed build gate evidence was available; call this out in review.md.");
+  }
 
   if (iteration > 1) {
     prompt += `\n\nThis is iteration ${iteration}/${maxIterations} of the review. Previous review found issues. Please re-review the changes and verify the fixes are adequate. Focus on whether previously identified issues were resolved and whether new issues were introduced.`;

@@ -3,16 +3,18 @@ import "server-only";
 import { getDb } from "@/lib/db/schema";
 import { KanbanCard, Phase, RiskLevel, PendingInput, normalizeChangesetRef } from "@/lib/types";
 import { loadConfig } from "./skill-config";
-import { getActiveReviewRuns, startReview, processReviewResult, getRequiredReviewSkills, hasPlanRubberDuck, recordPlanRubberDuck, shouldStartReview } from "./review-executor";
+import { getActiveReviewRuns, getLatestReviewRun, startReview, processReviewResult, getRequiredReviewSkills, recordIndependentPlanReview, shouldStartReview } from "./review-executor";
 import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard, completeGateRun, executeGateCommand } from "./gate-engine";
 import { isRetryableGateFailure } from "./gate-command";
 import { getCardRisk } from "./risk-store";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
-import { injectMessage, answerInput, requestPlanChanges } from "@/lib/ahp/session-messenger";
-import { isPlanChangeConfirmed, isPlanChangeDelivered } from "@/lib/ahp/plan-change-result";
+import { injectMessage, answerInput, submitPlanFeedback } from "@/lib/ahp/session-messenger";
 import { syncCoherence } from "./coherence-engine";
 import { runCoherenceExecutor, type ReviewCardCtx } from "./coherence-reviewer";
 import { advanceReviewToShip } from "./phase-advance";
+import { hasReadableArtifact } from "./artifact-gate";
+import { formatPlanReviewFeedback, type PlanReviewVerdict } from "./plan-review-core";
+import { reviewPlan } from "./plan-reviewer";
 
 /**
  * Heartbeat action types emitted to the orchestrator feed.
@@ -30,8 +32,9 @@ export type HeartbeatAction =
   | { type: "auto-answered"; cardId: string; answer: string }
   | { type: "plan-approved"; cardId: string }
   | { type: "plan-approve-failed"; cardId: string; reason: string }
-  | { type: "plan-rubber-ducked"; cardId: string; confirmed: boolean }
-  | { type: "plan-rubber-duck-failed"; cardId: string; reason: string }
+  | { type: "plan-review-passed"; cardId: string }
+  | { type: "plan-feedback-delivered"; cardId: string }
+  | { type: "plan-review-failed"; cardId: string; reason: string }
   | { type: "coherence-conflict"; cardId: string; otherCardId: string; summary: string }
   | { type: "coherence-cleared"; cardId: string; otherCardId: string }
   | { type: "coherence-blocked"; cardId: string; reason: string };
@@ -325,7 +328,8 @@ async function processCard(
           hostUrl,
           card,
           card.pendingInput!,
-          planApproval
+          planApproval,
+          config,
         );
         actions.push(...planActions);
       } else if (shouldAutoAnswer(card)) {
@@ -413,7 +417,11 @@ async function startPendingReviews(
   changesetRef?: string
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
-  const skills = getRequiredReviewSkills(transition, riskLevel).filter(
+  const skills = getRequiredReviewSkills(
+    transition,
+    riskLevel,
+    card.workingDirectory
+  ).filter(
     (skill) => shouldStartReview(card.id, skill.id, transition, changesetRef)
   );
   for (const skill of skills) {
@@ -463,7 +471,10 @@ async function runBuildPipeline(
 
   // Deterministic gates that haven't been triggered yet
   const deterministicPending = pendingGates.filter(
-    (g) => g.gateType !== "review" && g.gateType !== "human-approval"
+    (g) =>
+      g.gateType !== "review" &&
+      g.gateType !== "artifact" &&
+      g.gateType !== "human-approval"
   );
 
   if (deterministicPending.length > 0) {
@@ -478,7 +489,9 @@ async function runBuildPipeline(
 
       // Skip if a run is already in flight for this code changeset.
       const alreadyRunning = existingRuns.find(
-        (r) => r.gateType === gate.gateType && r.status === "running" &&
+        (r) => r.gateType === gate.gateType &&
+          (!gate.gateName || r.gateName === gate.gateName) &&
+          r.status === "running" &&
           normalizeChangesetRef(r.changesetRef) === currentCodeRef
       );
       if (alreadyRunning) continue;
@@ -486,7 +499,9 @@ async function runBuildPipeline(
       // Skip unchanged command failures, but retry infrastructure failures that
       // can recover without a code change (for example after a server restart).
       const alreadyFailed = existingRuns.find(
-        (r) => r.gateType === gate.gateType && r.status === "failed" &&
+        (r) => r.gateType === gate.gateType &&
+          (!gate.gateName || r.gateName === gate.gateName) &&
+          r.status === "failed" &&
           normalizeChangesetRef(r.changesetRef) === currentCodeRef &&
           !isRetryableGateFailure(r.output)
       );
@@ -494,7 +509,9 @@ async function runBuildPipeline(
 
       // Detect stale passed gates that need re-triggering
       const staleRun = existingRuns.find(
-        (r) => r.gateType === gate.gateType && r.status === "passed" &&
+        (r) => r.gateType === gate.gateType &&
+          (!gate.gateName || r.gateName === gate.gateName) &&
+          r.status === "passed" &&
           changesetRef && normalizeChangesetRef(r.changesetRef) !== currentCodeRef
       );
 
@@ -521,9 +538,8 @@ async function runBuildPipeline(
         const nudge = `Please run: ${gate.command}`;
         injectMessage(hostUrl, card.id, nudge).catch(() => {});
       } else {
-        // No command (manual gate) — pass immediately
-        completeGateRun(runId, "passed", "No command configured");
-        emit({ type: "gate-completed", cardId: card.id, gateType: gate.gateType, status: "passed" });
+        completeGateRun(runId, "failed", `No command configured for ${gate.gateName ?? gate.gateType}`);
+        emit({ type: "gate-completed", cardId: card.id, gateType: gate.gateType, status: "failed" });
       }
     }
     return actions;
@@ -552,7 +568,11 @@ async function runBuildPipeline(
           );
         } else if (review.status === "failed") {
           // Failed review needs re-injection (re-iteration)
-          const skills = getRequiredReviewSkills(transition, riskLevel);
+          const skills = getRequiredReviewSkills(
+            transition,
+            riskLevel,
+            card.workingDirectory
+          );
           const skill = skills.find((s) => s.id === review.skillId);
           if (skill) {
             const sessionUri = card.id;
@@ -646,37 +666,41 @@ function detectPlanApproval(
   return { questionId: q.id, approveOptionId: approve.id };
 }
 
-/** Rubber-duck critique injected to force a plan revision on medium+ plans. */
-const PLAN_RUBBER_DUCK_FEEDBACK =
-  "Before approval, rubber-duck this plan: challenge each assumption, enumerate " +
-  "the edge cases, failure modes, and gaps you have not addressed, verify the " +
-  "files/imports/types you intend to touch actually exist and fit, and tighten " +
-  "the scope. Then produce a revised plan and present it for approval.";
+function readStoredReviewFindings(json: string | null): string[] | null {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return Array.isArray(parsed) && parsed.every((finding) => typeof finding === "string")
+      ? parsed
+      : null;
+  } catch (error) {
+    console.warn(
+      "[heartbeat:plan-review] Invalid stored findings:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
 
 /**
  * Plan-approval pipeline for input-needed cards sitting on a copilotcli
  * plan-approval:
- * - Low risk → auto-approve (accept the recommended execute action).
- * - Medium+ risk that has not been rubber-ducked → force one plan revision,
- *   then leave the revised plan for a human to approve.
- * - Medium+ risk already rubber-ducked → leave for human (no-op).
+ * - Auto-approve when the risk policy permits it.
+ * - Otherwise independently review the current plan artifact.
+ * - Return blocking findings as feedback on the original plan request.
+ * - Leave a passing reviewed plan pending when policy requires human approval.
  */
 async function runPlanApprovalPipeline(
   hostUrl: string,
   card: KanbanCard,
   input: PendingInput,
-  approval: { questionId: string; approveOptionId: string }
+  approval: { questionId: string; approveOptionId: string },
+  config: ReturnType<typeof loadConfig>,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
+  const assessedRisk = getCardRisk(card.id)?.level;
 
-  // Only auto-approve when the card was *explicitly* assessed as low risk.
-  // Un-triaged plans (no stored risk) are treated as medium+ and rubber-ducked,
-  // so a plan never advances to build without either an explicit low verdict or
-  // a review pass. The card's own `risk` field defaults to "low" before triage,
-  // so it is not trusted here — only the persisted assessment is.
-  const assessedLow = getCardRisk(card.id)?.level === "low";
-
-  if (assessedLow) {
+  const approvePlan = async (): Promise<void> => {
     const answers = {
       [approval.questionId]: {
         state: "submitted",
@@ -710,38 +734,124 @@ async function runPlanApprovalPipeline(
       emit(action);
       actions.push(action);
     }
+  };
+
+  // Never trust the card's display default for automatic approval. An
+  // un-triaged plan must first receive a persisted risk assessment.
+  if (assessedRisk === "low" && config.reviewPolicy.low.autoApprovePlan) {
+    await approvePlan();
     return actions;
   }
 
-  // Medium+ risk: force a single rubber-duck pass on plans not yet reviewed.
-  if (hasPlanRubberDuck(card.id)) {
-    // Already rubber-ducked — leave the revised plan for a human to approve.
-    return actions;
-  }
-
-  const result = await requestPlanChanges(
-    hostUrl,
-    card.id,
-    input.requestId,
-    PLAN_RUBBER_DUCK_FEEDBACK
-  );
-  if (isPlanChangeDelivered(result)) {
-    recordPlanRubberDuck(card.id);
+  const riskLevel = assessedRisk ?? "medium";
+  const policy = config.reviewPolicy[riskLevel];
+  const planRef = normalizeChangesetRef(card.planContentHash);
+  const planContent = card.artifacts?.find(
+    (artifact) => artifact.type === "plan" && artifact.contentRef,
+  )?.contentRef;
+  if (!planRef || !planContent) {
     const action: HeartbeatAction = {
-      type: "plan-rubber-ducked",
+      type: "plan-review-failed",
       cardId: card.id,
-      confirmed: isPlanChangeConfirmed(result),
+      reason: "The current plan artifact is unavailable; human review is required.",
     };
     emit(action);
     actions.push(action);
+    return actions;
+  }
+
+  let latest = getLatestReviewRun(card.id, "plan-review", "plan->build");
+  const fresh = latest
+    && normalizeChangesetRef(latest.changesetRef ?? undefined) === planRef;
+  let verdict: PlanReviewVerdict | undefined;
+  let justReviewed = false;
+
+  if (latest && fresh) {
+    const findings = readStoredReviewFindings(latest.findingsJson);
+    verdict = {
+      status: findings === null
+        ? "needs-human"
+        : latest.status === "passed"
+          ? "passed"
+          : latest.status === "failed"
+            ? "failed"
+            : "needs-human",
+      summary: findings === null
+        ? "Stored plan-review findings are invalid; human review is required."
+        : latest.verdictSummary ?? "Independent plan review completed.",
+      findings: findings ?? [],
+    };
   } else {
-    // A stale request or an undispatched critique remains a failure. A critique
-    // dispatched at the end of the shared deadline is handled above as
-    // delivered-unconfirmed so we do not rubber-duck the revised plan again.
-    const reason = result.outcome === "stale"
-      ? "Plan-approval input went stale before feedback could be delivered."
-      : "Declined the plan but could not deliver the review feedback to the agent.";
-    const action: HeartbeatAction = { type: "plan-rubber-duck-failed", cardId: card.id, reason };
+    if (latest && latest.iteration >= policy.maxIterations) {
+      verdict = {
+        status: "needs-human",
+        summary: `Plan review reached the ${policy.maxIterations}-iteration limit.`,
+        findings: [],
+      };
+    } else {
+      verdict = await reviewPlan(planContent);
+    }
+    recordIndependentPlanReview(card.id, planRef, verdict, policy.maxIterations);
+    latest = getLatestReviewRun(card.id, "plan-review", "plan->build");
+    justReviewed = true;
+  }
+
+  if (verdict.status === "passed") {
+    const action: HeartbeatAction = {
+      type: "plan-review-passed",
+      cardId: card.id,
+    };
+    if (justReviewed) {
+      emit(action);
+      actions.push(action);
+    }
+    if (policy.autoApprovePlan) await approvePlan();
+    return actions;
+  }
+
+  if (verdict.status === "needs-human") {
+    if (justReviewed) {
+      const action: HeartbeatAction = {
+        type: "plan-review-failed",
+        cardId: card.id,
+        reason: verdict.summary,
+      };
+      emit(action);
+      actions.push(action);
+    }
+    return actions;
+  }
+
+  const feedback = formatPlanReviewFeedback(verdict);
+  let result = await submitPlanFeedback(
+    hostUrl,
+    card.id,
+    input.requestId,
+    approval.questionId,
+    approval.approveOptionId,
+    feedback,
+  );
+  if (!result.success && !result.stale) {
+    result = await submitPlanFeedback(
+      hostUrl,
+      card.id,
+      input.requestId,
+      approval.questionId,
+      approval.approveOptionId,
+      feedback,
+    );
+  }
+
+  if (result.success) {
+    const action: HeartbeatAction = { type: "plan-feedback-delivered", cardId: card.id };
+    emit(action);
+    actions.push(action);
+  } else if (!result.stale) {
+    const action: HeartbeatAction = {
+      type: "plan-review-failed",
+      cardId: card.id,
+      reason: "Review findings were generated but the host did not consume the plan feedback.",
+    };
     emit(action);
     actions.push(action);
   }
@@ -808,10 +918,8 @@ async function runPlanPipeline(
   allCards: KanbanCard[]
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
-  const config = loadConfig();
+  const config = loadConfig(card.workingDirectory);
   const transition = "plan->build";
-
-  if (!config.orchestrator.autoInjectReviews) return actions;
 
   const { allowed, pendingGates } = canAdvancePhase(
     card.id,
@@ -834,7 +942,7 @@ async function runPlanPipeline(
 
   // Check for review gates
   const reviewPending = pendingGates.filter((g) => g.gateType === "review");
-  if (reviewPending.length > 0) {
+  if (reviewPending.length > 0 && config.orchestrator.autoInjectReviews) {
     const activeReviews = getActiveReviewRuns(card.id);
     if (activeReviews.length === 0) {
       // No active reviews — start any that aren't parked on a human escalation.
@@ -851,7 +959,11 @@ async function runPlanPipeline(
             changesetRef
           );
         } else if (review.status === "failed") {
-          const skills = getRequiredReviewSkills(transition, riskLevel);
+          const skills = getRequiredReviewSkills(
+            transition,
+            riskLevel,
+            card.workingDirectory
+          );
           const skill = skills.find((s) => s.id === review.skillId);
           if (skill) {
             const sessionUri = card.id;
@@ -877,10 +989,8 @@ async function runReviewPipeline(
   allCards: KanbanCard[]
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
-  const config = loadConfig();
+  const config = loadConfig(card.workingDirectory);
   const transition = "review->ship";
-
-  if (!config.orchestrator.autoInjectReviews) return actions;
 
   const { allowed, pendingGates } = canAdvancePhase(
     card.id,
@@ -891,6 +1001,33 @@ async function runReviewPipeline(
     changesetRef
   );
 
+  const artifactPending = pendingGates.filter(
+    (gate) => gate.gateType === "artifact" && gate.artifactType
+  );
+  for (const gate of artifactPending) {
+    if (!hasReadableArtifact(card.artifacts, gate.artifactType!)) continue;
+    const runId = startGateRun(
+      card.id,
+      "review",
+      "ship",
+      "artifact",
+      gate.gateName,
+      changesetRef
+    );
+    completeGateRun(
+      runId,
+      "passed",
+      `Readable ${gate.artifactType}.md artifact found`
+    );
+    const action: HeartbeatAction = {
+      type: "gate-completed",
+      cardId: card.id,
+      gateType: "artifact",
+      status: "passed",
+    };
+    emit(action);
+    actions.push(action);
+  }
   if (allowed) {
     if (config.orchestrator.autoAdvancePhases && canEnterPhase("ship", allCards, config)) {
       const { advanced, blockedBy } = advanceReviewToShip(card.id, config.coherence);
@@ -917,7 +1054,7 @@ async function runReviewPipeline(
   }
 
   const reviewPending = pendingGates.filter((g) => g.gateType === "review");
-  if (reviewPending.length > 0) {
+  if (reviewPending.length > 0 && config.orchestrator.autoInjectReviews) {
     const activeReviews = getActiveReviewRuns(card.id);
     if (activeReviews.length === 0) {
       // No active reviews — start any that aren't parked on a human escalation.
@@ -934,7 +1071,11 @@ async function runReviewPipeline(
             changesetRef
           );
         } else if (review.status === "failed") {
-          const skills = getRequiredReviewSkills(transition, riskLevel);
+          const skills = getRequiredReviewSkills(
+            transition,
+            riskLevel,
+            card.workingDirectory
+          );
           const skill = skills.find((s) => s.id === review.skillId);
           if (skill) {
             const sessionUri = card.id;

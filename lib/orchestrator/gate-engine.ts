@@ -4,14 +4,23 @@ import { exec } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 
 import { getDb } from "@/lib/db/schema";
-import { GateStatus, Phase, PHASE_ORDER, RiskLevel, normalizeChangesetRef } from "@/lib/types";
+import {
+  GateStatus,
+  Phase,
+  PHASE_ORDER,
+  RiskLevel,
+  normalizeChangesetRef,
+  type ArtifactType,
+} from "@/lib/types";
 import { resolveGateWorkingDirectory } from "./gate-command";
+import { loadConfig, type GateRef } from "./skill-config";
 
 export type GateType =
   | "lint"
   | "typecheck"
   | "test"
   | "review"
+  | "artifact"
   | "human-approval"
   | "custom";
 
@@ -35,6 +44,7 @@ export interface GateConfig {
   gateType: GateType;
   command?: string;
   gateName?: string;
+  artifactType?: ArtifactType;
   required: boolean;
   riskThreshold?: RiskLevel;
 }
@@ -53,74 +63,6 @@ export function computeChangesetRef(
 }
 
 const RISK_ORDER: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2 };
-
-const DEFAULT_GATES: Record<string, GateConfig[]> = {
-  "plan->build": [
-    {
-      phaseTransition: "plan->build",
-      gateType: "review",
-      gateName: "plan-review",
-      required: true,
-    },
-    {
-      phaseTransition: "plan->build",
-      gateType: "review",
-      gateName: "architecture-review",
-      required: true,
-      riskThreshold: "high",
-    },
-    {
-      phaseTransition: "plan->build",
-      gateType: "human-approval",
-      gateName: "plan-approval",
-      required: true,
-      riskThreshold: "high",
-    },
-  ],
-  "build->review": [
-    {
-      phaseTransition: "build->review",
-      gateType: "lint",
-      command: "npm run lint",
-      required: true,
-    },
-    {
-      phaseTransition: "build->review",
-      gateType: "typecheck",
-      command: "npm run typecheck",
-      required: true,
-    },
-    {
-      phaseTransition: "build->review",
-      gateType: "test",
-      command: "npm test",
-      required: true,
-      riskThreshold: "medium",
-    },
-  ],
-  "review->ship": [
-    {
-      phaseTransition: "review->ship",
-      gateType: "review",
-      gateName: "code-review",
-      required: true,
-    },
-    {
-      phaseTransition: "review->ship",
-      gateType: "review",
-      gateName: "security-review",
-      required: true,
-      riskThreshold: "medium",
-    },
-    {
-      phaseTransition: "review->ship",
-      gateType: "human-approval",
-      gateName: "ship-approval",
-      required: true,
-      riskThreshold: "high",
-    },
-  ],
-};
 
 type GateRunRow = {
   id: number;
@@ -164,6 +106,54 @@ function filterGatesByRisk(gates: GateConfig[], riskLevel?: RiskLevel): GateConf
   });
 }
 
+function scriptGateType(name: string): GateType {
+  switch (name.trim().toLowerCase()) {
+    case "lint":
+      return "lint";
+    case "type check":
+    case "typecheck":
+      return "typecheck";
+    case "test":
+    case "tests":
+      return "test";
+    default:
+      return "custom";
+  }
+}
+
+function configRefToGate(
+  ref: GateRef,
+  transition: string,
+  required: boolean,
+  scripts: Record<string, string>
+): GateConfig {
+  if (ref.type === "script") {
+    return {
+      phaseTransition: transition,
+      gateType: scriptGateType(ref.name),
+      gateName: ref.name,
+      command: scripts[ref.name],
+      required,
+    };
+  }
+  if (ref.type === "artifact") {
+    return {
+      phaseTransition: transition,
+      gateType: "artifact",
+      gateName: ref.artifact,
+      artifactType: ref.artifact,
+      required,
+    };
+  }
+  return {
+    phaseTransition: transition,
+    gateType: "review",
+    gateName: ref.skill,
+    required,
+    riskThreshold: ref.riskThreshold,
+  };
+}
+
 export function getGatesForTransition(
   fromPhase: Phase,
   toPhase: Phase,
@@ -202,7 +192,20 @@ export function getGatesForTransition(
     }
   }
 
-  return filterGatesByRisk(DEFAULT_GATES[transition] || [], riskLevel);
+  const config = loadConfig(projectPath);
+  const transitionConfig =
+    config.gates[transition.replace("->", "-to-")] ?? config.gates[transition];
+  if (!transitionConfig) return [];
+
+  const gates = [
+    ...transitionConfig.required.map((ref) =>
+      configRefToGate(ref, transition, true, config.scripts)
+    ),
+    ...transitionConfig.optional.map((ref) =>
+      configRefToGate(ref, transition, false, config.scripts)
+    ),
+  ];
+  return filterGatesByRisk(gates, riskLevel);
 }
 
 export function startGateRun(
@@ -435,9 +438,10 @@ export function deriveGateStatus(
   fromPhase: Phase,
   toPhase: Phase,
   riskLevel?: RiskLevel,
-  changesetRef?: string
+  changesetRef?: string,
+  projectPath?: string
 ): GateStatus {
-  const gates = getGatesForTransition(fromPhase, toPhase, undefined, riskLevel);
+  const gates = getGatesForTransition(fromPhase, toPhase, projectPath, riskLevel);
   const requiredGates = gates.filter((g) => g.required);
   if (requiredGates.length === 0) return "pending";
 
@@ -447,7 +451,14 @@ export function deriveGateStatus(
   if (relevantRuns.some((r) => r.status === "failed")) return "failed";
   if (relevantRuns.some((r) => r.status === "running")) return "evaluating";
 
-  const { allowed } = canAdvancePhase(cardId, fromPhase, toPhase, undefined, riskLevel, changesetRef);
+  const { allowed } = canAdvancePhase(
+    cardId,
+    fromPhase,
+    toPhase,
+    projectPath,
+    riskLevel,
+    changesetRef
+  );
   return allowed ? "passed" : "pending";
 }
 

@@ -389,9 +389,9 @@ The CTO orchestrator (or human) assigns a **risk level** to each card. Risk dete
 
 | Risk Level | Plan Gate | Implementation Gate | Review Gate |
 |-----------|-----------|-------------------|-------------|
-| **Low** (typo fix, config) | Self-review sufficient | Lint + type check | Auto-merge OK |
-| **Medium** (feature, refactor) | 1 adversarial review | Lint + types + tests | 1 code review |
-| **High** (security, core infra) | 2 adversarial reviews + human approval | Full test suite + coverage threshold | 2 code reviews + human sign-off |
+| **Low** (typo fix, config) | Self-review sufficient | Lint + type check + implementation review | Concise `review.md`; auto-merge may be allowed |
+| **Medium** (feature, refactor) | 1 adversarial review | Lint + types + tests + independent correctness/architecture review | Evidence synthesis in `review.md` + human review |
+| **High** (security, core infra) | 2 adversarial reviews + human approval | Full test suite + coverage threshold + multiple implementation reviewers | Detailed `review.md` + human sign-off |
 
 Risk can be:
 - **Assumed** from heuristics (files touched, blast radius, keywords like "auth", "payment", "migration")

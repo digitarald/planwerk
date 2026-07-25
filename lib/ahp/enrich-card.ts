@@ -36,6 +36,7 @@ const GATE_LABELS: Record<string, string> = {
   "architecture-review": "Architecture review",
   "code-review": "Code review",
   "security-review": "Security review",
+  "review-report": "Review handoff",
 };
 
 function gateLabel(gate: GateConfig): string {
@@ -49,6 +50,8 @@ function gateLabel(gate: GateConfig): string {
       return "Tests";
     case "human-approval":
       return "Human approval";
+    case "artifact":
+      return gate.artifactType === "review" ? "Review artifact" : "Artifact";
     default:
       return gate.gateName ?? gate.gateType;
   }
@@ -68,13 +71,14 @@ function computeGateBlocker(
   riskLevel: RiskLevel | undefined,
   reviewRuns: ReviewRun[],
   transition: string,
-  changesetRef?: string
+  changesetRef?: string,
+  projectPath?: string
 ): string | undefined {
   const { allowed, pendingGates } = canAdvancePhase(
     cardId,
     fromPhase,
     toPhase,
-    undefined,
+    projectPath,
     riskLevel,
     changesetRef
   );
@@ -149,7 +153,14 @@ export function enrichSessionToCard(
           )
         : undefined;
   if (nextPhase) {
-    card.gateStatus = deriveGateStatus(session.resource, card.phase, nextPhase, storedRisk?.level, changesetRef);
+    card.gateStatus = deriveGateStatus(
+      session.resource,
+      card.phase,
+      nextPhase,
+      storedRisk?.level,
+      changesetRef,
+      card.workingDirectory
+    );
   }
 
   // Attach review findings from DB
@@ -179,7 +190,8 @@ export function enrichSessionToCard(
       storedRisk?.level,
       reviewRuns,
       `${card.phase}->${nextPhase}`,
-      changesetRef
+      changesetRef,
+      card.workingDirectory
     );
   }
   if (card.workingDirectories && card.workingDirectories.length > 1 && !card.primaryWorkingDirectory) {
