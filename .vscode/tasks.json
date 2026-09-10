@@ -4,7 +4,7 @@
     {
       "label": "Install dependencies",
       "type": "shell",
-      "command": "corepack npm ci",
+      "command": "npm exec --yes --package=npm@11.13.0 -- npm ci",
       "inAgents": true,
       "runOptions": { "runOn": "worktreeCreated" }
     },
