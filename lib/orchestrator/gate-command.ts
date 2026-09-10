@@ -7,9 +7,13 @@ const RETRYABLE_FAILURE_PREFIXES = [
 ];
 
 export function resolveGateWorkingDirectory(workingDirectory: string): string {
-  return workingDirectory.startsWith("file:")
-    ? fileURLToPath(workingDirectory)
-    : workingDirectory;
+  if (workingDirectory.startsWith("file:")) {
+    return fileURLToPath(workingDirectory);
+  }
+  if (/^[a-z][a-z\d+.-]*:/i.test(workingDirectory) && !/^[a-z]:[\\/]/i.test(workingDirectory)) {
+    throw new Error(`Unsupported working directory URI: ${workingDirectory}`);
+  }
+  return workingDirectory;
 }
 
 export function isRetryableGateFailure(output?: string): boolean {

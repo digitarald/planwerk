@@ -11,11 +11,9 @@ export interface AHPSessionSummary {
     path: string;
   };
   model?: string;
-  /** Every workspace the AHP 0.7 session has access to. */
+  /** Every workspace the AHP session has access to. */
   workingDirectories?: string[];
-  /** Cwd explicitly selected by the default chat, when safe for automation. */
-  primaryWorkingDirectory?: string;
-  /** @deprecated Retained for old cached summaries and hosts. */
+  /** Planwerk operational cwd, available only for one local working directory. */
   workingDirectory?: string;
   changes?: {
     additions: number;

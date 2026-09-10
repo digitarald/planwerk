@@ -202,16 +202,12 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
   silent `pending`, e.g. "Plan review not started").
 - `lib/ahp/changeset-enricher.ts`, `lib/ahp/plan-artifact.ts` — file/artifact enrichment.
 - `lib/ahp/protocol.ts`, `lib/ahp/protocol-rpc.ts`, and `lib/ahp/initialize.ts` —
-  protocol negotiation. VS Code currently requires AHP 0.7, while npm still supplies
-  the 0.5 SDK; Planwerk offers tested 0.7 and 0.6 compatibility versions ahead of the
-  SDK's canonical list. Every client path uses the shared initializer, which rejects a
-  host-selected version that was not offered. Unsupported-version errors preserve host
-  offers and classify provably older/newer exact versions without auto-negotiating an
-  untested version.
-- `lib/ahp/changeset-review.ts` and `app/api/ahp/sessions/review/route.ts` — the narrow
-  **AHP compatibility adapter** and mutation path for host-owned file review bits.
-  This is not an official SDK migration: the adapter uses structural newer wire shapes
-  until the SDK publishes matching releases.
+  protocol negotiation. Planwerk is built against AHP 0.9.0 and never offers older
+  protocol versions. Development and test connections may reconnect once with exact,
+  strictly newer versions reported by an Insiders host; production remains fixed to
+  0.9.0. Unsupported-version errors preserve both host and client offers.
+- `lib/ahp/changeset-review.ts` and `app/api/ahp/sessions/review/route.ts` — the
+  official SDK mutation path for host-owned file review bits.
 - `lib/ahp/tool-safety.ts` — redacts `toolAuthentication` to a VS Code handoff and validates
   host-provided confirmation options/tool-safety state. Host tool safety is not Planwerk
   card risk and never advances a phase.

@@ -21,6 +21,13 @@ test("resolveGateWorkingDirectory rejects malformed file URIs", () => {
   assert.throws(() => resolveGateWorkingDirectory("file://%"));
 });
 
+test("resolveGateWorkingDirectory rejects unsupported workspace URI schemes", () => {
+  assert.throws(
+    () => resolveGateWorkingDirectory("vscode-remote://ssh-remote+host/repo"),
+    /Unsupported working directory URI/,
+  );
+});
+
 test("isRetryableGateFailure identifies infrastructure failures", () => {
   assert.equal(
     isRetryableGateFailure("Working directory not found: file:///Users/example/project"),

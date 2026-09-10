@@ -106,11 +106,9 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ ok: true, noop: true, ...reviewResponse(changeset, before.files) });
       }
 
-      // This is deliberately structural: the installed 0.5 SDK cannot type the
-      // 0.6 action yet, while the negotiated host can apply this exact wire shape.
       client.dispatch(
         changeset.uriTemplate,
-        changesetFilesReviewChanged(fileIds, reviewed) as never,
+        changesetFilesReviewChanged(fileIds, reviewed),
       );
 
       // Let the host echo its authoritative state, then reconcile rather than

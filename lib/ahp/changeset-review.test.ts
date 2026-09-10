@@ -21,7 +21,7 @@ const files = [
   { id: "opaque-file-b", edit: {}, reviewed: true },
 ] as unknown as ChangesetFile[];
 
-test("AHP 0.6 review adapter preserves opaque IDs and normalizes missing state", () => {
+test("review summary preserves opaque IDs and normalizes missing state", () => {
   assert.deepEqual(changesetReviewSummary(reviewableChangeset, files), {
     changesetUri: "ahp-changeset:/session-1",
     capabilities: { review: true },
@@ -32,7 +32,7 @@ test("AHP 0.6 review adapter preserves opaque IDs and normalizes missing state",
   });
 });
 
-test("AHP 0.6 review adapter treats the empty review capability as supported", () => {
+test("review summary treats the empty review capability as supported", () => {
   assert.equal(changesetSupportsReview(reviewableChangeset), true);
   assert.equal(
     changesetSupportsReview({
@@ -44,7 +44,7 @@ test("AHP 0.6 review adapter treats the empty review capability as supported", (
   );
 });
 
-test("review action and static URI checks use the exact 0.6 wire shape", () => {
+test("review action and static URI checks use the protocol wire shape", () => {
   assert.deepEqual(changesetFilesReviewChanged(["opaque-file-a"], true), {
     type: "changeset/filesReviewChanged",
     files: ["opaque-file-a"],

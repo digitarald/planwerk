@@ -8,7 +8,7 @@ import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, start
 import { isRetryableGateFailure } from "./gate-command";
 import { getCardRisk } from "./risk-store";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
-import { injectMessage, answerInput, submitPlanFeedback } from "@/lib/ahp/session-messenger";
+import { answerInput, submitPlanFeedback } from "@/lib/ahp/session-messenger";
 import { syncCoherence } from "./coherence-engine";
 import { runCoherenceExecutor, type ReviewCardCtx } from "./coherence-reviewer";
 import { advanceReviewToShip } from "./phase-advance";
@@ -66,6 +66,8 @@ const state: HeartbeatState = {
   coherenceBlocked: new Set(),
   planBusySince: new Map(),
 };
+
+const NO_LOCAL_WORKING_DIRECTORY_PREFIX = "No local working directory available:";
 
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let onAction: ((action: HeartbeatAction) => void) | null = null;
@@ -502,7 +504,8 @@ async function runBuildPipeline(
           (!gate.gateName || r.gateName === gate.gateName) &&
           r.status === "failed" &&
           normalizeChangesetRef(r.changesetRef) === currentCodeRef &&
-          !isRetryableGateFailure(r.output)
+          !isRetryableGateFailure(r.output) &&
+          !(card.workingDirectory && r.output?.startsWith(NO_LOCAL_WORKING_DIRECTORY_PREFIX))
       );
       if (alreadyFailed) continue;
 
@@ -527,15 +530,18 @@ async function runBuildPipeline(
         actions.push(action);
       }
 
-      // Execute the gate command if available, otherwise nudge agent
+      // Execute the gate command if available, otherwise fail explicitly.
       if (gate.command && card.workingDirectory) {
         executeGateCommand(runId, gate.command, card.workingDirectory, (status) => {
           emit({ type: "gate-completed", cardId: card.id, gateType: gate.gateType, status });
         });
       } else if (gate.command) {
-        // No working directory — nudge agent to run the check
-        const nudge = `Please run: ${gate.command}`;
-        injectMessage(hostUrl, card.id, nudge).catch(() => {});
+        completeGateRun(
+          runId,
+          "failed",
+          `${NO_LOCAL_WORKING_DIRECTORY_PREFIX} select a single local workspace root`,
+        );
+        emit({ type: "gate-completed", cardId: card.id, gateType: gate.gateType, status: "failed" });
       } else {
         completeGateRun(runId, "failed", `No command configured for ${gate.gateName ?? gate.gateType}`);
         emit({ type: "gate-completed", cardId: card.id, gateType: gate.gateType, status: "failed" });

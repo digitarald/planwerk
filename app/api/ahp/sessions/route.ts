@@ -1,11 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AhpClient } from "@microsoft/agent-host-protocol/client";
-
 import { AHPSessionSummary, shouldShowSession } from "@/lib/ahp/types";
 import { listAllSessions } from "@/lib/ahp/catalog";
-import { connectAhpTransport } from "@/lib/ahp/endpoint";
-import { sessionWorkingDirectories } from "@/lib/ahp/working-directories";
-import { initializeAhpClient } from "@/lib/ahp/initialize";
+import { connectInitializedAhpClient } from "@/lib/ahp/endpoint";
+import { mapSdkSessionSummary } from "@/lib/ahp/session-summary";
 import { injectMessage } from "@/lib/ahp/session-messenger";
 import { ahpErrorResponse } from "@/lib/ahp/api-error";
 
@@ -28,51 +25,26 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ sessions: [] });
   }
 
-  let endpoint: Awaited<ReturnType<typeof connectAhpTransport>>;
+  let connection: Awaited<ReturnType<typeof connectInitializedAhpClient>>;
   try {
-    endpoint = await connectAhpTransport(hostUrl);
+    connection = await connectInitializedAhpClient(hostUrl);
   } catch (err) {
     return ahpErrorResponse(err, "Failed to connect to AHP host");
   }
 
-  const client = new AhpClient(endpoint.transport);
-  client.connect();
+  const { client, initialized, diagnostics } = connection;
 
   try {
-    const initialized = await initializeAhpClient(client);
-
     const allSessions = await listAllSessions(client);
     const sessions: AHPSessionSummary[] = allSessions
       .filter((s) => shouldShowSession(s.status, s.changes?.files ?? 0))
-      .map((s) => {
-        const mapped: AHPSessionSummary = {
-          resource: s.resource,
-          provider: s.provider,
-          title: s.title,
-          status: s.status,
-          createdAt: new Date(s.createdAt).toISOString(),
-          modifiedAt: new Date(s.modifiedAt).toISOString(),
-        };
-        if (s.activity) mapped.activity = s.activity;
-        if (s.project) mapped.project = { name: s.project.displayName, path: s.project.uri };
-        if (s.workingDirectory) mapped.workingDirectory = s.workingDirectory;
-        const workingDirectories = sessionWorkingDirectories(s);
-        if (workingDirectories) mapped.workingDirectories = workingDirectories;
-        if (s.changes) {
-          mapped.changes = {
-            additions: s.changes.additions ?? 0,
-            deletions: s.changes.deletions ?? 0,
-            files: s.changes.files ?? 0,
-          };
-        }
-        return mapped;
-      });
+      .map(mapSdkSessionSummary);
 
     await client.shutdown();
     return NextResponse.json({
       sessions,
       connection: {
-        ...endpoint.diagnostics,
+        ...diagnostics,
         protocolVersion: initialized.protocolVersion,
         totalSessions: allSessions.length,
         visibleSessions: sessions.length,
@@ -118,13 +90,13 @@ export async function POST(request: NextRequest) {
     const channel = `${agentProvider}:/${sessionId}`;
 
     try {
-      // Model selection is provider-defined session config in AHP 0.5 (no longer a
+      // Model selection is provider-defined session config (not a
       // top-level createSession field); the provider applies its default here and
       // the selection is surfaced from SessionState.config afterwards.
       await client.request("createSession", {
         channel,
         provider: agentProvider,
-        workingDirectory: workingDirectory || undefined,
+        workingDirectories: workingDirectory ? [workingDirectory] : undefined,
         config: NEW_SESSION_CONFIG,
       });
     } finally {

@@ -1,42 +1,39 @@
-import type { SessionState, SessionSummary } from "@microsoft/agent-host-protocol";
+import { fileURLToPath } from "node:url";
+import { isAbsolute, win32 } from "node:path";
 
-type SessionSummary07 = SessionSummary & {
-  workingDirectories?: unknown;
-};
+import type { SessionSummary } from "@microsoft/agent-host-protocol";
 
-type ChatSummary07 = {
-  resource?: unknown;
-  workingDirectories?: unknown;
-  primaryWorkingDirectory?: unknown;
-};
-
-function stringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const directories = value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
-  return directories.length > 0 ? directories : undefined;
+export interface SessionDirectoryProjection {
+  workingDirectories: string[];
+  workingDirectory?: string;
 }
 
 /**
- * Preserve every directory the host advertises. A singular directory is the
- * pre-0.7 wire shape and remains a one-element set for cached and older hosts.
+ * Project AHP's URI set into Planwerk's complete directory list and filesystem
+ * cwd. `undefined` means a partial summary did not update the field; an empty
+ * array explicitly clears it.
  */
-export function sessionWorkingDirectories(summary: SessionSummary): string[] | undefined {
-  return stringArray((summary as SessionSummary07).workingDirectories)
-    ?? (typeof summary.workingDirectory === "string" ? [summary.workingDirectory] : undefined);
-}
-
-/**
- * A multi-directory session is only safe for cwd-sensitive automation when the
- * default chat nominates an explicit primary directory. Older single-directory
- * hosts retain their only directory as the established operational cwd.
- */
-export function primaryWorkingDirectory(state: SessionState): string | undefined {
-  const chats = state.chats as readonly ChatSummary07[];
-  const defaultChat = chats.find((chat) => chat.resource === state.defaultChat);
-  const primary = defaultChat?.primaryWorkingDirectory;
-  if (typeof primary === "string" && primary.length > 0) return primary;
-
-  const sessionDirectories = stringArray((state as SessionState & { workingDirectories?: unknown }).workingDirectories);
-  if (sessionDirectories?.length === 1) return sessionDirectories[0];
-  return typeof state.workingDirectory === "string" ? state.workingDirectory : undefined;
+export function projectSessionDirectories(
+  summary: Pick<SessionSummary, "workingDirectories">,
+): SessionDirectoryProjection | undefined {
+  if (summary.workingDirectories === undefined) return undefined;
+  const workingDirectories = [...summary.workingDirectories];
+  const only = workingDirectories.length === 1 ? workingDirectories[0] : undefined;
+  let workingDirectory: string | undefined;
+  if (only?.startsWith("file:")) {
+    try {
+      workingDirectory = fileURLToPath(only);
+    } catch (error) {
+      console.warn(
+        `[ahp] Cannot use non-local working directory ${only}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  } else if (only && (isAbsolute(only) || win32.isAbsolute(only))) {
+    workingDirectory = only;
+  }
+  return {
+    workingDirectories,
+    workingDirectory,
+  };
 }

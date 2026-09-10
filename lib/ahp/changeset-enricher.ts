@@ -37,7 +37,7 @@ export interface ChangesetEnrichment {
   planContentHash?: string;
   lastAgentMessage?: string;
   planContent?: string;
-  /** Selected channel and AHP 0.6 review facts; informational only. */
+  /** Selected channel and AHP review facts; informational only. */
   changesetReview?: ChangesetReview;
 }
 

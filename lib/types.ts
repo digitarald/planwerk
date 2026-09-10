@@ -138,7 +138,7 @@ export interface FileChange {
   path: string;
   added: number;
   removed: number;
-  /** AHP 0.6 per-file review state. Missing is equivalent to not reviewed. */
+  /** AHP per-file review state. Missing is equivalent to not reviewed. */
   reviewed?: boolean;
 }
 
@@ -192,8 +192,7 @@ export interface KanbanCard {
   model?: string;
   branch?: string;
   workingDirectories?: string[];
-  /** The default chat's explicit operational cwd, if the host provided one. */
-  primaryWorkingDirectory?: string;
+  /** Planwerk operational cwd, available only for one local working directory. */
   workingDirectory?: string;
   project?: { name: string; path: string };
   artifacts?: Artifact[];

@@ -26,7 +26,7 @@ const debug = (...args: unknown[]) => {
 
 /**
  * Answer an outstanding session input from Planwerk. Everything is resolved from the
- * session-level `SessionState.inputNeeded` aggregate (AHP 0.5) so the owning chat and
+ * session-level `SessionState.inputNeeded` aggregate so the owning chat and
  * tool-call identifiers are server-derived rather than trusted from the client.
  *
  * - `approved` present → tool-call confirmation (dispatch `chat/toolCallConfirmed` or
@@ -74,7 +74,7 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // AHP 0.6 authentication input is resolved only by the active client
+      // Authentication input is resolved only by the active client
       // completing OAuth through `authenticate`. Never forward credentials,
       // resource URLs, or an implicit chat response from Planwerk.
       const matchingEntry = findEntryById(inputNeeded, requestId);

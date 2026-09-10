@@ -15,7 +15,10 @@ import WebSocket, { type RawData } from "ws";
 
 import { listAllSessions } from "./catalog.ts";
 import { LOCAL_DESKTOP_HOST } from "./endpoint-config.ts";
-import { initializeAhpClient } from "./initialize.ts";
+import {
+  initializeAhpClientWithForwardRetry,
+  type InitializeAhpClientOptions,
+} from "./initialize.ts";
 import {
   aggregateIncompatibleProtocolVersions,
   allDesktopCandidatesProtocolIncompatible,
@@ -46,6 +49,18 @@ export interface AhpEndpointDiagnostics {
 export interface ConnectedAhpTransport {
   transport: AhpTransport;
   diagnostics: AhpEndpointDiagnostics;
+}
+
+export interface ConnectedAhpClient {
+  client: AhpClient;
+  initialized: InitializeResult;
+  diagnostics: AhpEndpointDiagnostics;
+  usedForwardCompatibility: boolean;
+}
+
+export interface ConnectAhpClientOptions extends InitializeAhpClientOptions {
+  requestTimeoutMs?: number;
+  wrapTransport?: (transport: AhpTransport) => AhpTransport;
 }
 
 interface CachedDesktopSelection {
@@ -162,12 +177,9 @@ function implementationInfo(result: InitializeResult): {
   name?: string;
   version?: string;
 } {
-  const serverInfo = (result as InitializeResult & {
-    serverInfo?: { name?: unknown; version?: unknown };
-  }).serverInfo;
   return {
-    name: typeof serverInfo?.name === "string" ? serverInfo.name : undefined,
-    version: typeof serverInfo?.version === "string" ? serverInfo.version : undefined,
+    name: result.serverInfo?.name,
+    version: result.serverInfo?.version,
   };
 }
 
@@ -193,10 +205,15 @@ async function probeDesktopSocket(
 ): Promise<DesktopSocketProbeOutcome> {
   let client: AhpClient | undefined;
   try {
-    const transport = await UnixWebSocketTransport.connect(candidate.socketPath);
-    client = new AhpClient(transport, { requestTimeoutMs: 5_000 });
-    client.connect();
-    const initialized = await initializeAhpClient(client);
+    const connection = await initializeAhpClientWithForwardRetry(async () => {
+      const transport = await UnixWebSocketTransport.connect(candidate.socketPath);
+      const nextClient = new AhpClient(transport, { requestTimeoutMs: 5_000 });
+      nextClient.connect();
+      client = nextClient;
+      return nextClient;
+    });
+    client = connection.client;
+    const initialized = connection.initialized;
     const sessions = await listAllSessions(client);
     const server = implementationInfo(initialized);
     return {
@@ -324,6 +341,37 @@ export async function connectAhpTransport(hostUrl: string): Promise<ConnectedAhp
       candidateCount: 1,
       compatibleCandidateCount: 1,
     },
+  };
+}
+
+export async function connectInitializedAhpClient(
+  hostUrl: string,
+  options: ConnectAhpClientOptions = {},
+): Promise<ConnectedAhpClient> {
+  const {
+    requestTimeoutMs,
+    wrapTransport,
+    ...initializeOptions
+  } = options;
+  let endpoint: ConnectedAhpTransport | undefined;
+  const connection = await initializeAhpClientWithForwardRetry(async () => {
+    endpoint = await connectAhpTransport(hostUrl);
+    const transport = wrapTransport
+      ? wrapTransport(endpoint.transport)
+      : endpoint.transport;
+    const client = new AhpClient(transport, { requestTimeoutMs });
+    client.connect();
+    return client;
+  }, initializeOptions);
+
+  if (!endpoint) {
+    await connection.client.shutdown().catch(() => {});
+    throw new TransportError("io", "AHP connection initialized without endpoint diagnostics");
+  }
+
+  return {
+    ...connection,
+    diagnostics: endpoint.diagnostics,
   };
 }
 

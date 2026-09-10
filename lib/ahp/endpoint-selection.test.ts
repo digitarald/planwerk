@@ -9,17 +9,17 @@ import {
 
 test("desktop socket selection prefers the largest catalog", () => {
   const selected = selectDesktopSocket([
-    { socketPath: "/tmp/new-empty.sock", modifiedAt: 30, sessionCount: 0, protocolVersion: "0.7.0" },
-    { socketPath: "/tmp/desktop.sock", modifiedAt: 10, sessionCount: 234, protocolVersion: "0.7.0" },
+    { socketPath: "/tmp/new-empty.sock", modifiedAt: 30, sessionCount: 0, protocolVersion: "0.9.0" },
+    { socketPath: "/tmp/desktop.sock", modifiedAt: 10, sessionCount: 234, protocolVersion: "0.9.0" },
   ]);
   assert.equal(selected?.socketPath, "/tmp/desktop.sock");
 });
 
 test("desktop socket selection has deterministic tie-breakers", () => {
   const selected = selectDesktopSocket([
-    { socketPath: "/tmp/z.sock", modifiedAt: 20, sessionCount: 5, protocolVersion: "0.7.0" },
-    { socketPath: "/tmp/b.sock", modifiedAt: 30, sessionCount: 5, protocolVersion: "0.7.0" },
-    { socketPath: "/tmp/a.sock", modifiedAt: 30, sessionCount: 5, protocolVersion: "0.7.0" },
+    { socketPath: "/tmp/z.sock", modifiedAt: 20, sessionCount: 5, protocolVersion: "0.9.0" },
+    { socketPath: "/tmp/b.sock", modifiedAt: 30, sessionCount: 5, protocolVersion: "0.9.0" },
+    { socketPath: "/tmp/a.sock", modifiedAt: 30, sessionCount: 5, protocolVersion: "0.9.0" },
   ]);
   assert.equal(selected?.socketPath, "/tmp/a.sock");
 });

@@ -4,11 +4,9 @@ import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import type { SessionState } from "@microsoft/agent-host-protocol";
 
 import { readSessionState } from "./snapshot";
-import { primaryWorkingDirectory } from "./working-directories";
 
 /**
- * As of AHP 0.5 the selected model is no longer a first-class `SessionSummary`
- * field — it is provider-defined configuration carried in
+ * The selected model is provider-defined configuration carried in
  * `SessionState.config.values` (keyed by the provider's config schema). The
  * protocol does not standardize a key name, so this is a documented, best-effort
  * lookup across the keys providers commonly use, with graceful `undefined`
@@ -44,12 +42,4 @@ export async function fetchSessionModel(
 ): Promise<string | undefined> {
   const state = await readSessionState(client, sessionUri);
   return extractModelFromConfig(state?.config);
-}
-
-export async function fetchSessionPrimaryWorkingDirectory(
-  client: AhpClient,
-  sessionUri: string,
-): Promise<string | undefined> {
-  const state = await readSessionState(client, sessionUri);
-  return state ? primaryWorkingDirectory(state) : undefined;
 }

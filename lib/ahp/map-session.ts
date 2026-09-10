@@ -4,6 +4,7 @@ import type {
   ChatInputQuestion,
   SessionState,
   SessionChatInputRequest,
+  SessionToolAuthenticationRequest,
   SessionToolConfirmationRequest,
   SessionToolClientExecutionRequest,
 } from "@microsoft/agent-host-protocol";
@@ -17,26 +18,8 @@ import {
 } from "./tool-safety";
 
 /**
- * AHP 0.6 extends `inputNeeded` with `toolAuthentication`, but the installed
- * SDK's 0.5.x union does not declare it yet. Keep that extension structural and
- * read-only until the SDK catches up.
- */
-interface SessionToolAuthenticationRequestCompat {
-  id: string;
-  kind: "toolAuthentication";
-  chat: string;
-  turnId: string;
-  toolCall: {
-    toolCallId?: unknown;
-    displayName?: unknown;
-    toolName?: unknown;
-    [key: string]: unknown;
-  };
-}
-
-/**
  * Convert a session's aggregated `SessionState.inputNeeded` into the single most
- * actionable {@link PendingInput}. This is the AHP 0.5 session-level input surface,
+ * actionable {@link PendingInput}. This session-level input surface
  * covering elicitations, tool confirmations, authentication handoffs, and client-execution across every chat.
  *
  * Priority (most actionable first): user elicitation → tool confirmation →
@@ -64,7 +47,7 @@ export function mapSessionInputNeeded(
 
   const toolAuth = entries.find((e) => (e.kind as string) === "toolAuthentication");
   if (toolAuth) {
-    return mapToolAuthentication(toolAuth as unknown as SessionToolAuthenticationRequestCompat);
+    return mapToolAuthentication(toolAuth as SessionToolAuthenticationRequest);
   }
 
   const toolExec = entries.find((e) => (e.kind as string) === "toolClientExecution");
@@ -121,7 +104,7 @@ function mapToolConfirmation(entry: SessionToolConfirmationRequest): PendingInpu
   };
 }
 
-function mapToolAuthentication(entry: SessionToolAuthenticationRequestCompat): PendingInput {
+function mapToolAuthentication(entry: SessionToolAuthenticationRequest): PendingInput {
   const handoff = toolAuthenticationHandoff(entry.toolCall);
   const details: ToolAuthenticationDetails = { toolName: handoff.toolName };
   return {
@@ -338,7 +321,6 @@ export function mapSessionToCard(
     branch: undefined,
     workingDirectory: session.workingDirectory,
     workingDirectories: session.workingDirectories,
-    primaryWorkingDirectory: session.primaryWorkingDirectory,
     project: session.project,
     artifacts: artifacts.length > 0 ? artifacts : undefined,
     lastAgentMessage: enrichment?.lastAgentMessage,

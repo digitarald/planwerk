@@ -66,7 +66,7 @@ test("result confirmations and loading tool safety remain fail-safe", () => {
     { ok: false, error: "Result confirmations do not accept an optionId" },
   );
 
-  const loading = normalizeToolRiskAssessment({ status: "loading", kind: "judge" });
+  const loading = normalizeToolRiskAssessment({ status: "loading", kind: "judge" } as never);
   assert.deepEqual(loading, { status: "loading" });
   assert.equal(canApproveToolConfirmation(loading), false);
   assert.deepEqual(
@@ -87,7 +87,8 @@ test("result confirmations and loading tool safety remain fail-safe", () => {
   );
   assert.equal(canApproveToolConfirmation(normalizeToolRiskAssessment({
     status: "complete",
+    kind: "judge",
     reason: { markdown: "Safe after review" },
     safety: 1.2,
-  })), true);
+  } as never)), true);
 });

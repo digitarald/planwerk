@@ -191,7 +191,7 @@ function findChatInput(
  * `plan-approved`.
  *
  * Resolves the target chat and validates staleness from the session-level
- * `SessionState.inputNeeded` aggregate (AHP 0.5+) — the authoritative source,
+ * `SessionState.inputNeeded` aggregate — the authoritative source,
  * since `defaultChat` is documented as only a UI routing hint and may not be
  * the chat the request actually lives on. An unavailable aggregate is unknown,
  * so this function does not dispatch until the host reports the request there.
@@ -347,7 +347,7 @@ export async function waitForIdle(
  *
  * Turns live on the chat channel, so resolve the session's defaultChat and read
  * its `ChatState.turns` (a tail window of the most recent turns, oldest-first).
- * As of AHP 0.5.x `fetchTurns` no longer returns turns directly; it asks the
+ * `fetchTurns` does not return turns directly; it asks the
  * host to page older turns into `ChatState.turns` via `turnsNextCursor`. Since
  * we only need the most recent turns, the subscription snapshot already carries
  * them, so we read them directly and derive `hasMore` from `turnsNextCursor`.

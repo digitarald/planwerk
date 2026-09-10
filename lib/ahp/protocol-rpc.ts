@@ -3,7 +3,10 @@ import { RpcError } from "@microsoft/agent-host-protocol/client";
 
 import { ProtocolCompatibilityError } from "./protocol.ts";
 
-export function readProtocolCompatibilityError(error: unknown): ProtocolCompatibilityError | undefined {
+export function readProtocolCompatibilityError(
+  error: unknown,
+  offeredVersions?: readonly string[],
+): ProtocolCompatibilityError | undefined {
   if (error instanceof ProtocolCompatibilityError) return error;
   if (!(error instanceof RpcError) || error.code !== AhpErrorCodes.UnsupportedProtocolVersion) {
     return undefined;
@@ -17,6 +20,7 @@ export function readProtocolCompatibilityError(error: unknown): ProtocolCompatib
   return new ProtocolCompatibilityError({
     failure: "no-overlap",
     hostSupportedVersions: supportedVersions,
+    offeredVersions,
     relation: Array.isArray(rawVersions) && rawVersions.every((version) => typeof version === "string")
       ? undefined
       : "unknown",

@@ -1,7 +1,4 @@
-/**
- * Compatibility and safety helpers for AHP 0.6 tool input. The installed SDK
- * predates these wire shapes, so keep the structural handling and policy here.
- */
+import type { ToolCallRiskAssessment } from "@microsoft/agent-host-protocol";
 
 export type ToolConfirmationIntent = "approve" | "deny" | "unknown";
 
@@ -32,7 +29,9 @@ export function canApproveToolConfirmation(riskAssessment?: ToolRiskAssessment):
   return riskAssessment?.status !== "loading";
 }
 
-export function normalizeToolRiskAssessment(value: unknown): ToolRiskAssessment | undefined {
+export function normalizeToolRiskAssessment(
+  value: ToolCallRiskAssessment | undefined,
+): ToolRiskAssessment | undefined {
   if (!value || typeof value !== "object") return undefined;
   const assessment = value as { status?: unknown; reason?: unknown; safety?: unknown };
   if (assessment.status === "loading") return { status: "loading" };
@@ -52,7 +51,7 @@ export function normalizeToolRiskAssessment(value: unknown): ToolRiskAssessment 
 
 /**
  * Resolve a confirmation decision from the host's current entry, never from a
- * client-provided option label or intent. AHP 0.6 options are authoritative.
+ * client-provided option label or intent. Protocol options are authoritative.
  */
 export function resolveToolConfirmationDecision(
   toolCall: ToolConfirmationLike,
@@ -100,15 +99,14 @@ export function resolveToolConfirmationDecision(
 }
 
 /**
- * Build the deliberately minimal, client-safe view of an AHP 0.6 OAuth block.
+ * Build the deliberately minimal, client-safe view of an AHP OAuth block.
  * In particular, no auth challenge, resource URI, scopes, OAuth client, or
  * credentials cross this boundary; VS Code owns the authentication flow.
  */
-export function toolAuthenticationHandoff(toolCall: {
+export function toolAuthenticationHandoff<T extends {
   displayName?: unknown;
   toolName?: unknown;
-  [key: string]: unknown;
-}): { message: string; toolName?: string } {
+}>(toolCall: T): { message: string; toolName?: string } {
   const toolName = typeof toolCall.displayName === "string" && toolCall.displayName.trim()
     ? toolCall.displayName
     : typeof toolCall.toolName === "string" && toolCall.toolName.trim()

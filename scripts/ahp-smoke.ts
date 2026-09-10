@@ -14,9 +14,8 @@ import type {
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
 
 import { chatQueuedMessage, chatTurnStarted } from "../lib/ahp/actions.ts";
-import { connectAhpTransport } from "../lib/ahp/endpoint.ts";
+import { connectInitializedAhpClient } from "../lib/ahp/endpoint.ts";
 import { LOCAL_DESKTOP_HOST } from "../lib/ahp/endpoint-config.ts";
-import { initializeAhpClient } from "../lib/ahp/initialize.ts";
 import { readProtocolCompatibilityError } from "../lib/ahp/protocol-rpc.ts";
 import { AHPStatus, parseAHPStatus } from "../lib/ahp/types.ts";
 
@@ -108,24 +107,17 @@ async function loadSnapshotReaders(): Promise<SnapshotReaders> {
 }
 
 async function connect(hostUrl: string): Promise<{ client: AhpClient; protocolVersion: string }> {
-  const { transport, diagnostics } = await connectAhpTransport(hostUrl);
-  const client = new AhpClient(transport);
-  client.connect();
-
-  try {
-    const init = await initializeAhpClient(client, {
+  const { client, initialized, diagnostics, usedForwardCompatibility } =
+    await connectInitializedAhpClient(hostUrl, {
       clientId: randomUUID(),
     });
 
-    log(
-      `connected via ${diagnostics.transport} (${diagnostics.resolvedTarget}); `
-      + `${diagnostics.candidateCount} local candidate(s) considered.`,
-    );
-    return { client, protocolVersion: init.protocolVersion };
-  } catch (error) {
-    await client.shutdown().catch(() => {});
-    throw error;
-  }
+  log(
+    `connected via ${diagnostics.transport} (${diagnostics.resolvedTarget}); `
+    + `${diagnostics.candidateCount} local candidate(s) considered`
+    + `${usedForwardCompatibility ? "; accepted newer development protocol" : ""}.`,
+  );
+  return { client, protocolVersion: initialized.protocolVersion };
 }
 
 function validateHostUrl(hostUrl: string) {
@@ -154,6 +146,9 @@ function describeInput(input: SessionInputRequest): string {
   }
   if (input.kind === "toolConfirmation") {
     return `toolConfirmation id=${input.id} chat=${input.chat} turn=${input.turnId} toolCall=${input.toolCall.toolCallId}`;
+  }
+  if (input.kind === "toolAuthentication") {
+    return `toolAuthentication id=${input.id} chat=${input.chat} turn=${input.turnId} toolCall=${input.toolCall.toolCallId}`;
   }
   return `toolClientExecution id=${input.id} chat=${input.chat} turn=${input.turnId} client=${input.clientId} toolCall=${input.toolCall.toolCallId}`;
 }
