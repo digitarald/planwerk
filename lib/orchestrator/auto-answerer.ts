@@ -5,6 +5,7 @@ import { CopilotClient } from "@github/copilot-sdk";
 import { answerInput } from "@/lib/ahp/session-messenger";
 import { buildAnswer } from "@/lib/ahp/answer-value";
 import { canAutoAnswer } from "./skill-config";
+import { disposeOneShotSession } from "./copilot-session";
 import { getCardRisk } from "./risk-store";
 import type { KanbanCard } from "@/lib/types";
 import { ORCHESTRATOR_MODEL } from "./model";
@@ -108,12 +109,14 @@ export async function autoAnswer(
       model: ORCHESTRATOR_MODEL,
       systemMessage: { content: SYSTEM_PROMPT },
     });
+    let responseCompleted = false;
 
     try {
       const response = await session.sendAndWait(
         { prompt: context },
         15_000
       );
+      responseCompleted = true;
 
       const answer = response?.data?.content?.trim();
       if (!answer || answer.toLowerCase() === "skip") {
@@ -148,7 +151,12 @@ export async function autoAnswer(
           : "Failed to submit answer to AHP",
       };
     } finally {
-      await session.disconnect().catch(() => {});
+      await disposeOneShotSession(
+        client,
+        session,
+        !responseCompleted,
+        "[auto-answerer]"
+      );
     }
   } catch (err) {
     return {

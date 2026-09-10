@@ -4,6 +4,7 @@ import { CopilotClient } from "@github/copilot-sdk";
 import type { CopilotSession } from "@github/copilot-sdk";
 
 import { getDb } from "@/lib/db/schema";
+import { disposeOneShotSession } from "@/lib/orchestrator/copilot-session";
 import { buildSystemPrompt } from "@/lib/orchestrator/orchestrator-agent";
 import { executeToolCall } from "@/lib/orchestrator/tool-executor";
 import type { OrchestratorToolName } from "@/lib/orchestrator/orchestrator-agent";
@@ -65,13 +66,35 @@ async function ensureSession(): Promise<CopilotSession | null> {
 }
 
 async function resetSession() {
-  if (copilotSession) {
-    await copilotSession.disconnect().catch(() => {});
-    copilotSession = null;
+  const session = copilotSession;
+  const client = copilotClient;
+  copilotSession = null;
+  copilotClient = null;
+
+  if (session && client) {
+    await disposeOneShotSession(
+      client,
+      session,
+      true,
+      "[orchestrator-chat]"
+    );
+  } else if (session) {
+    try {
+      await session.abort();
+      await session.disconnect();
+    } catch (error) {
+      console.warn(
+        "[orchestrator-chat] Failed to release Copilot SDK session:",
+        error instanceof Error ? error.message : error
+      );
+    }
   }
-  if (copilotClient) {
-    await copilotClient.stop().catch(() => {});
-    copilotClient = null;
+
+  if (client) {
+    const errors = await client.stop().catch((error) => [error]);
+    if (errors.length > 0) {
+      console.warn("[orchestrator-chat] Failed to stop Copilot SDK client:", errors);
+    }
   }
 }
 

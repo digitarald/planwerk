@@ -3,6 +3,7 @@ import "server-only";
 import { CopilotClient } from "@github/copilot-sdk";
 
 import { ORCHESTRATOR_MODEL } from "./model";
+import { disposeOneShotSession } from "./copilot-session";
 import {
   judgeWithTransport,
   type JudgeVerdict,
@@ -59,6 +60,7 @@ const sdkTransport: VerdictJudgeTransport = async (reviewResponse) => {
       systemMessage: { content: SYSTEM_PROMPT },
       availableTools: [],
     });
+    let responseCompleted = false;
 
     try {
       const response = await session.sendAndWait(
@@ -69,9 +71,15 @@ const sdkTransport: VerdictJudgeTransport = async (reviewResponse) => {
         },
         30_000
       );
+      responseCompleted = true;
       return response?.data?.content;
     } finally {
-      await session.disconnect().catch(() => {});
+      await disposeOneShotSession(
+        client,
+        session,
+        !responseCompleted,
+        "[verdict-judge]"
+      );
     }
   } catch (error) {
     await resetClient();

@@ -5,6 +5,7 @@ import { CopilotClient } from "@github/copilot-sdk";
 import type { CoherenceTier } from "@/lib/types";
 import { getCardRisk } from "./risk-store";
 import { effectiveRisk } from "./coherence-detect";
+import { disposeOneShotSession } from "./copilot-session";
 import {
   claimForReview,
   completeReview,
@@ -168,16 +169,23 @@ async function reviewPair(
       model: ORCHESTRATOR_MODEL,
       systemMessage: { content: SYSTEM_PROMPT },
     });
+    let responseCompleted = false;
     try {
       const response = await session.sendAndWait(
         { prompt: buildPrompt(row.tier, row.overlapPaths, a, b, aContent, bContent) },
         45_000
       );
+      responseCompleted = true;
       const content = response?.data?.content;
       const parsed = content ? parseVerdict(content) : null;
       if (parsed) return parsed;
     } finally {
-      await session.disconnect().catch(() => {});
+      await disposeOneShotSession(
+        client,
+        session,
+        !responseCompleted,
+        "[coherence-reviewer]"
+      );
     }
   } catch (err) {
     await resetClient();

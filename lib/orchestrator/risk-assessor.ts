@@ -3,6 +3,7 @@ import "server-only";
 import { CopilotClient } from "@github/copilot-sdk";
 
 import { RiskLevel } from "@/lib/types";
+import { disposeOneShotSession } from "./copilot-session";
 import { ORCHESTRATOR_MODEL } from "./model";
 
 export interface RiskInput {
@@ -150,12 +151,14 @@ export async function assessRisk(input: RiskInput): Promise<RiskAssessment> {
       model: ORCHESTRATOR_MODEL,
       systemMessage: { content: SYSTEM_PROMPT },
     });
+    let responseCompleted = false;
 
     try {
       const response = await session.sendAndWait(
         { prompt: buildPrompt(input) },
         30_000
       );
+      responseCompleted = true;
 
       const content = response?.data?.content;
       if (content) {
@@ -163,7 +166,12 @@ export async function assessRisk(input: RiskInput): Promise<RiskAssessment> {
         if (parsed) return parsed;
       }
     } finally {
-      await session.disconnect().catch(() => {});
+      await disposeOneShotSession(
+        client,
+        session,
+        !responseCompleted,
+        "[risk-assessor]"
+      );
     }
   } catch (err) {
     // Stop and reset client so the next call retries from scratch
