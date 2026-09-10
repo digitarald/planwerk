@@ -1,0 +1,89 @@
+version: 2
+
+updates:
+  # The repository .npmrc routes resolution through Microsoft's managed CFS
+  # feed, which also enforces the minimum release age.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    versioning-strategy: increase
+    open-pull-requests-limit: 10
+    ignore:
+      - dependency-name: eslint
+        update-types:
+          - version-update:semver-major
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+    groups:
+      next-react:
+        patterns:
+          - next
+          - react
+          - react-dom
+          - eslint-config-next
+          - "@types/react"
+          - "@types/react-dom"
+        update-types:
+          - minor
+          - patch
+      typescript-eslint:
+        patterns:
+          - typescript
+          - eslint
+        update-types:
+          - minor
+          - patch
+      tailwind:
+        patterns:
+          - tailwindcss
+          - "@tailwindcss/*"
+          - tailwind-merge
+          - tw-animate-css
+        update-types:
+          - minor
+          - patch
+      agent-host-protocol:
+        patterns:
+          - "@microsoft/agent-host-protocol"
+      copilot-sdk:
+        patterns:
+          - "@github/copilot-sdk"
+      sqlite:
+        patterns:
+          - better-sqlite3
+          - "@types/better-sqlite3"
+      safe-ui-runtime-patches:
+        patterns:
+          - "@base-ui/react"
+          - "@hello-pangea/dnd"
+          - "@types/node"
+          - "@types/ws"
+          - class-variance-authority
+          - clsx
+          - cmdk
+          - lucide-react
+          - next-themes
+          - radix-ui
+          - react-markdown
+          - remark-gfm
+          - shadcn
+          - sonner
+          - ws
+          - yaml
+          - zustand
+        update-types:
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
