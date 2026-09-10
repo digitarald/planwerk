@@ -23,7 +23,7 @@ Planwerk manages the AI execution layer between "task defined" and "PR merged," 
 
 ## Getting started
 
-Planwerk requires Node.js 24 and npm. It runs locally and connects to an Agent
+Planwerk requires Node.js 24.17.0 and npm. It runs locally and connects to an Agent
 Host Protocol endpoint, such as the one provided by VS Code. The app is built
 against AHP 0.9.0 and does not connect to older protocol versions.
 
