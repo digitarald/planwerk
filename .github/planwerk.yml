@@ -11,7 +11,7 @@ project:
 # Each script has a name, command, and trigger conditions.
 scripts:
   - name: Install
-    command: npm install
+    command: corepack npm ci
     triggers: [session.create]
 
   - name: Lint

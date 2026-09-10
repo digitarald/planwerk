@@ -28,7 +28,7 @@ Host Protocol endpoint, such as the one provided by VS Code. The app is built
 against AHP 0.9.0 and does not connect to older protocol versions.
 
 ```bash
-npm ci
+corepack npm ci
 npm run dev
 ```
 
