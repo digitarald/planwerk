@@ -37,12 +37,12 @@ export function classifyError(rawMessage: string, context: "connect" | "protocol
     };
   }
 
-  if (lower.includes("has not exposed a desktop agent host socket")) {
+  if (lower.includes("no live vs code editor agent host endpoint")) {
     return {
       type: "error",
       code: "connection_refused",
-      message: "VS Code has not exposed a desktop Agent Host socket",
-      hint: "Enable \"Chat: Agent Host\" in VS Code, then retry VS Code (local).",
+      message: "No live VS Code Agent Host was found",
+      hint: "Open desktop VS Code with GitHub Copilot enabled, then retry. Agent Host starts automatically and publishes an ephemeral local endpoint; there is no fixed port or separate setting.",
     };
   }
 
@@ -60,7 +60,7 @@ export function classifyError(rawMessage: string, context: "connect" | "protocol
       type: "error",
       code: "connection_refused",
       message: "Could not reach the AHP host",
-      hint: "Make sure the agent host server is running. In VS Code, enable \"Chat: Agent Host\" in settings, or start it manually with: code agent host --host 127.0.0.1 --port 8082 --without-connection-token",
+      hint: "Retry VS Code (local), or start an isolated host manually with: code agent host --host 127.0.0.1 --port 8082 --without-connection-token",
     };
   }
 

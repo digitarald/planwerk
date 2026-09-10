@@ -1,5 +1,6 @@
 export interface DesktopSocketProbe {
   socketPath: string;
+  connectionToken?: string;
   modifiedAt: number;
   sessionCount: number;
   protocolVersion: string;

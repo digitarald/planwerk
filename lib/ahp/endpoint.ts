@@ -1,6 +1,4 @@
-import { readdir, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { connect as connectSocket } from "node:net";
 
 import type { InitializeResult } from "@microsoft/agent-host-protocol";
 import {
@@ -15,6 +13,7 @@ import WebSocket, { type RawData } from "ws";
 
 import { listAllSessions } from "./catalog.ts";
 import { LOCAL_DESKTOP_HOST } from "./endpoint-config.ts";
+import { discoverLocalEditorEndpoints } from "./local-endpoint-registry.ts";
 import {
   initializeAhpClientWithForwardRetry,
   type InitializeAhpClientOptions,
@@ -28,7 +27,6 @@ import {
 import { OFFERED_PROTOCOL_VERSIONS, ProtocolCompatibilityError } from "./protocol.ts";
 import { readProtocolCompatibilityError } from "./protocol-rpc.ts";
 
-const SOCKET_NAME = /^vscode-agent-host-[0-9a-f]+\.sock$/;
 const DISCOVERY_TTL_MS = 30_000;
 
 interface PendingRead {
@@ -38,7 +36,7 @@ interface PendingRead {
 
 export interface AhpEndpointDiagnostics {
   logicalUrl: string;
-  transport: "unix-websocket" | "websocket";
+  transport: "named-pipe-websocket" | "unix-websocket" | "websocket";
   resolvedTarget: string;
   candidateCount: number;
   compatibleCandidateCount: number;
@@ -77,16 +75,24 @@ interface DesktopSocketProbeOutcome {
 
 let cachedDesktopSelection: CachedDesktopSelection | undefined;
 
-class UnixWebSocketTransport implements AhpTransport {
+class LocalSocketWebSocketTransport implements AhpTransport {
   private readonly inbox: Array<TransportFrame | null> = [];
   private readonly waiters: PendingRead[] = [];
   private readonly socket: WebSocket;
   private error: TransportError | undefined;
   private closed = false;
 
-  static connect(socketPath: string): Promise<UnixWebSocketTransport> {
+  static connect(
+    socketPath: string,
+    connectionToken?: string,
+  ): Promise<LocalSocketWebSocketTransport> {
     return new Promise((resolve, reject) => {
-      const socket = new WebSocket(`ws+unix://${socketPath}:/`);
+      const tokenQuery = connectionToken
+        ? `?tkn=${encodeURIComponent(connectionToken)}`
+        : "";
+      const socket = new WebSocket(`ws://localhost/${tokenQuery}`, {
+        createConnection: () => connectSocket(socketPath),
+      });
 
       const cleanup = () => {
         socket.off("open", onOpen);
@@ -95,7 +101,7 @@ class UnixWebSocketTransport implements AhpTransport {
       };
       const onOpen = () => {
         cleanup();
-        resolve(new UnixWebSocketTransport(socket));
+        resolve(new LocalSocketWebSocketTransport(socket));
       };
       const onError = (cause: Error) => {
         cleanup();
@@ -183,31 +189,21 @@ function implementationInfo(result: InitializeResult): {
   };
 }
 
-async function socketCandidates(): Promise<Array<{ socketPath: string; modifiedAt: number }>> {
-  const directory = tmpdir();
-  const names = await readdir(directory);
-  const candidates = await Promise.all(
-    names.filter((name) => SOCKET_NAME.test(name)).map(async (name) => {
-      const socketPath = join(directory, name);
-      try {
-        const details = await stat(socketPath);
-        return details.isSocket() ? { socketPath, modifiedAt: details.mtimeMs } : undefined;
-      } catch {
-        return undefined;
-      }
-    }),
-  );
-  return candidates.filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
-}
-
 async function probeDesktopSocket(
-  candidate: { socketPath: string; modifiedAt: number },
+  candidate: {
+    socketPath: string;
+    connectionToken?: string;
+    modifiedAt: number;
+  },
 ): Promise<DesktopSocketProbeOutcome> {
   let client: AhpClient | undefined;
   try {
     const connection = await initializeAhpClientWithForwardRetry(async () => {
-      const transport = await UnixWebSocketTransport.connect(candidate.socketPath);
-      const nextClient = new AhpClient(transport, { requestTimeoutMs: 5_000 });
+      const transport = await LocalSocketWebSocketTransport.connect(
+        candidate.socketPath,
+        candidate.connectionToken,
+      );
+      const nextClient = new AhpClient(transport, { requestTimeoutMs: 15_000 });
       nextClient.connect();
       client = nextClient;
       return nextClient;
@@ -247,11 +243,11 @@ async function discoverDesktopSocket(): Promise<CachedDesktopSelection> {
     return cachedDesktopSelection;
   }
 
-  const candidates = await socketCandidates();
+  const candidates = await discoverLocalEditorEndpoints();
   if (candidates.length === 0) {
     throw new TransportError(
       "io",
-      "VS Code is running but has not exposed a desktop Agent Host socket",
+      "No live VS Code editor Agent Host endpoint was found",
     );
   }
 
@@ -282,7 +278,7 @@ async function discoverDesktopSocket(): Promise<CachedDesktopSelection> {
     }
     throw new TransportError(
       "io",
-      `Found ${candidates.length} VS Code Agent Host socket(s), but none accepted AHP ${OFFERED_PROTOCOL_VERSIONS.join(", ")}`,
+      `Found ${candidates.length} VS Code editor Agent Host endpoint(s), but none accepted AHP ${OFFERED_PROTOCOL_VERSIONS.join(", ")}`,
     );
   }
 
@@ -299,23 +295,31 @@ async function connectDesktop(): Promise<ConnectedAhpTransport> {
   let selection = await discoverDesktopSocket();
   let transport: AhpTransport;
   try {
-    transport = await UnixWebSocketTransport.connect(selection.selected.socketPath);
+    transport = await LocalSocketWebSocketTransport.connect(
+      selection.selected.socketPath,
+      selection.selected.connectionToken,
+    );
   } catch {
     cachedDesktopSelection = undefined;
     selection = await discoverDesktopSocket();
-    transport = await UnixWebSocketTransport.connect(selection.selected.socketPath);
+    transport = await LocalSocketWebSocketTransport.connect(
+      selection.selected.socketPath,
+      selection.selected.connectionToken,
+    );
   }
 
   return {
     transport,
     diagnostics: {
       logicalUrl: LOCAL_DESKTOP_HOST,
-      transport: "unix-websocket",
+      transport: process.platform === "win32"
+        ? "named-pipe-websocket"
+        : "unix-websocket",
       resolvedTarget: selection.selected.socketPath,
       candidateCount: selection.candidateCount,
       compatibleCandidateCount: selection.compatibleCandidateCount,
       selectedSessionCount: selection.selected.sessionCount,
-      selectionReason: "largest compatible catalog, then newest socket",
+      selectionReason: "largest compatible editor catalog, then newest endpoint",
     },
   };
 }

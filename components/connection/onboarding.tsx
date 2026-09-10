@@ -67,7 +67,7 @@ export function Onboarding() {
   const isConnecting = status === "reconnecting";
   const remoteUrlValid = useMemo(() => isValidWsUrl(remoteUrl), [remoteUrl]);
   const defaultHostLabel = useMemo(() => {
-    if (DEFAULT_HOST === LOCAL_DESKTOP_HOST) return "Discover desktop Agent Host";
+    if (DEFAULT_HOST === LOCAL_DESKTOP_HOST) return "Discover registered editor Agent Host";
     try {
       const parsed = new URL(DEFAULT_HOST);
       const defaultPort = parsed.protocol === "wss:" ? "443" : "80";

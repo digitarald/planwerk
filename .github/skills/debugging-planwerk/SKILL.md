@@ -96,11 +96,13 @@ logical local endpoint:
 ```bash
 AHP_SMOKE_HOST=vscode-local://desktop npm run ahp:smoke
 ```
-It discovers `vscode-agent-host-*.sock` only in the current user's temporary directory,
-tests each candidate through an AHP handshake, and chooses the compatible host with the
-largest full paginated catalog (then newest socket, then path). The logical endpoint is
-stable even when VS Code rotates the socket; its cache key is intentionally not the
-ephemeral filesystem path.
+It reads schema-v2 editor entries from VS Code Stable and Insiders user-data registries,
+validates live processes, connects to each token-protected Unix socket, and chooses the
+compatible host with the largest full paginated catalog (then newest endpoint, then path).
+The logical endpoint is stable even when VS Code rotates the socket and connection token;
+its cache key is intentionally not the ephemeral filesystem path.
+For a VS Code instance launched with a custom `--user-data-dir`, set
+`AHP_VSCODE_USER_DATA_DIR` to that directory before starting Planwerk.
 
 The standalone TCP server is still useful for an explicit, isolated host:
 ```bash
@@ -110,16 +112,18 @@ It creates a distinct Agent Host and can therefore have a separate, empty sessio
 catalogue. Do **not** use it as evidence that the desktop catalog is empty.
 
 When the board is empty, distinguish these diagnostic states before changing code:
-- `vscode-local://desktop` reports no socket: VS Code has not exposed its on-demand
-  Agent Host socket. Enable **Chat: Agent Host** and retry; Planwerk intentionally does
-  not fall back to port 8082.
+- `vscode-local://desktop` reports no endpoint: no live editor entry was found in VS
+  Code's local endpoint registry. Desktop VS Code starts Agent Host automatically when
+  AI features are enabled; there is no fixed port or separate **Chat: Agent Host**
+  setting. Keep desktop VS Code open with GitHub Copilot enabled and retry. Planwerk
+  intentionally does not fall back to a standalone host.
 - The selected host has `totalSessions: 0`: the host catalog itself is empty.
 - `totalSessions > 0` with `visibleSessions: 0`: every catalog entry was filtered
   because it is archived without code changes. This is an intentional board filter.
-- Multiple compatible socket candidates: diagnostics record the chosen catalog size and
+- Multiple compatible editor candidates: diagnostics record the chosen catalog size and
   selection rule. A host with more sessions wins, so an empty standalone instance cannot
   hide an active desktop catalog.
-- No compatible socket candidates: Planwerk preserves structured handshake evidence. When
+- No compatible editor candidates: Planwerk preserves structured handshake evidence. When
   every candidate proves a protocol mismatch and exact versions make the direction
   provable, the connection error says whether every host is older or newer than Planwerk;
   mixed exact versions are reported as no tested overlap. If any candidate instead fails
