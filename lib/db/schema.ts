@@ -3,6 +3,16 @@ import "server-only";
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
+import { ensureCtoContinuitySchema } from "./cto-continuity-schema";
+import { ensureSdkObservabilitySchema } from "./sdk-observability-schema";
+import { ensureReviewChatCleanupSchema } from "./review-chat-cleanup-schema";
+import { ensureCardRiskSchema } from "./card-risk-schema";
+import { ensureReviewRunSchema } from "./review-run-schema";
+import { runSchemaMigration, tableColumns } from "./schema-migration";
+import {
+  ensureWorkLeaseSchema,
+  recoverExpiredWork,
+} from "./work-lease-schema";
 
 let db: Database.Database | null = null;
 
@@ -13,6 +23,7 @@ export function getDb(): Database.Database {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
     db = new Database(dbPath);
+    db.pragma("busy_timeout = 5000");
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
 
@@ -35,6 +46,8 @@ export function getDb(): Database.Database {
         started_at TEXT NOT NULL DEFAULT (datetime('now')),
         completed_at TEXT,
         changeset_ref TEXT,
+        owner_id TEXT,
+        lease_expires_at_ms INTEGER,
         FOREIGN KEY (card_id) REFERENCES card_phases(card_id)
       );
 
@@ -53,14 +66,6 @@ export function getDb(): Database.Database {
         summary_json TEXT NOT NULL,
         enrichment_json TEXT,
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-
-      CREATE TABLE IF NOT EXISTS card_risk (
-        card_id TEXT PRIMARY KEY,
-        risk_level TEXT NOT NULL DEFAULT 'low',
-        risk_factors TEXT NOT NULL DEFAULT '[]',
-        assessed_at TEXT NOT NULL DEFAULT (datetime('now')),
-        assessed_by TEXT NOT NULL DEFAULT 'copilot'
       );
 
       CREATE INDEX IF NOT EXISTS idx_gate_runs_card ON gate_runs(card_id);
@@ -83,6 +88,19 @@ export function getDb(): Database.Database {
         changeset_ref TEXT,
         turn_id TEXT,
         chat_uri TEXT,
+        chat_cleanup_status TEXT CHECK (
+          chat_cleanup_status IS NULL OR
+          chat_cleanup_status IN ('pending', 'completed', 'error')
+        ),
+        chat_cleanup_error TEXT,
+        chat_cleanup_attempts INTEGER NOT NULL DEFAULT 0,
+        chat_cleanup_last_attempt_at TEXT,
+        judgment_owner_id TEXT,
+        judgment_lease_expires_at_ms INTEGER,
+        start_owner_id TEXT,
+        start_lease_expires_at_ms INTEGER,
+        dispatch_host_url TEXT,
+        dispatch_chat_disposable INTEGER,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
 
@@ -136,6 +154,8 @@ export function getDb(): Database.Database {
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         resolved_at TEXT,
         resolved_by TEXT,
+        review_owner_id TEXT,
+        review_lease_expires_at_ms INTEGER,
         UNIQUE (card_a, card_b)
       );
 
@@ -144,64 +164,31 @@ export function getDb(): Database.Database {
       CREATE INDEX IF NOT EXISTS idx_coherence_card_b ON coherence_conflicts(card_b);
     `);
 
-    // Restart recovery: a pair left mid-review (async executor interrupted by a
-    // process restart) would otherwise strand in 'reviewing' forever. Reset it to
-    // 'detected' so the executor re-claims it — mirrors the gate_runs 'running' reset.
-    db.prepare(
-      "UPDATE coherence_conflicts SET status = 'detected', updated_at = datetime('now') WHERE status = 'reviewing'"
-    ).run();
+    ensureSdkObservabilitySchema(db);
+    ensureCtoContinuitySchema(db);
 
-    // Mark any gate runs left running from a previous process as failed
-    db.prepare(
-      "UPDATE gate_runs SET status = 'failed', output = 'Abandoned: server restarted — re-run this gate', completed_at = datetime('now') WHERE status = 'running'"
-    ).run();
+    runSchemaMigration(db, () => {
+      const gateRunsColumns = tableColumns(db!, "gate_runs");
+      if (!gateRunsColumns.has("gate_name")) {
+        db!.exec("ALTER TABLE gate_runs ADD COLUMN gate_name TEXT;");
+        gateRunsColumns.add("gate_name");
+      }
+      if (!gateRunsColumns.has("changeset_ref")) {
+        db!.exec("ALTER TABLE gate_runs ADD COLUMN changeset_ref TEXT;");
+      }
+    });
 
-    const gateRunsColumns = db
-      .prepare("PRAGMA table_info(gate_runs)")
-      .all() as Array<{ name: string }>;
+    // A dispatching review durably reserves its host/chat/turn identity before
+    // the prompt side effect. Confirmed queued messages clear turn_id because
+    // their message id is not guaranteed to become the eventual Turn.id.
+    // Cleanup belongs to an immutable peer-chat URI, not to the mutable review
+    // iteration row. Import legacy diagnostics once and independently retry them.
+    ensureReviewRunSchema(db);
+    ensureWorkLeaseSchema(db);
+    ensureReviewChatCleanupSchema(db);
+    recoverExpiredWork(db);
 
-    if (!gateRunsColumns.some((column) => column.name === "gate_name")) {
-      db.exec("ALTER TABLE gate_runs ADD COLUMN gate_name TEXT;");
-    }
-
-    if (!gateRunsColumns.some((column) => column.name === "changeset_ref")) {
-      db.exec("ALTER TABLE gate_runs ADD COLUMN changeset_ref TEXT;");
-    }
-
-    // review_runs.turn_id/chat_uri identify the exact review turn. chat_uri is
-    // populated for peer-chat plan gates; older/default-chat reviews leave it
-    // null and resolve through the session's default chat.
-    const reviewRunsColumns = db
-      .prepare("PRAGMA table_info(review_runs)")
-      .all() as Array<{ name: string }>;
-
-    if (!reviewRunsColumns.some((column) => column.name === "turn_id")) {
-      db.exec("ALTER TABLE review_runs ADD COLUMN turn_id TEXT;");
-    }
-    if (!reviewRunsColumns.some((column) => column.name === "chat_uri")) {
-      db.exec("ALTER TABLE review_runs ADD COLUMN chat_uri TEXT;");
-    }
-
-    // Migrate card_risk: remove legacy FK constraint on card_id → card_phases
-    const cardRiskFKs = db
-      .prepare("PRAGMA foreign_key_list(card_risk)")
-      .all() as Array<{ table: string }>;
-    if (cardRiskFKs.length > 0) {
-      db.pragma("foreign_keys = OFF");
-      db.exec(`
-        CREATE TABLE card_risk_new (
-          card_id TEXT PRIMARY KEY,
-          risk_level TEXT NOT NULL DEFAULT 'low',
-          risk_factors TEXT NOT NULL DEFAULT '[]',
-          assessed_at TEXT NOT NULL DEFAULT (datetime('now')),
-          assessed_by TEXT NOT NULL DEFAULT 'copilot'
-        );
-        INSERT INTO card_risk_new SELECT * FROM card_risk;
-        DROP TABLE card_risk;
-        ALTER TABLE card_risk_new RENAME TO card_risk;
-      `);
-      db.pragma("foreign_keys = ON");
-    }
+    ensureCardRiskSchema(db);
 
     db.exec(`
       UPDATE card_phases SET phase = 'review' WHERE phase = 'verify';
