@@ -1,8 +1,22 @@
 import "server-only";
 
-import type { SessionChatInputRequest, SessionLifecycle, SessionState, Turn } from "@microsoft/agent-host-protocol";
+import {
+  sessionReducer,
+  type SessionAction,
+  type SessionChatInputRequest,
+  type SessionState,
+  type Turn,
+} from "@microsoft/agent-host-protocol";
+import type {
+  AhpClient,
+  Subscription,
+} from "@microsoft/agent-host-protocol/client";
 
-import { getAHPClient, releaseAHPClient } from "./client-manager";
+import {
+  awaitAbortableBoundary,
+  throwIfAborted,
+} from "../abort.ts";
+import { withAHPClient } from "./client-operation";
 import { asSessionState, readChatState, readRootState, readSessionState } from "./snapshot";
 import { AHPStatus, parseAHPStatus } from "./types";
 import { buildPlanFeedbackAnswer } from "./answer-value";
@@ -22,6 +36,18 @@ import {
   chatInputCompleted,
   sessionIsArchivedChanged,
 } from "./actions";
+import {
+  dispatchAndConfirm,
+  MessageDispatchAmbiguousError,
+} from "./dispatch-confirmation";
+import {
+  createPeerChatWithCleanupOnFailure,
+  dispatchPeerChatReviewWithClient,
+  disposePeerChatAfterFailure,
+  PeerChatCleanupRequiredError,
+} from "./peer-review-dispatch";
+
+export { MessageDispatchAmbiguousError } from "./dispatch-confirmation";
 
 const debug = (...args: unknown[]) => {
   if (process.env.AHP_DEBUG) console.info("[ahp:messenger]", ...args);
@@ -31,7 +57,7 @@ const debug = (...args: unknown[]) => {
  * Extract the defaultChat URI and session status from a session subscription.
  */
 async function getSessionContext(
-  client: Awaited<ReturnType<typeof getAHPClient>>,
+  client: AhpClient,
   sessionUri: string
 ): Promise<{ chatUri: string | null; status: number; isInProgress: boolean }> {
   const sessionState = await readSessionState(client, sessionUri);
@@ -50,45 +76,102 @@ async function getSessionContext(
  * If the session is active → dispatches chat/pendingMessageSet with kind "queued"
  * so the message is delivered after the current turn finishes.
  */
-export async function injectMessage(
+export async function injectMessageWithClient(
+  client: AhpClient,
+  sessionUri: string,
+  message: string,
+  signal?: AbortSignal,
+  beforeDispatch?: (identity: {
+    chatUri: string;
+    turnId: string;
+    disposablePeerChat: boolean;
+  }) => void,
+): Promise<{
+  turnId: string;
+  chatUri?: string;
+  success: boolean;
+  queued?: boolean;
+}> {
+  throwIfAborted(signal);
+  const { chatUri, isInProgress } = await awaitAbortableBoundary(
+    () => getSessionContext(client, sessionUri),
+    signal,
+  );
+
+  if (!chatUri) {
+    debug("No chat channel found for", sessionUri);
+    return { turnId: "", success: false };
+  }
+
+  const messageId = crypto.randomUUID();
+
+  if (isInProgress) {
+    // Session is active — queue the message for delivery after current turn
+    beforeDispatch?.({
+      chatUri,
+      turnId: messageId,
+      disposablePeerChat: false,
+    });
+    await dispatchAndConfirm(
+      client,
+      chatUri,
+      chatQueuedMessage(messageId, message),
+      "The queued message may have been dispatched before the transport failed.",
+      signal,
+    );
+
+    debug("Queued message for", sessionUri, "id:", messageId);
+    return { turnId: messageId, chatUri, success: true, queued: true };
+  }
+
+  // Session is idle — start a new turn directly
+  beforeDispatch?.({
+    chatUri,
+    turnId: messageId,
+    disposablePeerChat: false,
+  });
+  await dispatchAndConfirm(
+    client,
+    chatUri,
+    chatTurnStarted(messageId, message),
+    "The message may have been dispatched before the transport failed.",
+    signal,
+  );
+
+  debug("Injected message into", sessionUri, "turnId:", messageId);
+  return { turnId: messageId, chatUri, success: true };
+}
+
+export function injectMessage(
   hostUrl: string,
   sessionUri: string,
-  message: string
-): Promise<{ turnId: string; success: boolean; queued?: boolean }> {
-  const client = await getAHPClient(hostUrl);
-
-  try {
-    const { chatUri, isInProgress } = await getSessionContext(client, sessionUri);
-
-    if (!chatUri) {
-      debug("No chat channel found for", sessionUri);
-      return { turnId: "", success: false };
-    }
-
-    const messageId = crypto.randomUUID();
-
-    if (isInProgress) {
-      // Session is active — queue the message for delivery after current turn
-      client.dispatch(chatUri, chatQueuedMessage(messageId, message));
-
-      // Verify dispatch reached the server via a ping
-      await client.ping();
-
-      debug("Queued message for", sessionUri, "id:", messageId);
-      return { turnId: messageId, success: true, queued: true };
-    }
-
-    // Session is idle — start a new turn directly
-    client.dispatch(chatUri, chatTurnStarted(messageId, message));
-
-    // Verify dispatch reached the server
-    await client.ping();
-
-    debug("Injected message into", sessionUri, "turnId:", messageId);
-    return { turnId: messageId, success: true };
-  } finally {
-    releaseAHPClient(hostUrl);
-  }
+  message: string,
+  options?: {
+    signal?: AbortSignal;
+    beforeDispatch?: (identity: {
+      chatUri: string;
+      turnId: string;
+      disposablePeerChat: boolean;
+    }) => void;
+  },
+): Promise<{
+  turnId: string;
+  chatUri?: string;
+  success: boolean;
+  queued?: boolean;
+}> {
+  return withAHPClient(
+    hostUrl,
+    (client) =>
+      injectMessageWithClient(
+        client,
+        sessionUri,
+        message,
+        options?.signal,
+        options?.beforeDispatch,
+      ),
+    options?.signal,
+  );
 }
 
 export interface PeerChatReviewStart {
@@ -96,6 +179,7 @@ export interface PeerChatReviewStart {
   chatUri?: string;
   turnId?: string;
   reason?: string;
+  failureKind?: "pre-dispatch" | "ambiguous-disposed";
 }
 
 /**
@@ -108,64 +192,97 @@ export async function startPeerChatReview(
   sessionUri: string,
   requestId: string,
   message: string,
+  options?: {
+    signal?: AbortSignal;
+    beforeDispatch?: (identity: {
+      chatUri: string;
+      turnId: string;
+      disposablePeerChat: boolean;
+    }) => void;
+  },
 ): Promise<PeerChatReviewStart> {
-  const client = await getAHPClient(hostUrl);
-  let reviewChatUri: string | undefined;
+  const signal = options?.signal;
+  return withAHPClient(hostUrl, async (client) => {
+    let reviewChatUri: string | undefined;
+    let reviewChatCreated = false;
 
-  try {
-    const [sessionState, rootState] = await Promise.all([
-      readSessionState(client, sessionUri),
-      readRootState(client),
-    ]);
-    if (!sessionState) {
-      return { success: false, reason: "Session state is unavailable." };
-    }
-    if (!supportsPeerChats(rootState, sessionState.provider)) {
-      return {
-        success: false,
-        reason: `Agent provider ${sessionState.provider} does not advertise multi-chat support.`,
-      };
-    }
+    try {
+      throwIfAborted(signal);
+      const [sessionState, rootState] = await awaitAbortableBoundary(
+        () =>
+          Promise.all([
+            readSessionState(client, sessionUri),
+            readRootState(client),
+          ]),
+        signal,
+      );
+      if (!sessionState) {
+        return { success: false, reason: "Session state is unavailable." };
+      }
+      if (!supportsPeerChats(rootState, sessionState.provider)) {
+        return {
+          success: false,
+          reason: `Agent provider ${sessionState.provider} does not advertise multi-chat support.`,
+        };
+      }
 
-    const input = findChatInput(sessionState.inputNeeded, requestId);
-    if (!input) {
-      return { success: false, reason: "The pending plan request is stale." };
-    }
+      const input = findChatInput(sessionState.inputNeeded, requestId);
+      if (!input) {
+        return { success: false, reason: "The pending plan request is stale." };
+      }
 
-    const params = buildCreatePeerChatParams(sessionUri, crypto.randomUUID());
-    reviewChatUri = params.chat;
-    await client.request("createChat", params);
-
-    const turnId = crypto.randomUUID();
-    client.dispatch(reviewChatUri, chatTurnStarted(turnId, message));
-    await client.ping();
-    debug(
-      "Started peer-chat review",
-      { sessionUri, requestChat: input.chat, reviewChatUri, turnId },
-    );
-    return { success: true, chatUri: reviewChatUri, turnId };
-  } catch (error) {
-    if (reviewChatUri) {
-      await client.request("disposeChat", { channel: reviewChatUri }).catch(() => {});
+      const params = buildCreatePeerChatParams(sessionUri, crypto.randomUUID());
+      reviewChatUri = params.chat;
+      throwIfAborted(signal);
+      await createPeerChatWithCleanupOnFailure(client, params);
+      reviewChatCreated = true;
+      throwIfAborted(signal);
+      const turnId = crypto.randomUUID();
+      options?.beforeDispatch?.({
+        chatUri: reviewChatUri,
+        turnId,
+        disposablePeerChat: true,
+      });
+      const result = await dispatchPeerChatReviewWithClient(
+        client,
+        reviewChatUri,
+        turnId,
+        message,
+        signal,
+      );
+      if (!result.success) return result;
+      debug(
+        "Started peer-chat review",
+        { sessionUri, requestChat: input.chat, reviewChatUri, turnId },
+      );
+      return result;
+    } catch (error) {
+      if (
+        error instanceof MessageDispatchAmbiguousError
+        || error instanceof PeerChatCleanupRequiredError
+      ) {
+        throw error;
+      }
+      if (reviewChatCreated && reviewChatUri) {
+        await disposePeerChatAfterFailure(client, reviewChatUri, error, {
+          context: "Peer review setup failed",
+        });
+      }
+      throwIfAborted(signal);
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn("[ahp:review] Failed to start peer chat:", reason);
+      return { success: false, reason };
     }
-    const reason = error instanceof Error ? error.message : String(error);
-    console.warn("[ahp:review] Failed to start peer chat:", reason);
-    return { success: false, reason };
-  } finally {
-    releaseAHPClient(hostUrl);
-  }
+  }, signal);
 }
 
 export async function disposePeerChat(
   hostUrl: string,
   chatUri: string,
 ): Promise<void> {
-  const client = await getAHPClient(hostUrl);
-  try {
+  return withAHPClient(hostUrl, async (client) => {
     await client.request("disposeChat", { channel: chatUri });
-  } finally {
-    releaseAHPClient(hostUrl);
-  }
+  });
 }
 
 /** Find a mirrored chat elicitation in `inputNeeded` by its `ChatInputRequest.id`. */
@@ -206,76 +323,109 @@ function findChatInput(
  * dispatched. A dispatched-but-not-applied answer returns
  * `{ success: false, stale: false }`.
  */
-export async function answerInput(
-  hostUrl: string,
+export async function answerInputWithClient(
+  client: AhpClient,
   sessionUri: string,
   requestId: string,
   response: "accept" | "decline" | "cancel",
   answers?: Record<string, unknown>,
-  options?: { verifyTimeoutMs?: number; pollIntervalMs?: number },
+  options?: {
+    verifyTimeoutMs?: number;
+    pollIntervalMs?: number;
+    signal?: AbortSignal;
+  },
 ): Promise<{ success: boolean; stale?: boolean }> {
   const verifyTimeoutMs = options?.verifyTimeoutMs ?? 3_000;
   const pollMs = options?.pollIntervalMs ?? 400;
-  const client = await getAHPClient(hostUrl);
+  const signal = options?.signal;
 
-  try {
-    const sessionState = await readSessionState(client, sessionUri);
-    const inputNeeded = sessionState?.inputNeeded;
+  throwIfAborted(signal);
+  const sessionState = await awaitAbortableBoundary(
+    () => readSessionState(client, sessionUri),
+    signal,
+  );
+  const inputNeeded = sessionState?.inputNeeded;
 
-    if (!hasObservedInputNeeded(inputNeeded)) {
-      debug("Input aggregate unavailable; not dispatching:", requestId);
-      return { success: false };
+  if (!hasObservedInputNeeded(inputNeeded)) {
+    debug("Input aggregate unavailable; not dispatching:", requestId);
+    return { success: false };
+  }
+
+  const chatEntry = findChatInput(inputNeeded, requestId);
+  if (!chatEntry) {
+    debug("Input request not found (stale):", requestId);
+    return { success: false, stale: true };
+  }
+
+  const chatUri = chatEntry.chat;
+
+  // Dispatch answers
+  if (answers) {
+    for (const [questionId, answer] of Object.entries(answers)) {
+      throwIfAborted(signal);
+      client.dispatch(chatUri, chatInputAnswerChanged(requestId, questionId, answer));
     }
+  }
 
-    const chatEntry = findChatInput(inputNeeded, requestId);
-    if (!chatEntry) {
-      debug("Input request not found (stale):", requestId);
-      return { success: false, stale: true };
-    }
-
-    const chatUri = chatEntry.chat;
-
-    // Dispatch answers
-    if (answers) {
-      for (const [questionId, answer] of Object.entries(answers)) {
-        client.dispatch(chatUri, chatInputAnswerChanged(requestId, questionId, answer));
-      }
-    }
-
-    // Dispatch completion
-    client.dispatch(chatUri, chatInputCompleted(requestId, response, answers));
+  // Dispatch completion
+  throwIfAborted(signal);
+  client.dispatch(chatUri, chatInputCompleted(requestId, response, answers));
 
     // Flush the dispatch, then verify the host actually consumed the request.
     // `ping` alone only proves the frames reached the server — not that the
     // answer was applied — so poll `inputNeeded` (bounded) for the request to
     // disappear before reporting success.
-    await client.ping();
+  await client.ping();
 
-    const isRemoved = (state: SessionState | undefined): boolean =>
-      isInputObservedRemoved(state?.inputNeeded, requestId);
+  const isRemoved = (state: SessionState | undefined): boolean =>
+    isInputObservedRemoved(state?.inputNeeded, requestId);
 
-    const deadline = Date.now() + verifyTimeoutMs;
-    let applied = false;
-    for (;;) {
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
-      const after = await readSessionState(client, sessionUri);
-      if (isRemoved(after)) {
-        applied = true;
-        break;
-      }
-      if (Date.now() >= deadline) break;
+  const deadline = Date.now() + verifyTimeoutMs;
+  let applied = false;
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    const after = await readSessionState(client, sessionUri);
+    if (isRemoved(after)) {
+      applied = true;
+      break;
     }
-
-    if (!applied) {
-      debug("Answer dispatched but request not consumed (not applied):", requestId, "on", sessionUri);
-      return { success: false };
-    }
-
-    debug("Answered input", requestId, "on", sessionUri, "(applied)");
-    return { success: true };
-  } finally {
-    releaseAHPClient(hostUrl);
+    if (Date.now() >= deadline) break;
   }
+
+  if (!applied) {
+    debug("Answer dispatched but request not consumed (not applied):", requestId, "on", sessionUri);
+    return { success: false };
+  }
+
+  debug("Answered input", requestId, "on", sessionUri, "(applied)");
+  return { success: true };
+}
+
+export function answerInput(
+  hostUrl: string,
+  sessionUri: string,
+  requestId: string,
+  response: "accept" | "decline" | "cancel",
+  answers?: Record<string, unknown>,
+  options?: {
+    verifyTimeoutMs?: number;
+    pollIntervalMs?: number;
+    signal?: AbortSignal;
+  },
+): Promise<{ success: boolean; stale?: boolean }> {
+  return withAHPClient(
+    hostUrl,
+    (client) =>
+      answerInputWithClient(
+        client,
+        sessionUri,
+        requestId,
+        response,
+        answers,
+        options,
+      ),
+    options?.signal,
+  );
 }
 
 /**
@@ -315,9 +465,8 @@ export async function waitForIdle(
   const deadline = Date.now() + timeoutMs;
   let currentPollMs = basePollMs;
 
-  while (Date.now() < deadline) {
-    const client = await getAHPClient(hostUrl);
-    try {
+  return withAHPClient(hostUrl, async (client) => {
+    while (Date.now() < deadline) {
       const sessionState = await readSessionState(client, sessionUri);
       const status = sessionState?.status ?? 0;
       const parsed = parseAHPStatus(status);
@@ -329,17 +478,15 @@ export async function waitForIdle(
       if (parsed.isError) {
         return { idle: true };
       }
-    } finally {
-      releaseAHPClient(hostUrl);
+
+      await new Promise((resolve) => setTimeout(resolve, currentPollMs));
+      // Exponential backoff: 3s → 4.5s → 6.75s → ... capped at 30s
+      currentPollMs = Math.min(currentPollMs * 1.5, maxPollMs);
     }
 
-    await new Promise((resolve) => setTimeout(resolve, currentPollMs));
-    // Exponential backoff: 3s → 4.5s → 6.75s → ... capped at 30s
-    currentPollMs = Math.min(currentPollMs * 1.5, maxPollMs);
-  }
-
-  debug("waitForIdle timed out for", sessionUri);
-  return { idle: false, timedOut: true };
+    debug("waitForIdle timed out for", sessionUri);
+    return { idle: false, timedOut: true };
+  });
 }
 
 /**
@@ -357,16 +504,13 @@ export async function fetchLastTurns(
   sessionUri: string,
   limit: number = 5
 ): Promise<{ turns: Turn[]; hasMore: boolean }> {
-  const client = await getAHPClient(hostUrl);
-  try {
+  return withAHPClient(hostUrl, async (client) => {
     const { chatUri } = await getSessionContext(client, sessionUri);
     const chatState = await readChatState(client, chatUri ?? sessionUri);
     const allTurns = chatState?.turns ?? [];
     const turns = limit > 0 ? allTurns.slice(-limit) : allTurns;
     return { turns, hasMore: Boolean(chatState?.turnsNextCursor) };
-  } finally {
-    releaseAHPClient(hostUrl);
-  }
+  });
 }
 
 /**
@@ -401,13 +545,10 @@ export async function fetchChatTurnById(
   chatUri: string,
   turnId: string,
 ): Promise<Turn | undefined> {
-  const client = await getAHPClient(hostUrl);
-  try {
+  return withAHPClient(hostUrl, async (client) => {
     const chatState = await readChatState(client, chatUri);
     return chatState?.turns.find((turn) => turn.id === turnId);
-  } finally {
-    releaseAHPClient(hostUrl);
-  }
+  });
 }
 
 /**
@@ -423,8 +564,7 @@ export async function getSessionStatus(
   isInProgress: boolean;
   isInputNeeded: boolean;
 } | null> {
-  const client = await getAHPClient(hostUrl);
-  try {
+  return withAHPClient(hostUrl, async (client) => {
     const sessionState = await readSessionState(client, sessionUri);
     const status = sessionState?.status ?? 0;
     const parsed = parseAHPStatus(status);
@@ -433,12 +573,8 @@ export async function getSessionStatus(
       status,
       ...parsed,
     };
-  } finally {
-    releaseAHPClient(hostUrl);
-  }
+  });
 }
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Archive (or unarchive) a session via the client-dispatchable
@@ -450,79 +586,108 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  *   1. keep the session subscribed (a single `unsubscribe` at the end) so the host
  *      holds it resident,
  *   2. gate the dispatch on `lifecycle === "ready"`,
- *   3. dispatch, then *verify* by re-reading `summary.status` (a `ping` only flushes
- *      the transport — it does not confirm the action was applied),
+ *   3. dispatch, then *verify* by reducing authoritative session actions from the
+ *      original subscription (a `ping` only flushes the transport — it does not
+ *      confirm the action was applied),
  *   4. re-dispatch once and fail if the bit never appears, so callers can revert.
  */
 export async function setSessionArchived(
   hostUrl: string,
   sessionUri: string,
   isArchived: boolean,
-  options?: { readyTimeoutMs?: number; verifyTimeoutMs?: number; pollIntervalMs?: number }
+  options?: { readyTimeoutMs?: number; verifyTimeoutMs?: number }
 ): Promise<{ success: boolean; status: number; verified: boolean }> {
   const readyTimeoutMs = options?.readyTimeoutMs ?? 15_000;
   const verifyTimeoutMs = options?.verifyTimeoutMs ?? 8_000;
-  const pollMs = options?.pollIntervalMs ?? 1_000;
   const targetArchived = isArchived;
 
-  const client = await getAHPClient(hostUrl);
+  return withAHPClient(hostUrl, async (client) => {
+    const matchesTarget = (status: number) =>
+      ((status & AHPStatus.IsArchived) !== 0) === targetArchived;
 
-  // Read a fresh server snapshot without dropping the subscription, so the host
-  // keeps the session resident across reads/dispatch. `unsubscribe` runs once in
-  // the finally block.
-  const read = async (): Promise<{ lifecycle: SessionLifecycle | undefined; status: number }> => {
-    const { result, subscription } = await client.subscribe(sessionUri);
-    void subscription.close();
-    const state = asSessionState(result.snapshot);
-    return { lifecycle: state?.lifecycle, status: state?.status ?? 0 };
-  };
+    const initial = await client.subscribe(sessionUri);
+    let subscription: Subscription = initial.subscription;
+    let state = asSessionState(initial.result.snapshot);
 
-  const matchesTarget = (status: number) =>
-    ((status & AHPStatus.IsArchived) !== 0) === targetArchived;
+    const waitForState = async (
+      predicate: (current: SessionState | undefined) => boolean,
+      deadline: number,
+    ): Promise<boolean> => {
+      while (!predicate(state) && Date.now() < deadline) {
+        const timeout = Symbol("timeout");
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const remainingMs = Math.max(0, deadline - Date.now());
+        const next = await Promise.race([
+          subscription.next(),
+          new Promise<typeof timeout>((resolve) => {
+            timer = setTimeout(() => resolve(timeout), remainingMs);
+          }),
+        ]);
+        if (timer) clearTimeout(timer);
 
-  try {
-    // 1. Readiness gate — wait until the host reports the session loaded.
-    let snapshot = await read();
-    const readyDeadline = Date.now() + readyTimeoutMs;
-    while (snapshot.lifecycle !== "ready" && Date.now() < readyDeadline) {
-      await sleep(pollMs);
-      snapshot = await read();
-    }
-
-    // Already in the desired state — nothing to dispatch.
-    if (matchesTarget(snapshot.status)) {
-      debug("setSessionArchived: already in target state", sessionUri, snapshot.status);
-      return { success: true, status: snapshot.status, verified: true };
-    }
-
-    // 2. Dispatch the archive/unarchive action on the session channel.
-    client.dispatch(sessionUri, sessionIsArchivedChanged(isArchived));
-    await client.ping();
-
-    // 3. Verify the summary actually reflects the change (with one re-dispatch).
-    const verifyDeadline = Date.now() + verifyTimeoutMs;
-    let redispatched = false;
-    let lastStatus = snapshot.status;
-    while (Date.now() < verifyDeadline) {
-      await sleep(pollMs);
-      const { status } = await read();
-      lastStatus = status;
-      if (matchesTarget(status)) {
-        debug("setSessionArchived: verified", sessionUri, status);
-        return { success: true, status, verified: true };
+        if (next === timeout) {
+          await subscription.close();
+          subscription = client.attachSubscription(sessionUri);
+          return false;
+        }
+        if (next.done) return false;
+        if (next.value.type === "action" && state) {
+          state = sessionReducer(
+            state,
+            next.value.params.action as SessionAction,
+          );
+        }
       }
-      if (!redispatched && Date.now() > verifyDeadline - verifyTimeoutMs / 2) {
+      return predicate(state);
+    };
+
+    try {
+      // 1. Readiness gate — wait until the host reports the session loaded.
+      await waitForState(
+        (current) => current?.lifecycle === "ready",
+        Date.now() + readyTimeoutMs,
+      );
+
+      // Already in the desired state — nothing to dispatch.
+      if (matchesTarget(state?.status ?? 0)) {
+        debug("setSessionArchived: already in target state", sessionUri, state?.status ?? 0);
+        return { success: true, status: state?.status ?? 0, verified: true };
+      }
+
+      // 2. Dispatch the archive/unarchive action on the session channel.
+      client.dispatch(sessionUri, sessionIsArchivedChanged(isArchived));
+      await client.ping();
+
+      // 3. Verify the summary actually reflects the change (with one re-dispatch).
+      const verifyDeadline = Date.now() + verifyTimeoutMs;
+      const firstAttemptDeadline = verifyDeadline - verifyTimeoutMs / 2;
+      if (!await waitForState(
+        (current) => matchesTarget(current?.status ?? 0),
+        firstAttemptDeadline,
+      )) {
         debug("setSessionArchived: re-dispatching", sessionUri);
         client.dispatch(sessionUri, sessionIsArchivedChanged(isArchived));
         await client.ping();
-        redispatched = true;
+        await waitForState(
+          (current) => matchesTarget(current?.status ?? 0),
+          verifyDeadline,
+        );
+      }
+
+      const lastStatus = state?.status ?? 0;
+      if (matchesTarget(lastStatus)) {
+        debug("setSessionArchived: verified", sessionUri, lastStatus);
+        return { success: true, status: lastStatus, verified: true };
+      }
+
+      debug("setSessionArchived: unverified after timeout", sessionUri, lastStatus);
+      return { success: false, status: lastStatus, verified: false };
+    } finally {
+      try {
+        await subscription.close();
+      } finally {
+        await client.unsubscribe(sessionUri).catch(() => {});
       }
     }
-
-    debug("setSessionArchived: unverified after timeout", sessionUri, lastStatus);
-    return { success: false, status: lastStatus, verified: false };
-  } finally {
-    await client.unsubscribe(sessionUri).catch(() => {});
-    releaseAHPClient(hostUrl);
-  }
+  });
 }

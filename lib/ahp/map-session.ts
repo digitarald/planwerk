@@ -292,6 +292,39 @@ export function mapSessionToCard(
   // but flag it unverified so the gate engine won't trust those counts as a
   // freshness signal (they accumulate across every agent sharing the dir).
   const changesetVerified = enrichment?.changesetVerified === true;
+  const summarySource = (
+    session as AHPSessionSummary & {
+      _planwerkRiskFacts?: {
+        sourceRevision?: unknown;
+        planVersion?: unknown;
+        contentRevision?: unknown;
+      };
+    }
+  )._planwerkRiskFacts;
+  const enrichmentSource = (
+    enrichment as (ChangesetEnrichment & {
+      _planwerkSource?: {
+        sourceRevision?: unknown;
+        planVersion?: unknown;
+        contentRevision?: unknown;
+      };
+    }) | null | undefined
+  )?._planwerkSource;
+  const sourceRevision =
+    changesetVerified &&
+    typeof enrichmentSource?.sourceRevision === "string" &&
+    enrichmentSource.sourceRevision.length > 0 &&
+    (
+      summarySource === undefined ||
+      (
+        summarySource.sourceRevision === enrichmentSource.sourceRevision &&
+        summarySource.planVersion === enrichmentSource.planVersion &&
+        (summarySource.contentRevision ?? null) ===
+          (enrichmentSource.contentRevision ?? null)
+      )
+    )
+      ? enrichmentSource.sourceRevision
+      : undefined;
   const additions = changesetVerified ? enrichment!.additions : (session.changes?.additions || 0);
   const deletions = changesetVerified ? enrichment!.deletions : (session.changes?.deletions || 0);
   const filesChanged = changesetVerified ? enrichment!.totalFileCount : (session.changes?.files || 0);
@@ -308,12 +341,13 @@ export function mapSessionToCard(
         : runtime === "error"
           ? "error"
           : "none",
-    risk: persistedRisk ?? "low",
+    risk: persistedRisk ?? "high",
     activity: session.activity || (runtime === "running" ? "Thinking" : ""),
     additions,
     deletions,
     filesChanged,
     changesetVerified,
+    sourceRevision,
     planContentHash: enrichment?.planContentHash,
     planSteps: { total: 0, done: 0 },
     modifiedAt: new Date(session.modifiedAt).getTime(),

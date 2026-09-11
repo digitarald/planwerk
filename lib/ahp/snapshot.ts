@@ -8,10 +8,6 @@ import type {
   Snapshot,
 } from "@microsoft/agent-host-protocol";
 
-import { asChangesetState } from "./changeset-readiness";
-
-export { asChangesetState } from "./changeset-readiness";
-
 /**
  * Typed access to AHP channel snapshots.
  *
@@ -89,15 +85,4 @@ export async function readChatState(
   void subscription.close();
   await client.unsubscribe(chatUri).catch(() => {});
   return asChatState(result.snapshot);
-}
-
-/** One-shot read of an already-selected static changeset channel. */
-export async function readChangesetState(
-  client: AhpClient,
-  changesetUri: string,
-): Promise<ReturnType<typeof asChangesetState>> {
-  const { result, subscription } = await client.subscribe(changesetUri);
-  void subscription.close();
-  await client.unsubscribe(changesetUri).catch(() => {});
-  return asChangesetState(result.snapshot);
 }

@@ -182,6 +182,9 @@ export interface KanbanCard {
    *  changes across every agent sharing the working directory — so those counts
    *  (and any changeset ref built from them) are NOT a reliable freshness signal. */
   changesetVerified?: boolean;
+  /** Host-owned revision for the source facts paired with the verified
+   *  session changeset. Code-gate freshness binds to this opaque identity. */
+  sourceRevision?: string;
   /** Opaque freshness ref for the plan artifact (`plan:<hash>`), when a plan is
    *  present. Plan-phase reviews (`plan->build`) key their staleness on this, not
    *  the code diff — a plan review reviews the plan, and unrelated code churn (or
@@ -283,27 +286,35 @@ export function isPlanChangesetRef(ref?: string): boolean {
   return typeof ref === "string" && ref.startsWith("plan:");
 }
 
+export function isSourceChangesetRef(ref?: string): boolean {
+  return typeof ref === "string" && ref.startsWith("source:");
+}
+
+export function sourceChangesetRef(sourceRevision: string): string {
+  return `source:${encodeURIComponent(sourceRevision)}`;
+}
+
 /** Normalize a stored changeset ref to its comparable identity.
  *  - Empty/absent → "" (unknown; callers treat this as "no info", never stale).
- *  - `plan:<hash>` → returned whole (opaque plan-content identity).
+ *  - `plan:<hash>` / `source:<revision>` → returned whole (opaque identities).
  *  - otherwise the code-diff portion (files:additions:deletions), dropping the
  *    trailing modifiedAt so activity-only ticks don't read as a code change.
  *  Used as the single freshness signal shared by the UI and the gate engine. */
 export function normalizeChangesetRef(ref?: string): string {
   if (!ref) return "";
-  if (isPlanChangesetRef(ref)) return ref;
+  if (isPlanChangesetRef(ref) || isSourceChangesetRef(ref)) return ref;
   return ref.split(":").slice(0, 3).join(":");
 }
 
-/** A gate verdict is stale when it was recorded against a different changeset
- *  than the card currently shows.
+/** A gate verdict is stale unless it is bound to the authoritative changeset
+ *  the card currently shows.
  *
  *  - Plan-content refs (`plan:<hash>`) compare against the card's `planContentHash`.
- *    An unknown current plan hash reads as "not stale" (best-effort enrichment
- *    may not have loaded the plan yet — never invalidate on missing info).
- *  - Code-diff refs compare the diff dimensions, but ONLY when the card's counts
- *    are `changesetVerified` (session-scoped). Unverified counts come from the
- *    shared working-tree summary and must not be trusted to invalidate a verdict. */
+ *    An unknown current plan hash fails closed because prior evidence cannot be
+ *    proven current.
+ *  - Current code refs compare the host-owned source revision paired with the
+ *    verified session changeset. Legacy code-diff refs compare diff dimensions,
+ *    but only when the card's counts are session-scoped and verified. */
 export function isGateRunStale(
   run: GateRunView,
   card: {
@@ -311,22 +322,28 @@ export function isGateRunStale(
     additions: number;
     deletions: number;
     changesetVerified?: boolean;
+    sourceRevision?: string;
     planContentHash?: string;
   }
 ): boolean {
-  if (!run.changesetRef) return false;
+  if (!run.changesetRef) return true;
   const stored = normalizeChangesetRef(run.changesetRef);
-  if (stored === "") return false;
+  if (stored === "") return true;
 
   if (isPlanChangesetRef(run.changesetRef)) {
     const current = normalizeChangesetRef(card.planContentHash);
-    if (current === "") return false;
+    if (current === "") return true;
     return stored !== current;
   }
 
-  // Code-diff ref: only a verified (session-scoped) diff is trustworthy enough
-  // to mark a verdict stale. Unverified counts (shared working tree) → not stale.
-  if (card.changesetVerified === false) return false;
+  if (isSourceChangesetRef(run.changesetRef)) {
+    if (!card.sourceRevision) return true;
+    return stored !== sourceChangesetRef(card.sourceRevision);
+  }
+
+  // Legacy code-diff evidence is reusable only when the current diff is known
+  // to be session-scoped and verified.
+  if (card.changesetVerified !== true) return true;
   return stored !== changesetCodeRef(card);
 }
 

@@ -1,12 +1,17 @@
 import { AhpClient } from "@microsoft/agent-host-protocol/client";
-import type { UsageInfo } from "@microsoft/agent-host-protocol";
+import {
+  sessionReducer,
+  type SessionAction,
+  type UsageInfo,
+} from "@microsoft/agent-host-protocol";
+import { createHash } from "node:crypto";
 
 import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, ConnectionError } from "./connection-error";
 import { classifyAhpError } from "./rpc-error";
 import { enrichFromChangeset, ChangesetEnrichment, hashPlanContent } from "./changeset-enricher";
 import { fetchCopilotCliArtifacts, clearPlanCache } from "./plan-artifact";
-import { fetchSessionModel } from "./session-config";
+import { extractModelFromConfig } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
 import { asChatState, asSessionState, readChatState, readSessionState } from "./snapshot";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT, type CachedSession } from "@/lib/db/session-cache";
@@ -18,7 +23,12 @@ import {
   applySdkSessionSummaryChanges,
   mapSdkSessionSummary,
 } from "./session-summary";
-import type { PendingInput, WorkerActivity } from "@/lib/types";
+import {
+  shouldEnrichSessionOnStartup,
+  shouldReadLiveSessionState,
+} from "./session-read-policy";
+import { withAHPClient } from "./client-operation";
+import type { Artifact, PendingInput, WorkerActivity } from "@/lib/types";
 import { mapWorkerChats, retainInactiveWorkers, type WorkerChatSummary } from "./worker-activity";
 import { getWorkerActivityHistory, recordWorkerActivity } from "@/lib/orchestrator/worker-activity-store";
 
@@ -50,25 +60,196 @@ function expandLevelTemplate(uri: string, level: string): string {
     .replace("{&level}", `&level=${level}`);
 }
 
-/**
- * A stable fingerprint of a session summary, used to decide whether a session has
- * *meaningfully* changed since it was last cached.
- *
- * Deliberately excludes `modifiedAt`: Copilot CLI bumps `modifiedAt` whenever a
- * session is merely resumed — including by our own reads (subscribing to a session
- * resumes it). So `modifiedAt` is not a reliable "did real work happen" signal.
- * Status and change counts are. When two signatures match, a moved `modifiedAt` is
- * a spurious resume bump we should ignore.
- */
+interface RiskFactsSourceBinding {
+  sourceRevision: string;
+  planVersion: string;
+  contentRevision?: string;
+}
+
+interface BoundChangesetEnrichment extends ChangesetEnrichment {
+  _planwerkSource: RiskFactsSourceBinding;
+}
+
+type RiskFactsCachedSummary = AHPSessionSummary & {
+  _planwerkRiskFacts: RiskFactsSourceBinding & {
+    pendingInput: PendingInput | null;
+  };
+};
+
+type SourceAwareSummary = AHPSessionSummary & {
+  _planwerkAHPSourceRevision?: string;
+};
+
+function metaRevision(meta: Record<string, unknown> | undefined): string | undefined {
+  if (!meta) return undefined;
+  const candidates = [
+    meta.sourceRevision,
+    meta.contentRevision,
+    meta.changesetRevision,
+    meta.revision,
+    (meta.changeset as Record<string, unknown> | undefined)?.revision,
+    (meta.content as Record<string, unknown> | undefined)?.revision,
+  ];
+  const revision = candidates.find(
+    (value): value is string | number =>
+      (typeof value === "string" && value.trim().length > 0)
+      || (typeof value === "number" && Number.isFinite(value)),
+  );
+  return revision === undefined ? undefined : `ahp:${String(revision)}`;
+}
+
+function attachAHPSourceRevision(
+  summary: AHPSessionSummary,
+  sdkSummary: { _meta?: Record<string, unknown> },
+): void {
+  const revision = metaRevision(sdkSummary._meta);
+  if (revision) {
+    (summary as SourceAwareSummary)._planwerkAHPSourceRevision = revision;
+  } else if (sdkSummary._meta !== undefined) {
+    delete (summary as SourceAwareSummary)._planwerkAHPSourceRevision;
+  }
+}
+
+function summarySourceRevision(summary: AHPSessionSummary): string {
+  const explicit = (summary as SourceAwareSummary)._planwerkAHPSourceRevision;
+  if (explicit) return explicit;
+  if (!summary.resource || !summary.modifiedAt) return "";
+
+  const changes = summary.changes;
+  return createHash("sha256")
+    .update(JSON.stringify({
+      resource: summary.resource,
+      provider: summary.provider,
+      modifiedAt: summary.modifiedAt,
+      files: changes?.files ?? 0,
+      additions: changes?.additions ?? 0,
+      deletions: changes?.deletions ?? 0,
+    }))
+    .digest("hex");
+}
+
+function enrichmentContentRevision(
+  enrichment: ChangesetEnrichment | null | undefined,
+): string | undefined {
+  if (!enrichment?.changesetVerified) return undefined;
+  return createHash("sha256")
+    .update(JSON.stringify({
+      files: [...enrichment.fileChanges]
+        .map((file) => ({
+          id: file.id ?? "",
+          path: file.path,
+          added: file.added,
+          removed: file.removed,
+        }))
+        .sort((a, b) =>
+          a.id.localeCompare(b.id)
+          || a.path.localeCompare(b.path)
+          || a.added - b.added
+          || a.removed - b.removed
+        ),
+      totalFileCount: enrichment.totalFileCount,
+      additions: enrichment.additions,
+      deletions: enrichment.deletions,
+      planContentHash: enrichment.planContentHash ?? "",
+    }))
+    .digest("hex");
+}
+
+function riskFactsSourceBinding(
+  summary: AHPSessionSummary,
+  enrichment?: ChangesetEnrichment | null,
+): RiskFactsSourceBinding {
+  return {
+    sourceRevision: summarySourceRevision(summary),
+    planVersion: summary.modifiedAt,
+    contentRevision: enrichmentContentRevision(enrichment),
+  };
+}
+
+function cacheableSummary(
+  summary: AHPSessionSummary,
+  pendingInput: PendingInput | undefined,
+  enrichment?: ChangesetEnrichment | null,
+): RiskFactsCachedSummary {
+  return {
+    ...summary,
+    _planwerkRiskFacts: {
+      ...riskFactsSourceBinding(summary, enrichment),
+      pendingInput: pendingInput ?? null,
+    },
+  };
+}
+
+function bindEnrichment(
+  summary: AHPSessionSummary,
+  enrichment: ChangesetEnrichment,
+): BoundChangesetEnrichment {
+  return {
+    ...enrichment,
+    _planwerkSource: riskFactsSourceBinding(summary, enrichment),
+  };
+}
+
+function enrichmentMatchesSummary(
+  summary: AHPSessionSummary,
+  enrichment: ChangesetEnrichment | null | undefined,
+): enrichment is BoundChangesetEnrichment {
+  const source = (enrichment as Partial<BoundChangesetEnrichment> | null | undefined)
+    ?._planwerkSource;
+  const expected = riskFactsSourceBinding(summary);
+  const contentRevision = enrichmentContentRevision(enrichment);
+  return Boolean(
+    source
+    && source.sourceRevision
+    && source.sourceRevision === expected.sourceRevision
+    && source.planVersion === expected.planVersion
+    && source.contentRevision === contentRevision
+  );
+}
+
 function sessionSignature(summary: AHPSessionSummary): string {
-  const c = summary.changes;
-  return [
-    summary.status,
-    summary.title ?? "",
-    c?.files ?? 0,
-    c?.additions ?? 0,
-    c?.deletions ?? 0,
-  ].join("|");
+  return JSON.stringify({
+    status: summary.status,
+    title: summary.title ?? "",
+    activity: summary.activity ?? "",
+    sourceRevision: summarySourceRevision(summary),
+  });
+}
+
+export function mergeFreshEnrichment(
+  changesetResult: ChangesetEnrichment | null,
+  sessionArtifacts: Artifact[],
+): ChangesetEnrichment | null {
+  if (!changesetResult && sessionArtifacts.length === 0) return null;
+
+  const artifacts = [...(changesetResult?.artifacts ?? [])];
+  for (const artifact of sessionArtifacts) {
+    const existingIndex = artifacts.findIndex(
+      (candidate) => candidate.type === artifact.type,
+    );
+    if (existingIndex >= 0) {
+      artifacts.splice(existingIndex, 1, artifact);
+    } else {
+      artifacts.push(artifact);
+    }
+  }
+
+  const planContent = artifacts.find(
+    (artifact) => artifact.type === "plan",
+  )?.contentRef;
+  return {
+    ...(changesetResult ?? {
+      codeFileCount: 0,
+      totalFileCount: 0,
+      fileChanges: [],
+      additions: 0,
+      deletions: 0,
+      changesetVerified: false,
+    }),
+    artifacts,
+    planContent,
+    planContentHash: planContent ? hashPlanContent(planContent) : undefined,
+  };
 }
 
 export interface AHPBridgeOptions {
@@ -102,6 +283,29 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
   let disposed = false;
   let client: AhpClient | null = null;
+
+  function persistSessionSummary(
+    summary: AHPSessionSummary,
+    enrichment?: ChangesetEnrichment | null | typeof CLEAR_ENRICHMENT,
+  ): void {
+    upsertSessionCache(
+      hostUrl,
+      summary.resource,
+      cacheableSummary(
+        summary,
+        pendingInputs.get(summary.resource),
+        enrichment && enrichment !== CLEAR_ENRICHMENT ? enrichment : null,
+      ),
+      enrichment,
+    );
+  }
+
+  function persistCurrentSessionSummary(summary: AHPSessionSummary): void {
+    persistSessionSummary(
+      summary,
+      enrichments.get(summary.resource) ?? CLEAR_ENRICHMENT,
+    );
+  }
 
   function dispose() {
     if (disposed) return;
@@ -142,20 +346,48 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }
 
     pendingEnrichments.add(sessionUri);
+    const sourceRevisionAtStart = summarySourceRevision(session);
+
+    // A refresh is an unknown state until it completes. Clear both in-memory and
+    // persisted facts before any asynchronous read so a failed or pending refresh
+    // can never retain a previously verified changeset or plan.
+    enrichments.delete(sessionUri);
+    persistSessionSummary(session, CLEAR_ENRICHMENT);
+    onEvent({
+      type: "sessionSummaryChanged",
+      session,
+      enrichment: null,
+      pendingInput: pendingInputs.get(sessionUri),
+      workers: workersBySession.get(sessionUri),
+    });
 
     const hasFileChanges = (session.changes?.files ?? 0) > 0;
 
-    // Run changeset enrichment and session-state artifact fetch in parallel
-    const changesetPromise = hasFileChanges
-      ? enrichFromChangeset(client!, sessionUri)
-      : Promise.resolve(null);
-    const artifactPromise = fetchCopilotCliArtifacts(client!, sessionUri, session.modifiedAt);
-    // The selected model is provider config on SessionState (not the summary), so
-    // derive it once per session and cache it on the summary entry.
-    const modelPromise: Promise<string | undefined> = session.model
-      ? Promise.resolve(session.model)
-      : fetchSessionModel(client!, sessionUri).catch(() => undefined);
-    Promise.all([changesetPromise, artifactPromise, modelPromise])
+    // Read SessionState once. A session subscribe may restore/provider-resume
+    // the session, and parallel model + changeset reads previously subscribed
+    // to the same channel twice.
+    withAHPClient(hostUrl, async (detailClient) => {
+      const sessionStatePromise =
+        hasFileChanges || !session.model
+          ? readSessionState(detailClient, sessionUri)
+          : Promise.resolve(undefined);
+      const changesetPromise = hasFileChanges
+        ? sessionStatePromise.then((state) =>
+            enrichFromChangeset(detailClient, sessionUri, state)
+          )
+        : Promise.resolve(null);
+      const artifactPromise = fetchCopilotCliArtifacts(
+        detailClient,
+        sessionUri,
+        session.modifiedAt,
+      );
+      const modelPromise: Promise<string | undefined> = session.model
+        ? Promise.resolve(session.model)
+        : sessionStatePromise
+            .then((state) => extractModelFromConfig(state?.config))
+            .catch(() => undefined);
+      return Promise.all([changesetPromise, artifactPromise, modelPromise]);
+    })
       .then(([changesetResult, sessionArtifacts, model]) => {
         if (disposed || !sessions.has(sessionUri)) return;
 
@@ -163,75 +395,37 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           const current = sessions.get(sessionUri);
           if (current && !current.model) current.model = model;
         }
-        let enrichment = changesetResult ?? enrichments.get(sessionUri) ?? null;
-
-        const mergedSessionArtifacts = sessionArtifacts.filter((artifact) => {
-          const existing = enrichment?.artifacts.find(
-            (candidate) => candidate.type === artifact.type
-          );
-          return (
-            !existing ||
-            (!existing.contentRef?.trim() && Boolean(artifact.contentRef?.trim()))
-          );
-        });
-        if (mergedSessionArtifacts.length > 0) {
-          const planArtifact = mergedSessionArtifacts.find(
-            (artifact) => artifact.type === "plan"
-          );
-          const planContentHash = planArtifact?.contentRef
-            ? hashPlanContent(planArtifact.contentRef)
-            : undefined;
-          if (enrichment) {
-            const replacedTypes = new Set(
-              mergedSessionArtifacts.map((artifact) => artifact.type)
-            );
-            enrichment = {
-              ...enrichment,
-              artifacts: [
-                ...enrichment.artifacts.filter(
-                  (artifact) => !replacedTypes.has(artifact.type)
-                ),
-                ...mergedSessionArtifacts,
-              ],
-              planContentHash: enrichment.planContentHash ?? planContentHash,
-            };
-          } else {
-            enrichment = {
-              artifacts: mergedSessionArtifacts,
-              codeFileCount: 0,
-              totalFileCount: 0,
-              fileChanges: [],
-              additions: 0,
-              deletions: 0,
-              changesetVerified: false,
-              planContentHash,
-            };
-          }
-        }
-
-        // Clear stale enrichment when session has no file changes and no plan
-        if (!hasFileChanges && !enrichment) {
-          if (enrichments.has(sessionUri)) {
-            enrichments.delete(sessionUri);
-            upsertSessionCache(hostUrl, sessionUri, session, CLEAR_ENRICHMENT);
-            onEvent({ type: "sessionSummaryChanged", session, enrichment: null });
-          }
+        const current = sessions.get(sessionUri);
+        if (!current) return;
+        if (summarySourceRevision(current) !== sourceRevisionAtStart) {
+          dirtyEnrichments.add(sessionUri);
           return;
         }
 
+        const fresh = mergeFreshEnrichment(changesetResult, sessionArtifacts);
+        const enrichment = fresh ? bindEnrichment(current, fresh) : null;
         if (enrichment) {
           enrichments.set(sessionUri, enrichment);
-          upsertSessionCache(hostUrl, sessionUri, sessions.get(sessionUri)!, enrichment);
+          persistSessionSummary(current, enrichment);
+        } else {
+          persistSessionSummary(current, CLEAR_ENRICHMENT);
         }
-        // Re-emit with enrichment data included
         onEvent({
           type: "sessionSummaryChanged",
-          session: sessions.get(sessionUri)!,
-          enrichment: enrichment ?? null,
+          session: current,
+          enrichment,
+          pendingInput: pendingInputs.get(sessionUri),
+          workers: workersBySession.get(sessionUri),
         });
       })
-      .catch(() => {
-        // Enrichment is best-effort; failures are silently ignored
+      .catch((err) => {
+        const current = sessions.get(sessionUri);
+        if (current) persistSessionSummary(current, CLEAR_ENRICHMENT);
+        warn(
+          "enrichment refresh failed:",
+          sessionUri,
+          err instanceof Error ? err.message : err,
+        );
       })
       .finally(() => {
         pendingEnrichments.delete(sessionUri);
@@ -258,9 +452,6 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       dirtyInputFetches.add(sessionUri);
       return;
     }
-
-    pendingInputFetches.add(sessionUri);
-    debug("fetchInput: subscribing", sessionUri);
 
     pendingInputFetches.add(sessionUri);
     debug("fetchInput: reading session inputNeeded", sessionUri);
@@ -299,66 +490,68 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   async function fetchInputFromSession(sessionUri: string) {
     if (disposed || !client) return;
 
-    let sub: Awaited<ReturnType<typeof client.subscribe>> | undefined;
     try {
-      sub = await client.subscribe(sessionUri);
-    } catch (err) {
-      warn("fetchInput: session subscribe failed", sessionUri, err instanceof Error ? err.message : err);
-      emitNoPendingInput(sessionUri);
-      return;
-    }
-
-    const { result, subscription } = sub;
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      void subscription.close();
-      client?.unsubscribe(sessionUri).catch(() => {});
-    };
-
-    try {
-      if (disposed) return;
-
-      // Re-check: status may have changed while the subscribe was in-flight.
-      if (!stillInputNeeded(sessionUri)) {
-        debug("fetchInput: no longer needed (status changed)", sessionUri);
-        return;
-      }
-
-      const initial = mapSessionInputNeeded(asSessionState(result.snapshot)?.inputNeeded);
-      if (initial) {
-        emitPendingInput(sessionUri, initial);
-        return;
-      }
-
-      // inputNeeded not populated yet — wait briefly for session/inputNeededSet.
-      debug("fetchInput: no inputNeeded yet, waiting…", sessionUri);
-      let sawSet = false;
-      const timer = setTimeout(() => void subscription.close(), 5_000);
-      try {
-        for await (const event of subscription) {
-          if (disposed) break;
-          if (event.type !== "action") continue;
-          if ((event.params.action.type as string) === "session/inputNeededSet") {
-            sawSet = true;
-            break;
-          }
+      await withAHPClient(hostUrl, async (detailClient) => {
+        let sub: Awaited<ReturnType<typeof detailClient.subscribe>>;
+        try {
+          sub = await detailClient.subscribe(sessionUri);
+        } catch (err) {
+          warn("fetchInput: session subscribe failed", sessionUri, err instanceof Error ? err.message : err);
+          emitNoPendingInput(sessionUri);
+          return;
         }
-      } finally {
-        clearTimeout(timer);
-      }
 
-      // Close our streaming subscription before re-reading a fresh snapshot.
-      release();
-      if (sawSet && !disposed && stillInputNeeded(sessionUri)) {
-        const fresh = await readSessionState(client!, sessionUri);
-        const mapped = mapSessionInputNeeded(fresh?.inputNeeded);
-        if (mapped) emitPendingInput(sessionUri, mapped);
-        else emitNoPendingInput(sessionUri);
-      }
-    } finally {
-      release();
+        const { result, subscription } = sub;
+        try {
+          if (disposed) return;
+
+          // Re-check: status may have changed while the subscribe was in-flight.
+          if (!stillInputNeeded(sessionUri)) {
+            debug("fetchInput: no longer needed (status changed)", sessionUri);
+            return;
+          }
+
+          let sessionState = asSessionState(result.snapshot);
+          const initial = mapSessionInputNeeded(sessionState?.inputNeeded);
+          if (initial) {
+            emitPendingInput(sessionUri, initial);
+            return;
+          }
+          if (!sessionState) {
+            emitNoPendingInput(sessionUri);
+            return;
+          }
+
+          // inputNeeded not populated yet — wait briefly for session/inputNeededSet.
+          debug("fetchInput: no inputNeeded yet, waiting…", sessionUri);
+          const timer = setTimeout(() => void subscription.close(), 5_000);
+          try {
+            for await (const event of subscription) {
+              if (disposed) break;
+              if (event.type !== "action") continue;
+              sessionState = sessionReducer(
+                sessionState,
+                event.params.action as SessionAction,
+              );
+              const mapped = mapSessionInputNeeded(sessionState.inputNeeded);
+              if (mapped) {
+                emitPendingInput(sessionUri, mapped);
+                return;
+              }
+            }
+          } finally {
+            clearTimeout(timer);
+          }
+
+          emitNoPendingInput(sessionUri);
+        } finally {
+          await subscription.close();
+          await detailClient.unsubscribe(sessionUri).catch(() => {});
+        }
+      });
+    } catch (err) {
+      warn("fetchInput: failed", sessionUri, err instanceof Error ? err.message : err);
+      emitNoPendingInput(sessionUri);
     }
   }
 
@@ -367,6 +560,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     debug("pending input:", sessionUri, mapped.requestId);
     const session = sessions.get(sessionUri)!;
     if (session) {
+      persistCurrentSessionSummary(session);
       onEvent({
         type: "sessionSummaryChanged",
         session,
@@ -382,6 +576,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     pendingInputs.delete(sessionUri);
     const session = sessions.get(sessionUri);
     if (session) {
+      persistCurrentSessionSummary(session);
       onEvent({
         type: "sessionSummaryChanged",
         session,
@@ -399,6 +594,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     pendingInputs.delete(sessionUri);
     const session = sessions.get(sessionUri);
     if (session) {
+      persistCurrentSessionSummary(session);
       onEvent({
         type: "sessionSummaryChanged",
         session,
@@ -771,8 +967,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     // rather than re-read from the host. Reading a session over AHP *subscribes*
     // to it, which makes Copilot CLI lazily resume the session and bump its
     // modifiedAt — surfaced in VS Code as a reset "last modified" time. Reusing
-    // the cache lets us resume each session at most once (on first sight or a real
-    // change), eliminating the bulk timestamp thrash on every Planwerk restart.
+    // an immutable host revision lets us avoid unnecessary resumes. Without one,
+    // modifiedAt participates in the fallback revision so cache reuse fails closed.
     const cacheByUri = new Map<string, CachedSession>();
     try {
       for (const cached of getCachedSessions(hostUrl)) {
@@ -780,49 +976,78 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       }
     } catch { /* cache read failure is non-fatal */ }
 
-    // Sessions that are new or genuinely changed — only these get resume-causing
-    // enrichment reads below. Unchanged sessions are served entirely from cache.
-    const staleUris = new Set<string>();
+    // Live detail reads subscribe to session channels. On VS Code's Agent Host,
+    // that is a restore/resume operation rather than a passive snapshot read.
+    // Keep cold startup catalog-only and inspect only sessions already active.
+    const liveReadUris = new Set<string>();
+    const staleEnrichmentUris = new Set<string>();
+    let coldSummaryOnlyCount = 0;
 
     const allSummaries = await listAllSessions(client);
 
     for (const summary of allSummaries) {
       const mapped = mapSdkSessionSummary(summary);
+      attachAHPSourceRevision(mapped, summary);
       if (!shouldShowSession(summary.status, summary.changes?.files ?? 0)) {
         if (summary.status & AHPStatus.IsArchived) skippedArchived.set(summary.resource, mapped);
         continue;
       }
 
       const cached = cacheByUri.get(mapped.resource);
-      const unchanged =
+      const unchangedSummary =
         cached && sessionSignature(cached.summary) === sessionSignature(mapped);
+      const cachedHasPlan = Boolean(
+        cached?.enrichment?.planContentHash
+        || cached?.enrichment?.planContent
+        || cached?.enrichment?.artifacts.some((artifact) => artifact.type === "plan"),
+      );
+      const planVersionChanged = Boolean(
+        cached
+        && cachedHasPlan
+        && cached.summary.modifiedAt !== mapped.modifiedAt,
+      );
+      const unchanged = Boolean(unchangedSummary && !planVersionChanged);
+      let hasCurrentCachedEnrichment = false;
 
-      if (unchanged) {
-        // Session hasn't meaningfully changed since we cached it. A moved
-        // modifiedAt is a spurious resume bump, so keep the stable cached value
-        // (prevents the card from jumping), and hydrate derived data from cache
-        // so we don't re-read — and thus resume — the session.
+      if (unchanged && cached) {
+        // Restore the display timestamp only after the fresh source revision
+        // matches. Aggregate counts alone are never enough to reuse enrichment.
         mapped.modifiedAt = cached.summary.modifiedAt;
         if (cached.summary.model && !mapped.model) mapped.model = cached.summary.model;
-        if (cached.enrichment) enrichments.set(mapped.resource, cached.enrichment);
-
-        // Recover from a previously incomplete enrichment: if the session has file
-        // changes but we never cached enrichment for it (enrichment failed, or the
-        // process exited before it finished), re-enrich once so the card isn't left
-        // permanently missing its changeset/plan/model.
-        const hasFiles = (mapped.changes?.files ?? 0) > 0;
-        if (hasFiles && !cached.enrichment) staleUris.add(mapped.resource);
+        if (
+          cached.enrichment
+          && enrichmentMatchesSummary(mapped, cached.enrichment)
+        ) {
+          enrichments.set(mapped.resource, cached.enrichment);
+          hasCurrentCachedEnrichment = true;
+        } else if (cached.enrichment) {
+          staleEnrichmentUris.add(mapped.resource);
+        }
       } else {
-        // New or genuinely changed. Enrich once (this also fetches the model). Do
-        // NOT seed cached enrichment here: triggerEnrichment must compute it fresh
-        // so it can also *clear* enrichment when the session no longer has file
-        // changes (seeding a stale value would defeat that clear path).
-        staleUris.add(mapped.resource);
+        // Never project stale file/plan facts onto a changed summary. Active
+        // sessions can refresh them now; cold sessions remain summary-only until
+        // a host event or an explicit Planwerk action makes a live read necessary.
+        if (cached?.enrichment) staleEnrichmentUris.add(mapped.resource);
+        if (!shouldReadLiveSessionState(mapped.status)) {
+          coldSummaryOnlyCount++;
+        }
+      }
+      if (
+        shouldEnrichSessionOnStartup(
+          mapped.status,
+          unchanged,
+          hasCurrentCachedEnrichment,
+        )
+      ) {
+        liveReadUris.add(mapped.resource);
       }
 
       sessions.set(summary.resource, mapped);
     }
-    info(`loaded ${sessions.size} sessions (${allSummaries.length} total, archived without changes filtered); ${staleUris.size} new/changed`);
+    info(
+      `loaded ${sessions.size} sessions (${allSummaries.length} total, archived without changes filtered); `
+      + `${liveReadUris.size} active live reads, ${coldSummaryOnlyCount} cold summary-only`,
+    );
     onEvent({
       type: "init",
       sessions: Array.from(sessions.values()),
@@ -840,20 +1065,20 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
     // Cache all sessions and remove stale entries
     for (const [uri, session] of sessions) {
-      upsertSessionCache(hostUrl, uri, session, enrichments.get(uri));
+      persistSessionSummary(
+        session,
+        staleEnrichmentUris.has(uri)
+          ? CLEAR_ENRICHMENT
+          : enrichments.get(uri) ?? CLEAR_ENRICHMENT,
+      );
     }
     reconcileSessionCache(hostUrl, new Set(sessions.keys()));
 
-    // Trigger async enrichment (changeset + plan artifact) for new/changed
-    // sessions and for InputNeeded sessions still missing a plan artifact — a
-    // plan confirmation is the moment plan.md is finalized, so a reload/restart
-    // mid-confirmation must still fetch it. Enrichment subscribes to the session
-    // and would resume it, but syncInputState already subscribes to InputNeeded
-    // sessions (they're hot — the user is actively resolving them).
+    // Active sessions are already resident/running, so reading their details
+    // cannot turn a cold catalog entry into resumed work. InputNeeded is a
+    // composite InProgress status and is therefore included in liveReadUris.
     for (const [uri, session] of sessions) {
-      const isInputNeeded = (session.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
-      const missingPlan = !enrichments.get(uri)?.artifacts.some((a) => a.type === "plan");
-      if (staleUris.has(uri) || (isInputNeeded && missingPlan)) triggerEnrichment(uri);
+      if (liveReadUris.has(uri)) triggerEnrichment(uri);
       syncInputState(uri, session.status);
       void syncWorkerActivity(uri, session.status);
     }
@@ -873,16 +1098,19 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
         if (event.type === "sessionAdded") {
           const mapped = mapSdkSessionSummary(event.params.summary);
+          attachAHPSourceRevision(mapped, event.params.summary);
           if (!shouldShowSession(mapped.status, mapped.changes?.files)) {
             debug("sessionAdded: skipping archived without changes", mapped.resource);
             if (mapped.status & AHPStatus.IsArchived) skippedArchived.set(mapped.resource, mapped);
             continue;
           }
           sessions.set(event.params.summary.resource, mapped);
-          upsertSessionCache(hostUrl, mapped.resource, mapped, enrichments.get(mapped.resource));
+          persistCurrentSessionSummary(mapped);
           debug("sessionAdded:", mapped.resource, mapped.title);
           onEvent({ type: "sessionAdded", session: mapped, enrichment: enrichments.get(mapped.resource) });
-          triggerEnrichment(mapped.resource);
+          if (shouldReadLiveSessionState(mapped.status)) {
+            triggerEnrichment(mapped.resource);
+          }
           syncInputState(mapped.resource, mapped.status);
           void syncWorkerActivity(mapped.resource, mapped.status);
         } else if (event.type === "sessionRemoved") {
@@ -897,7 +1125,28 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           const existing = sessions.get(sessionUri);
           if (existing) {
             debug("sessionChanged:", sessionUri, Object.keys(changes).join(","));
+            const sourceBefore = riskFactsSourceBinding(existing);
+            const currentEnrichment = enrichments.get(sessionUri);
+            const hadPlan = Boolean(
+              currentEnrichment?.planContentHash
+              || currentEnrichment?.planContent
+              || currentEnrichment?.artifacts.some(
+                (artifact) => artifact.type === "plan",
+              ),
+            );
             applySdkSessionSummaryChanges(existing, changes);
+            if (changes._meta !== undefined) {
+              attachAHPSourceRevision(existing, changes);
+            }
+            const sourceAfter = riskFactsSourceBinding(existing);
+            const changesetSourceChanged =
+              sourceBefore.sourceRevision !== sourceAfter.sourceRevision;
+            const planVersionChanged =
+              hadPlan && sourceBefore.planVersion !== sourceAfter.planVersion;
+            if (changesetSourceChanged || planVersionChanged) {
+              enrichments.delete(sessionUri);
+              persistSessionSummary(existing, CLEAR_ENRICHMENT);
+            }
 
             // Check if session became archived
             if (existing.status & AHPStatus.IsArchived) {
@@ -906,7 +1155,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
               if (shouldShowSession(existing.status, existing.changes?.files)) {
                 debug("sessionArchived: keeping (has code changes)", sessionUri);
                 sessions.set(sessionUri, existing);
-                upsertSessionCache(hostUrl, sessionUri, existing, enrichments.get(sessionUri));
+                persistCurrentSessionSummary(existing);
                 onEvent({ type: "sessionSummaryChanged", session: existing, enrichment: enrichments.get(sessionUri) });
               } else {
                 debug("sessionArchived: removing (no code changes)", sessionUri);
@@ -929,7 +1178,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
             void syncWorkerActivity(sessionUri, existing.status);
 
             sessions.set(sessionUri, existing);
-            upsertSessionCache(hostUrl, sessionUri, existing, enrichments.get(sessionUri));
+            persistCurrentSessionSummary(existing);
             onEvent({
               type: "sessionSummaryChanged",
               session: existing,
@@ -948,9 +1197,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
             const isInputNeeded = (existing.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
             const missingPlan = !enrichments.get(sessionUri)?.artifacts.some((a) => a.type === "plan");
             if (
-              changes.changes !== undefined
+              changesetSourceChanged
               || (changes.status !== undefined && !(changes.status & AHPStatus.InProgress))
               || (isInputNeeded && missingPlan)
+              || (planVersionChanged && !pendingEnrichments.has(sessionUri))
             ) {
               triggerEnrichment(sessionUri);
             }
@@ -971,7 +1221,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
                 debug("sessionChanged: promoting previously skipped archived session", sessionUri);
                 skippedArchived.delete(sessionUri);
                 sessions.set(sessionUri, skipped);
-                upsertSessionCache(hostUrl, sessionUri, skipped, enrichments.get(sessionUri));
+                persistCurrentSessionSummary(skipped);
                 onEvent({ type: "sessionAdded", session: skipped });
               }
             }

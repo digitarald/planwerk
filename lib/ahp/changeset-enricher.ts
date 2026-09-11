@@ -2,6 +2,7 @@ import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import type {
   ChangesetFile,
   Changeset,
+  SessionState,
 } from "@microsoft/agent-host-protocol";
 import { createHash } from "node:crypto";
 
@@ -85,11 +86,12 @@ export function findSessionChangeset(changesets: Changeset[]): Changeset | undef
  */
 export async function enrichFromChangeset(
   client: AhpClient,
-  sessionUri: string
+  sessionUri: string,
+  providedSessionState?: SessionState,
 ): Promise<ChangesetEnrichment | null> {
   try {
-    // Read the session snapshot to get its changeset catalogue.
-    const sessionState = await readSessionState(client, sessionUri);
+    const sessionState = providedSessionState
+      ?? await readSessionState(client, sessionUri);
 
     // Extract last agent message. Turns live on the chat channel, so read from
     // the session's defaultChat. `ChatState.turns` is a tail window that already

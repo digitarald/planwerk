@@ -1,16 +1,24 @@
 import "server-only";
 
-import { KanbanCard, ReviewFinding, RiskLevel, Phase, WorkerActivity } from "@/lib/types";
+import {
+  KanbanCard,
+  ReviewFinding,
+  RiskLevel,
+  Phase,
+  WorkerActivity,
+  normalizeChangesetRef,
+  sourceChangesetRef,
+} from "@/lib/types";
 import {
   canAdvancePhase,
-  computeChangesetRef,
   deriveGateStatus,
   getNextPhase,
   getPersistedCardPhase,
   setCardPhase,
   type GateConfig,
 } from "@/lib/orchestrator/gate-engine";
-import { getCardRisk } from "@/lib/orchestrator/risk-store";
+import { getAuthoritativeCardRisk } from "@/lib/orchestrator/risk-store";
+import { riskAutomationPolicy } from "@/lib/orchestrator/risk-authority";
 import { getReviewRunsForCard, type ReviewRun } from "@/lib/orchestrator/review-executor";
 import { buildCoherenceSummary } from "@/lib/orchestrator/coherence-engine";
 import {
@@ -74,6 +82,11 @@ function computeGateBlocker(
   changesetRef?: string,
   projectPath?: string
 ): string | undefined {
+  if (!normalizeChangesetRef(changesetRef)) {
+    return fromPhase === "plan"
+      ? "Current plan revision unavailable"
+      : "Current source revision unavailable";
+  }
   const { allowed, pendingGates } = canAdvancePhase(
     cardId,
     fromPhase,
@@ -122,16 +135,29 @@ export function enrichSessionToCard(
   workers?: WorkerActivity[],
 ): KanbanCard {
   const persistedPhase = getPersistedCardPhase(session.resource);
-  const storedRisk = getCardRisk(session.resource);
-  const card = mapSessionToCard(session, persistedPhase, changesetData, storedRisk?.level, workers);
+  let authoritativeRisk = getAuthoritativeCardRisk(session.resource);
+  let riskPolicy = riskAutomationPolicy(authoritativeRisk);
+  const card = mapSessionToCard(
+    session,
+    persistedPhase,
+    changesetData,
+    riskPolicy.level,
+    workers,
+  );
 
   // Sync DB when inference overrides the persisted phase (e.g. archived+code → ship)
   if (card.phase !== persistedPhase) {
     setCardPhase(session.resource, card.phase);
+    authoritativeRisk = getAuthoritativeCardRisk(session.resource);
+    riskPolicy = riskAutomationPolicy(authoritativeRisk);
+    card.risk = riskPolicy.level;
   }
 
-  if (storedRisk?.factors.length) {
-    card.riskFactors = storedRisk.factors;
+  if (
+    authoritativeRisk.status === "current" &&
+    authoritativeRisk.assessment.factors.length
+  ) {
+    card.riskFactors = authoritativeRisk.assessment.factors;
   }
 
   const nextPhase = getNextPhase(card.phase);
@@ -144,20 +170,15 @@ export function enrichSessionToCard(
   const changesetRef =
     card.phase === "plan"
       ? card.planContentHash
-      : card.changesetVerified
-        ? computeChangesetRef(
-            card.filesChanged,
-            card.additions,
-            card.deletions,
-            card.modifiedAt
-          )
+      : card.changesetVerified && card.sourceRevision
+        ? sourceChangesetRef(card.sourceRevision)
         : undefined;
   if (nextPhase) {
     card.gateStatus = deriveGateStatus(
       session.resource,
       card.phase,
       nextPhase,
-      storedRisk?.level,
+      riskPolicy.level,
       changesetRef,
       card.workingDirectory
     );
@@ -187,12 +208,18 @@ export function enrichSessionToCard(
       session.resource,
       card.phase,
       nextPhase,
-      storedRisk?.level,
+      riskPolicy.level,
       reviewRuns,
       `${card.phase}->${nextPhase}`,
       changesetRef,
       card.workingDirectory
     );
+  }
+  if (!riskPolicy.current) {
+    card.gateBlocker = `${riskPolicy.reason} Reassess risk before automation can continue.`;
+    if (card.attention !== "error" && card.attention !== "needs-human") {
+      card.attention = "stale";
+    }
   }
   // Parked-on-escalation overlay: when the *latest* review run for a skill on the
   // card's current transition is escalated, the heartbeat has parked it for a human
