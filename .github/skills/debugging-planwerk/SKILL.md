@@ -54,7 +54,8 @@ persisted phase, gates, risk, and orchestrator decisions live. **Read-only inspe
 out-of-band; the running app holds a write connection.
 
 Tables: `card_phases`, `card_risk`, `card_status_history`, `coherence_conflicts`,
-`gate_configs`, `gate_runs`, `heartbeat_log`, `review_runs`, `session_cache`.
+`cto_sdk_sessions`, `cto_session_leases`, `gate_configs`, `gate_runs`,
+`heartbeat_log`, `review_chat_cleanups`, `review_runs`, `session_cache`.
 
 ```bash
 node -e '
@@ -65,6 +66,41 @@ for (const r of db.prepare("SELECT name FROM sqlite_master WHERE type = ?").all(
 Good first queries: `card_phases` (persisted column), `heartbeat_log`
 (what the orchestrator did/decided, newest `id` first), `gate_runs` / `review_runs`
 (gate outcomes + staleness), `card_risk` (triage verdict driving gate intensity).
+In rolling-worker deployments, active work is lease-fenced rather than reset merely
+because another process opened the database. Inspect `gate_runs.owner_id` /
+`lease_expires_at_ms`, `review_runs.start_owner_id` /
+`start_lease_expires_at_ms` (pre-dispatch) and `judgment_owner_id` /
+`judgment_lease_expires_at_ms` (verdict extraction), plus
+`coherence_conflicts.review_owner_id` / `review_lease_expires_at_ms`. Startup recovery
+uses atomic expiry checks: a future lease must survive, while an expired pending review
+claim and its linked running gate are terminalized together before a later retry.
+Immediately before a review prompt side effect, `review_runs.status` becomes
+`dispatching` with reserved `chat_uri`/`turn_id`, `dispatch_host_url`, and
+`dispatch_chat_disposable`. An expired `dispatching` row is never retried: recovery
+marks it `ambiguous`, fails its gate, and records the exact identity in
+`review_chat_cleanups` for peer-chat disposal or default-chat quarantine.
+For CTO conversation release, inspect `cto_sdk_sessions.lifecycle_state`,
+`deletion_token`, and `deletion_started_at_ms` alongside `cto_session_leases`.
+Release first moves the active binding to `deleting`; only a fully successful
+disconnect restores it to `active`. Any reported failure leaves the binding
+quarantined so a later owner must confirm bounded deletion before replacement.
+Both restoration and deletion use session-, token-, lease-owner-fenced CAS.
+`card_risk.risk_digest` must be non-null and match the digest derived from the
+current `session_cache` row plus `card_phases` row. Missing, null-digest, or
+mismatched assessments are intentionally non-authoritative: heartbeat logs one
+`risk-assessment-required` blocker and waits for explicit reassessment, while
+gate/reviewer reads use high-risk policy. The canonical reader is
+`lib/orchestrator/risk-authority.ts`.
+SDK failures and invalid model output use `risk-classifier.ts`; incomplete
+counts-only facts and sensitive auth/security/permissions/schema/migration or
+destructive-operation evidence are deterministically high risk. Only complete,
+revision-bound per-file facts can receive a lower fallback assessment.
+`review_chat_cleanups` records peer-chat disposal by normalized
+`(host_url, chat_uri)`. Retries are host-scoped and bounded to three total
+attempts per row. The global heartbeat scans every persisted host; an origin
+does not need an active board stream for retry. A `quarantined` row has no
+recoverable originating host and must never be retried against whichever host
+happens to be active.
 
 ### 2. Session cache — the facts a card was derived from
 The `session_cache` table (`session_uri, host_url, summary_json, enrichment_json,
@@ -96,6 +132,19 @@ logical local endpoint:
 ```bash
 AHP_SMOKE_HOST=vscode-local://desktop npm run ahp:smoke
 ```
+`listSessions` is a passive catalogue read. Subscribing to a session or one of
+its chats is not: VS Code Agent Host may restore evicted state, invoke the
+provider's resume path, refresh session git state, pin residency, and bump the
+Copilot CLI session's `modifiedAt`. Planwerk startup must therefore remain
+catalogue-only for cold sessions. It reads live session state only for sessions
+already `InProgress`/`InputNeeded`, after a relevant host event, or while carrying
+out an explicit user/orchestrator action. A cold cache, missing enrichment, or a
+new host URL must never fan out subscriptions across the session catalogue.
+
+The smoke harness intentionally performs a live read of its selected session and
+can therefore restore that session. Do not run it across production sessions when
+investigating timestamp or residency side effects; use `listSessions`-only
+evidence first.
 It reads schema-v2 editor entries from VS Code Stable and Insiders user-data registries,
 validates live processes, connects to each token-protected Unix socket, and chooses the
 compatible host with the largest full paginated catalog (then newest endpoint, then path).
@@ -149,6 +198,21 @@ unknown and retry. Do **not** re-subscribe to get a fresh snapshot after readine
 current VS Code starts another computation for each subscription. Closing immediately
 on the computing snapshot can leave `changesetVerified:false` even though VS Code later
 renders the completed All Changes view.
+Every fresh changeset subscription may also start a new computation. Consumers must use
+`readReadyChangesetState` to reduce the existing subscription through `ready`/`error`
+rather than close a `computing` snapshot and subscribe again. This applies to card
+enrichment, file-review mutations, and coherence reads.
+
+Subscription ownership is URI-global within one SDK `AhpClient`, not local to the
+returned `Subscription`: `Subscription.close()` stops only that iterator, while
+`client.unsubscribe(uri)` drops the server subscription and every local consumer for the
+URI. Do not overlap a one-shot read and a long-lived observer for the same URI on a shared
+client. Prefer one subscribed reducer, serialize operations, or use separately owned
+clients. Repeated subscribe/unsubscribe polling also touches residency and can repeatedly
+restore cold state; consume actions from the original subscription when possible.
+Planwerk's imperative routes and orchestrator helpers use `lib/ahp/client-operation.ts`
+for one exclusive connection per logical operation; the board bridge keeps a separate
+persistent observer client and performs one-shot enrichment/input reads on operation clients.
 
 ### 4. Copilot CLI per-session files — what the agent actually did
 `~/.copilot/session-state/<session-uuid>/` (the UUID is the tail of a `copilotcli:/<uuid>`
@@ -218,8 +282,11 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
 - `lib/ahp/types.ts` — `AHPStatus` bits + `parseAHPStatus`.
 - `app/api/ahp/events/route.ts` — SSE bridge + triage entry point. Each connected board
   sends its selected workspace paths as `workspaceScope`; all automation is limited to
-  the union of cards visible in those connected tabs. An unfiltered tab intentionally
-  permits all workspaces. A malformed supplied scope fails closed, while an omitted
+  the union of cards visible in those connected tabs **for the same originating AHP
+  host**. Card snapshots, bridge connections, heartbeat operations, action broadcasts,
+  and reprojection are host-partitioned; disconnecting one tab does not stop another
+  subscriber or host. An unfiltered tab intentionally permits all workspaces. A malformed
+  supplied scope fails closed, while an omitted
   scope preserves compatibility with older clients. The browser's “hide done” setting
   does not further limit automation because archived cards are already excluded.
   Heartbeat actions also re-project the affected card from `session_cache` plus current
@@ -285,24 +352,27 @@ A gate/review verdict is invalidated ("stale") when the card's current changeset
 differs from the ref the gate ran against (`gate_runs.changeset_ref`,
 `review_runs.changeset_ref`). Two ref shapes, both compared via
 `normalizeChangesetRef` (`lib/types.ts`):
-- **Code ref** `files:additions:deletions:modifiedAt` (modifiedAt dropped when normalized).
-  Used for `build->review` and `review->ship`. Derived from the card's diff counts —
-  which now come from the **session-scoped** changeset (`changeKind:"session"`, isolated
-  per agent) via `changeset-enricher.ts`. Current VS Code also derives
+- **Code ref** `source:<encoded-host-revision>` for current runs (legacy rows may contain
+  `files:additions:deletions:modifiedAt`, with modifiedAt dropped when normalized).
+  Used for `build->review` and `review->ship`. The source revision and enrichment are
+  accepted only when they are paired in `session_cache`, and the diff is verified from
+  the **session-scoped** changeset (`changeKind:"session"`, isolated per agent) via
+  `changeset-enricher.ts`. Current VS Code also derives
   `SessionSummary.changes` from that session changeset, but Planwerk marks counts verified
   only after reading a ready per-file snapshot itself. When `card.changesetVerified` is
-  false, the ref is treated as **unknown** (`undefined`) and never marks a verdict stale.
+  false, the ref is treated as **unknown** (`undefined`) and all revision-bound evidence
+  fails closed until a current ref is available.
 - **Plan ref** `plan:<hash>` (opaque identity of `plan.md` content, hashed in
   `changeset-enricher.ts` / merged in `client-bridge.ts`). Used for `plan->build` reviews
   (`plan-review` = `/rubber-duck`) so unrelated code churn — or another agent's edits —
   can't re-trigger a passed plan review. Carried on `card.planContentHash`.
 
-Empty/unknown current ref ⇒ **never stale** (guarded in `gate-engine.getLatestPassingRuns`,
-`review-executor.shouldStartReview`, `types.isGateRunStale`). If a passed gate keeps
-re-injecting, check: (a) is `changeset_ref` flapping between a real value and `0:0:0`
-(unverified summary leaking in)? (b) for a plan gate, is `changeset_ref` a `plan:` ref on
-both the run and the card? Pure-logic tests live in
-`lib/orchestrator/changeset-freshness.test.ts`.
+Empty/unknown current ref ⇒ **fail closed**. Prior gate and review evidence is not
+reused, new evidence is not started without a revision binding, and heartbeat/API/tool
+callers block advancement until `gate-revision.ts` can resolve a non-empty current
+revision from matching summary + enrichment facts. For a plan gate, verify that both the
+run and current card use a `plan:` ref; for code gates, verify a bound `source:` ref.
+Pure-logic tests live in `lib/orchestrator/changeset-freshness.test.ts`.
 
 ## A sane order of attack
 

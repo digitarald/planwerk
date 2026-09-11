@@ -50,6 +50,14 @@ Reviews are injected as skills that agents can invoke. Dual-invocation model:
 
 Risk level determines gate intensity: low-risk tasks get lighter review, high-risk get adversarial plan review + security review + architecture review.
 
+Risk verdicts are versioned against the server-owned facts snapshot
+(`session_cache` plus persisted phase). A verdict is policy-authoritative only
+when its non-null digest still matches those facts. Missing, legacy unbound, or
+stale verdicts disable auto-answer and heartbeat automation; synchronous gate
+and reviewer selection falls back to high-risk policy. Reassessment is explicit
+and commits through a facts-snapshot compare-and-set, so an assessment can never
+be attached to facts that changed while the model was running.
+
 ### 5. Convention-Based Config (Zero-Config Default)
 
 Planwerk reads `.github/planwerk.yml` for explicit config, but also extracts from:
@@ -161,15 +169,109 @@ Config: `coherence.{enabled, module_depth, block_high_risk_ship}` in `planwerk.y
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/api/ahp/events` | GET (SSE) | Stream session updates to browser |
+| `/api/ahp/events` | GET (SSE) | Stream session updates to browser; strict loopback/same-origin guard runs before AHP/heartbeat startup |
 | `/api/ahp/sessions` | GET | List current sessions |
 | `/api/ahp/sessions/message` | POST | Inject a message into a session |
 | `/api/ahp/sessions/input` | POST | Respond to a session's input-needed prompt |
 | `/api/gates/run` | GET/POST | Check gate status, trigger/advance gates |
 | `/api/gates/status` | GET | Poll gate-run status for the client |
 | `/api/orchestrator/chat` | POST | Handle user messages to CTO |
+| `/api/orchestrator/chat` | DELETE | Explicitly delete the persisted CTO conversation |
+| `/api/orchestrator/approvals` | GET/POST | Show non-authorizing approval metadata; decide with a one-time capability |
 | `/api/orchestrator/status` | GET | Board health + orchestrator state |
 | `/api/orchestrator/review` | GET/POST | Trigger/query skill-based reviews |
+
+---
+
+### CTO SDK continuity and authority
+
+The CTO uses one restart-safe Copilot SDK conversation whose ID is stored in
+SQLite. Every request acquires an expiring SQLite lease, resumes the conversation,
+and re-registers its tools, hooks, event handlers, and permission policy. Release
+atomically quarantines the binding before disconnect; a fully successful
+disconnect restores the active binding without deleting history. Any reported
+abort/disconnect failure or cleanup timeout leaves the binding quarantined before
+lease release. Transport and timeout failures also retire that exact SDK runtime
+generation. A later owner must reconcile bounded deletion before it can create a
+replacement; it cannot resume the unconfirmed conversation.
+If setup fails before a newly created conversation is durably bound, Planwerk
+deletes that orphan (falling back to abort/disconnect and runtime invalidation);
+a resumed conversation is never deleted by setup cleanup. Lease-renewal timer
+failures are converted into normal cancellation/cleanup results rather than
+escaping as process-level exceptions. Renewal remains active through async
+disconnect and explicit deletion. SDK cleanup is time-bounded below the lease
+TTL, and deletion clears the durable binding only with an atomic comparison of
+the expected session ID and current lease owner. A late stale clearer therefore
+cannot remove a replacement worker's binding.
+Infinite-session compaction is bounded, and only privacy-filtered lifecycle,
+correlation, model, and usage metadata is copied into the SDK event store.
+
+Phase overrides fail closed without a persisted risk assessment. High-risk
+overrides pause on an abortable, expiring human approval bound to the exact
+normalized action, card/session identity, and current SQLite phase/risk facts;
+the executor rechecks that binding in the same immediate transaction as the
+mutation. Each approval is also bound to a unique process-boot owner whose
+SQLite lease is renewed while its SDK waiter is live. Creation returns a
+256-bit one-time decision capability only to the originating chat response;
+SQLite stores a context-bound SHA-256 digest, never the raw value. Decision
+comparison is constant-time and succeeds only while the same process owner and
+in-memory SDK waiter remain live. Restart, owner loss, waiter cancellation,
+expiry, or replay fails closed. The general GET endpoint has display metadata
+but no approval ID, digest, or capability. Decision POSTs require an exact
+loopback Origin/Host match and JSON content type; the server records the stable
+`local-human` actor and rejects client actor fields. Tool calls use owner leases:
+schema initialization never rewrites a running lease, completed results survive
+restarts, retryable failures are released, and only lease expiry allows
+recovery. Expired ambiguous mutations become explicit needs-human outcomes
+unless authoritative state proves completion. Runtime
+reassessment versions server-owned session-cache summary/enrichment and current
+phase facts with a stable digest. It commits `card_risk` by compare-and-swap
+only while that digest remains current; missing legacy digests fail closed.
+Consumed approvals retain the process-owner lease requirement through the
+owner-fenced phase transaction, so permission consumption cannot survive a
+restart. Approval turns use a bounded timeout covering the approval TTL plus
+execution overhead, and stream termination expires both waiter and UI item.
+Tool-execution schema upgrades rebuild and merge active/stranded legacy history
+inside an IMMEDIATE transaction, preserving completed and ambiguous outcomes.
+transport failures retire one SDK generation only after its active operations
+drain, while domain and parsing failures remain session-local. Conversation
+memory is advisory: live AHP facts and SQLite phase/gate/approval state remain
+authoritative.
+
+Durable CTO session bindings have explicit `active` and `deleting` states.
+Disconnect and deletion first write an owner-fenced tombstone. Confirmed
+disconnect restores `active`; every unconfirmed outcome retains quarantine, and
+runtime-invalidating failures retire the client generation. Restart
+reconciliation must confirm deletion before creating a replacement, while
+restoration and final cleanup CAS session ID, deletion token, and lease owner.
+AHP client shutdown is post-result cleanup: failures are logged without replacing
+already-confirmed session, chat, or turn identities.
+
+The capability narrows the local trust boundary; it does not add user
+authentication. See [Security model](security.md) for assumptions and limits.
+
+Peer-chat disposal is durable in `review_chat_cleanups`, keyed by normalized
+originating AHP host plus immutable chat URI and independent of the mutable
+review-iteration row. Setup and dispatch
+failures record cleanup identity and the first failed disposal atomically with
+review failure state. A lost `createChat` acknowledgement is treated as possibly
+applied and disposed by its preselected URI before retry. The process-wide
+heartbeat scans retryable rows across every stored origin host and dispatches
+each disposal through that row's host, so a host does not need an active board
+stream for its cleanups to progress.
+If a confirmed dispatch loses its review owner before the turn identity commits,
+the queue durably retains the host, chat, turn, and diagnostic without allowing
+the stale owner to rewrite replacement state. Replacement dispatch is fenced
+until peer-chat disposal succeeds; default-chat identities are quarantined for
+human resolution because disposing the session's primary chat is unsafe.
+Legacy rows without a recoverable origin are quarantined rather than sent to an
+arbitrary current host. Workers use persisted unique owners and renewable
+leases; owner-fenced compare-and-swap completion prevents stale workers from
+completing replacement claims, and schema initialization recovers only claims
+whose leases expired.
+The heartbeat performs at most three total disposal attempts; later review
+iterations cannot erase earlier cleanup diagnostics or rewrite terminal
+verdicts.
 
 ---
 
@@ -196,7 +298,7 @@ planwerk/
 │   ├── connection/{connection-dot,onboarding}.tsx
 │   └── ui/ (shadcn on Base UI)
 ├── lib/
-│   ├── ahp/{types,protocol,map-session,enrich-card,changeset-enricher,client-bridge,client-manager,session-messenger,actions,connection-error,plan-artifact,telemetry-logs,telemetry-transport}.ts
+│   ├── ahp/{types,protocol,map-session,enrich-card,changeset-enricher,client-bridge,client-operation,session-messenger,actions,connection-error,plan-artifact,telemetry-logs,telemetry-transport}.ts
 │   ├── orchestrator/{orchestrator-agent,heartbeat,gate-engine,skills,skill-config,risk-assessor,risk-store,review-executor,verdict-extractor,triage,auto-answerer,board-context,tool-executor}.ts
 │   ├── store/{board-store,connection-store,orchestrator-store}.ts
 │   ├── db/{schema,session-cache}.ts

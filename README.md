@@ -43,6 +43,12 @@ to AHP 0.9.0.
 > desktop Agent Host and its Copilot sessions. Do not expose Planwerk on a
 > network interface unless you add authentication and a separate trust boundary.
 
+High-risk CTO decisions use expiring, one-time capabilities delivered only to
+the originating local UI flow. This prevents approval-ID guessing and replay,
+but does not authenticate other native processes running as the same OS user.
+See [`zettelkasten/security.md`](zettelkasten/security.md) for the trust model
+and limitations.
+
 ## Learn more
 
 - [`zettelkasten/vision.md`](zettelkasten/vision.md) — the problem, principles, and north star
