@@ -9,17 +9,29 @@ import {
   getApplicableSkills,
 } from "@/lib/orchestrator/skill-config";
 import type { RiskLevel } from "@/lib/types";
+import { getRiskForAutomation } from "@/lib/orchestrator/risk-store";
+import { getDb } from "@/lib/db/schema";
+import {
+  getCardPhase,
+} from "@/lib/orchestrator/gate-engine";
+import { resolveAuthoritativeGateRevision } from "@/lib/orchestrator/gate-revision";
+import { normalizeChangesetRef } from "@/lib/types";
+import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
-  const { cardId, skillId, phaseTransition, riskLevel, hostUrl, sessionUri, changesetRef } =
+  const requestError = validateLocalMutationRequest(request);
+  if (requestError) {
+    return NextResponse.json({ error: requestError }, { status: 403 });
+  }
+
+  const { cardId, skillId, phaseTransition, hostUrl, sessionUri, changesetRef } =
     (await request.json()) as {
       cardId?: string;
       skillId?: string;
       phaseTransition?: string;
-      riskLevel?: RiskLevel;
       hostUrl?: string;
       sessionUri?: string;
       changesetRef?: string;
@@ -49,7 +61,34 @@ export async function POST(request: NextRequest) {
   }
 
   const transition = phaseTransition ?? "review->ship";
-  const risk = riskLevel ?? "medium";
+  const phase = getCardPhase(cardId);
+  const revision = resolveAuthoritativeGateRevision(
+    getDb(),
+    cardId,
+    phase,
+    hostUrl,
+  );
+  if (!revision.ok) {
+    return NextResponse.json(
+      {
+        error: "Authoritative revision unavailable",
+        detail: revision.reason,
+        retryable: true,
+      },
+      { status: 409 },
+    );
+  }
+  if (
+    changesetRef !== undefined
+    && normalizeChangesetRef(changesetRef)
+      !== normalizeChangesetRef(revision.changesetRef)
+  ) {
+    return NextResponse.json(
+      { error: "Changeset revision does not match current AHP facts", stale: true },
+      { status: 409 },
+    );
+  }
+  const risk = getRiskForAutomation(cardId, hostUrl);
 
   const { reviewRunId, success } = await startReview(
     hostUrl,
@@ -58,7 +97,8 @@ export async function POST(request: NextRequest) {
     skill,
     transition,
     risk,
-    changesetRef
+    revision.changesetRef,
+    { signal: request.signal },
   );
 
   if (!success) {
@@ -83,8 +123,11 @@ export async function GET(request: NextRequest) {
   const cardId = request.nextUrl.searchParams.get("cardId");
   const phaseTransition =
     request.nextUrl.searchParams.get("transition") || "plan->build";
-  const riskLevel = (request.nextUrl.searchParams.get("risk") ||
+  const requestedRisk = (request.nextUrl.searchParams.get("risk") ||
     "medium") as RiskLevel;
+  const riskLevel = cardId
+    ? getRiskForAutomation(cardId)
+    : requestedRisk;
 
   // If cardId provided, return review runs for that card
   if (cardId) {

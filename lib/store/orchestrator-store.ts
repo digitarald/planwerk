@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { orchestratorHttpErrorMessage } from "./orchestrator-response.ts";
 
 export type FeedItemType =
   | "intervention"
@@ -10,7 +11,17 @@ export type FeedItemType =
   | "user"
   | "response"
   | "heartbeat"
-  | "tool-action";
+  | "tool-action"
+  | "approval-required";
+
+export interface PendingCtoApproval {
+  decisionCapability: string;
+  toolName: string;
+  riskLevel: string;
+  action: Record<string, unknown>;
+  facts: Record<string, unknown>;
+  expiresAtMs: number;
+}
 
 export interface FeedItem {
   id: string;
@@ -22,6 +33,26 @@ export interface FeedItem {
   projectName?: string;
   isStreaming?: boolean;
   toolName?: string;
+  approval?: PendingCtoApproval;
+  decisionPending?: boolean;
+}
+
+export function closeCtoApprovals(
+  feedItems: FeedItem[],
+  capabilities: ReadonlySet<string>,
+): FeedItem[] {
+  return feedItems.map((item) =>
+    item.approval &&
+      capabilities.has(item.approval.decisionCapability)
+      ? {
+          ...item,
+          type: "alert",
+          message: "This approval expired when the CTO turn ended.",
+          approval: undefined,
+          decisionPending: false,
+        }
+      : item
+  );
 }
 
 /** Instrument-readout state for the connection/monitoring status. Kept out of
@@ -44,6 +75,10 @@ interface OrchestratorState {
    *  not the feed). */
   setMonitoringStatus: (sessionCount: number) => void;
   sendMessage: (message: string, hostUrl?: string, cards?: unknown[]) => Promise<void>;
+  decideApproval: (
+    decisionCapability: string,
+    decision: "approve" | "reject",
+  ) => Promise<void>;
   clearFeed: () => void;
 }
 
@@ -94,8 +129,70 @@ export const useOrchestratorStore = create<OrchestratorState>()(
         }));
       },
 
+      decideApproval: async (decisionCapability, decision) => {
+        set((state) => ({
+          feedItems: state.feedItems.map((item) =>
+            item.approval?.decisionCapability === decisionCapability
+              ? { ...item, decisionPending: true }
+              : item
+          ),
+        }));
+        try {
+          const response = await fetch("/api/orchestrator/approvals", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ decisionCapability, decision }),
+          });
+          if (!response.ok) {
+            let message = "This decision request is no longer active.";
+            try {
+              const payload = await response.json() as { error?: unknown };
+              if (typeof payload.error === "string") message = payload.error;
+            } catch {}
+            set((state) => ({
+              feedItems: state.feedItems.map((item) =>
+                item.approval?.decisionCapability === decisionCapability
+                  ? {
+                      ...item,
+                      type: "alert",
+                      message,
+                      approval: undefined,
+                      decisionPending: false,
+                    }
+                  : item
+              ),
+            }));
+            return;
+          }
+          set((state) => ({
+            feedItems: state.feedItems.map((item) =>
+              item.approval?.decisionCapability === decisionCapability
+                ? {
+                    ...item,
+                    type: "tool-action",
+                    message: decision === "approve"
+                      ? "High-risk action approved once."
+                      : "High-risk action rejected.",
+                    approval: undefined,
+                    decisionPending: false,
+                  }
+                : item
+            ),
+          }));
+        } catch {
+          set((state) => ({
+            feedItems: state.feedItems.map((item) =>
+              item.approval?.decisionCapability === decisionCapability
+                ? { ...item, decisionPending: false }
+                : item
+            ),
+          }));
+        }
+      },
+
       sendMessage: async (message: string, hostUrl?: string, cards?: unknown[]) => {
         const { addFeedItem, updateLastResponse } = get();
+        const streamApprovals = new Set<string>();
 
         addFeedItem({ type: "user", message });
         set({ isProcessing: true });
@@ -108,6 +205,19 @@ export const useOrchestratorStore = create<OrchestratorState>()(
           });
 
           const contentType = response.headers.get("content-type") ?? "";
+          if (!response.ok) {
+            let payload: unknown;
+            try {
+              payload = await response.json();
+            } catch {
+              payload = undefined;
+            }
+            addFeedItem({
+              type: "alert",
+              message: orchestratorHttpErrorMessage(response.status, payload),
+            });
+            return;
+          }
 
           if (contentType.includes("text/event-stream")) {
             // Streaming response — read SSE events
@@ -118,6 +228,8 @@ export const useOrchestratorStore = create<OrchestratorState>()(
 
             const decoder = new TextDecoder();
             let buffer = "";
+            let receivedText = false;
+            let receivedError = false;
 
             while (true) {
               const { done, value } = await reader.read();
@@ -133,6 +245,7 @@ export const useOrchestratorStore = create<OrchestratorState>()(
                 try {
                   const event = JSON.parse(jsonStr);
                   if (event.type === "text") {
+                    receivedText = Boolean(event.content);
                     updateLastResponse(event.content);
                   } else if (event.type === "tool") {
                     addFeedItem({
@@ -140,6 +253,49 @@ export const useOrchestratorStore = create<OrchestratorState>()(
                       message: event.result?.message ?? `Executed ${event.name}`,
                       toolName: event.name,
                     });
+                  } else if (
+                    event.type === "approval-required" &&
+                    typeof event.decisionCapability === "string" &&
+                    typeof event.toolName === "string" &&
+                    typeof event.expiresAtMs === "number"
+                  ) {
+                    streamApprovals.add(event.decisionCapability);
+                    const targetPhase =
+                      typeof event.action?.targetPhase === "string"
+                        ? ` to ${event.action.targetPhase}`
+                        : "";
+                    addFeedItem({
+                      type: "approval-required",
+                      message:
+                        `Review ${event.toolName}${targetPhase} before it runs.`,
+                      cardId:
+                        typeof event.cardId === "string"
+                          ? event.cardId
+                          : undefined,
+                      toolName: event.toolName,
+                      approval: {
+                        decisionCapability: event.decisionCapability,
+                        toolName: event.toolName,
+                        riskLevel:
+                          typeof event.riskLevel === "string"
+                            ? event.riskLevel
+                            : "high",
+                        action:
+                          event.action && typeof event.action === "object"
+                            ? event.action
+                            : {},
+                        facts:
+                          event.facts && typeof event.facts === "object"
+                            ? event.facts
+                            : {},
+                        expiresAtMs: event.expiresAtMs,
+                      },
+                    });
+                  } else if (event.type === "error") {
+                    receivedError = true;
+                    updateLastResponse(
+                      `${event.message ?? "CTO stream failed"}. Please try again.`
+                    );
                   } else if (event.type === "done") {
                     updateLastResponse(
                       get().feedItems.find((f) => f.isStreaming)?.message ?? "",
@@ -152,6 +308,11 @@ export const useOrchestratorStore = create<OrchestratorState>()(
               }
             }
 
+            if (!receivedText && !receivedError) {
+              updateLastResponse(
+                "No CTO response was received. Please try again."
+              );
+            }
             // Ensure streaming state is cleaned up
             updateLastResponse(
               get().feedItems.find((f) => f.isStreaming)?.message ?? "",
@@ -160,15 +321,39 @@ export const useOrchestratorStore = create<OrchestratorState>()(
           } else {
             // Non-streaming JSON fallback
             const data = await response.json();
-            addFeedItem({ type: "response", message: data.response });
+            if (typeof data.response === "string" && data.response.trim()) {
+              addFeedItem({ type: "response", message: data.response });
+            } else {
+              addFeedItem({
+                type: "alert",
+                message: "No CTO response was received. Please try again.",
+              });
+            }
           }
         } catch {
-          addFeedItem({
-            type: "alert",
-            message: "Failed to process message. Try again.",
-          });
+          const streaming = get().feedItems.find(
+            (item) => item.type === "response" && item.isStreaming
+          );
+          if (streaming) {
+            updateLastResponse(
+              `${streaming.message}${streaming.message ? "\n\n" : ""}` +
+                "The CTO response was interrupted. Please try again.",
+              true
+            );
+          } else {
+            addFeedItem({
+              type: "alert",
+              message: "Failed to process message. Try again.",
+            });
+          }
         } finally {
-          set({ isProcessing: false });
+          set((state) => ({
+            isProcessing: false,
+            feedItems: closeCtoApprovals(
+              state.feedItems,
+              streamApprovals,
+            ),
+          }));
         }
       },
 
@@ -179,7 +364,7 @@ export const useOrchestratorStore = create<OrchestratorState>()(
       storage: createJSONStorage(() => sessionStorage),
       partialize: (state) => ({
         feedItems: state.feedItems
-          .filter((f) => !f.isStreaming)
+          .filter((f) => !f.isStreaming && !f.approval)
           .slice(0, 50),
       }),
       onRehydrateStorage: () => (state) => {

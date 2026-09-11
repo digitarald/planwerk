@@ -284,6 +284,16 @@ function formatHeartbeatAction(action: HeartbeatActionData): { type: "interventi
         type: "alert",
         message: `Plan review needs attention: ${action.reason ?? "configured gate execution or feedback delivery failed."}`,
       };
+    case "risk-assessment-required":
+      return {
+        type: "alert",
+        message: action.reason ?? "Risk assessment is missing or stale; reassess before automation can continue.",
+      };
+    case "source-revision-required":
+      return {
+        type: "alert",
+        message: action.reason ?? "Current source revision is unavailable; automation is blocked.",
+      };
     case "stale-gate-invalidated":
       return {
         type: "intervention",

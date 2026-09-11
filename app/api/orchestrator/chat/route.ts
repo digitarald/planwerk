@@ -1,100 +1,66 @@
+import type { SessionConfig } from "@github/copilot-sdk";
 import { NextRequest, NextResponse } from "next/server";
 
-import { CopilotClient } from "@github/copilot-sdk";
-import type { CopilotSession } from "@github/copilot-sdk";
-
+import { getCtoContinuityStore } from "@/lib/db/cto-continuity";
 import { getDb } from "@/lib/db/schema";
-import { disposeOneShotSession } from "@/lib/orchestrator/copilot-session";
+import { createSdkObservabilityIngestor } from "@/lib/db/sdk-observability";
+import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
+import {
+  createCtoPermissionPolicy,
+  getCtoTurnTimeoutMs,
+  type CtoPendingApprovalDecision,
+} from "@/lib/orchestrator/cto-approval";
+import {
+  CtoSessionLeaseBusyError,
+  CtoSessionManager,
+  type CtoSessionHandle,
+} from "@/lib/orchestrator/cto-session-manager";
+import {
+  invalidateRuntimeForCleanupFailure,
+  releaseRuntimeLease,
+} from "@/lib/orchestrator/copilot-session";
 import { buildSystemPrompt } from "@/lib/orchestrator/orchestrator-agent";
-import { executeToolCall } from "@/lib/orchestrator/tool-executor";
-import type { OrchestratorToolName } from "@/lib/orchestrator/orchestrator-agent";
-import { ORCHESTRATOR_MODEL } from "@/lib/orchestrator/model";
+import {
+  createOrchestratorSdkTools,
+  ORCHESTRATOR_TOOLS,
+} from "@/lib/orchestrator/orchestrator-tools";
+import type { OrchestratorToolResultEvent } from "@/lib/orchestrator/orchestrator-tools";
+import {
+  createSdkEventMapper,
+  mapSdkFailure,
+} from "@/lib/orchestrator/orchestrator-stream";
+import { selectOrchestratorModel } from "@/lib/orchestrator/model";
+import {
+  acquireCopilotRuntimeClient,
+  classifyCopilotFailure,
+  isCopilotRuntimeInvalidatingFailure,
+} from "@/lib/orchestrator/sdk-runtime";
+import type { CopilotRuntimeLease } from "@/lib/orchestrator/sdk-runtime-manager";
+import {
+  executeToolCall,
+  getAuthoritativeApprovalBinding,
+} from "@/lib/orchestrator/tool-executor";
+import { TurnSubmission } from "@/lib/orchestrator/turn-submission";
 import type { KanbanCard } from "@/lib/types";
+import type { CopilotClient } from "@github/copilot-sdk";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const ALLOWED_TOOL_NAMES: Set<string> = new Set([
-  "create_session", "send_message", "answer_input",
-  "trigger_review", "trigger_gate", "override_phase", "assess_risk",
-]);
+const TOOL_NAMES = ORCHESTRATOR_TOOLS.map((tool) => tool.function.name);
+const SESSION_TIMEOUT_MS = getCtoTurnTimeoutMs();
 
 function isLocalHost(url: string): boolean {
   try {
-    const parsed = new URL(url);
-    const host = parsed.hostname;
-    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+    const host = new URL(url).hostname;
+    return (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "::1" ||
+      host === "[::1]"
+    );
   } catch {
     return false;
-  }
-}
-
-// Module-level singleton for the orchestrator Copilot session
-let copilotClient: CopilotClient | null = null;
-let copilotSession: CopilotSession | null = null;
-let clientStarting: Promise<void> | null = null;
-
-async function ensureSession(): Promise<CopilotSession | null> {
-  if (copilotSession) return copilotSession;
-  if (clientStarting) {
-    await clientStarting;
-    return copilotSession;
-  }
-
-  clientStarting = (async () => {
-    try {
-      copilotClient = new CopilotClient();
-      await copilotClient.start();
-      copilotSession = await copilotClient.createSession({
-        model: ORCHESTRATOR_MODEL,
-        systemMessage: {
-          content:
-            "You are the CTO agent for Planwerk — an autonomous SDLC orchestrator. You help manage AI agent sessions flowing through a kanban pipeline. Be concise and actionable.",
-        },
-      });
-    } catch (err) {
-      console.warn("[orchestrator-chat] Failed to start Copilot SDK:", err instanceof Error ? err.message : err);
-      copilotClient = null;
-      copilotSession = null;
-    } finally {
-      clientStarting = null;
-    }
-  })();
-
-  await clientStarting;
-  return copilotSession;
-}
-
-async function resetSession() {
-  const session = copilotSession;
-  const client = copilotClient;
-  copilotSession = null;
-  copilotClient = null;
-
-  if (session && client) {
-    await disposeOneShotSession(
-      client,
-      session,
-      true,
-      "[orchestrator-chat]"
-    );
-  } else if (session) {
-    try {
-      await session.abort();
-      await session.disconnect();
-    } catch (error) {
-      console.warn(
-        "[orchestrator-chat] Failed to release Copilot SDK session:",
-        error instanceof Error ? error.message : error
-      );
-    }
-  }
-
-  if (client) {
-    const errors = await client.stop().catch((error) => [error]);
-    if (errors.length > 0) {
-      console.warn("[orchestrator-chat] Failed to stop Copilot SDK client:", errors);
-    }
   }
 }
 
@@ -127,145 +93,10 @@ function getCardsFromDb(): KanbanCard[] {
   }));
 }
 
-/**
- * Chat endpoint — streams response via SSE for progressive rendering.
- * Each SSE event is a JSON object with type: "text" | "tool" | "done" | "error"
- */
-export async function POST(request: NextRequest) {
-  const { message, selectedCardId, cards: clientCards, hostUrl } = (await request.json()) as {
-    message?: string;
-    selectedCardId?: string;
-    cards?: KanbanCard[];
-    hostUrl?: string;
-  };
-
-  if (!message) {
-    return NextResponse.json({ error: "message required" }, { status: 400 });
-  }
-
-  // Validate hostUrl is localhost-only to prevent SSRF
-  if (hostUrl && !isLocalHost(hostUrl)) {
-    return NextResponse.json({ error: "hostUrl must be localhost" }, { status: 400 });
-  }
-
-  const cards = clientCards ?? getCardsFromDb();
-  const selectedCard = selectedCardId
-    ? cards.find((c) => c.id === selectedCardId)
-    : undefined;
-
-  const systemContext = buildSystemPrompt(cards, selectedCard);
-  const fullPrompt = `<board_context>\n${systemContext}\n</board_context>\n\n<user_message>\n${message}\n</user_message>`;
-
-  // Try LLM-powered streaming response via Copilot SDK
-  const session = await ensureSession();
-  if (session) {
-    try {
-      const encoder = new TextEncoder();
-      const stream = new ReadableStream({
-        async start(controller) {
-          function send(data: Record<string, unknown>) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-          }
-
-          let fullResponse = "";
-
-          const unsubscribe = session!.on((event) => {
-            if (event.type === "assistant.message") {
-              const content = event.data?.content;
-              if (content) {
-                fullResponse = content;
-              }
-            }
-          });
-
-          try {
-            const response = await session!.sendAndWait(
-              { prompt: fullPrompt },
-              60_000
-            );
-
-            const content = response?.data?.content ?? fullResponse;
-
-            if (content) {
-              // Check if response contains tool-call patterns (action suggestions)
-              const toolActions = parseToolActions(content);
-              if (toolActions.length > 0 && hostUrl) {
-                // Execute tool calls server-side
-                for (const action of toolActions) {
-                  const result = await executeToolCall(
-                    action.name as OrchestratorToolName,
-                    action.args,
-                    { hostUrl, cards }
-                  );
-                  send({ type: "tool", name: action.name, result });
-                }
-              }
-
-              send({ type: "text", content });
-              send({ type: "done" });
-            } else {
-              send({ type: "text", content: generateFallback(message, cards, selectedCard) });
-              send({ type: "done", source: "fallback" });
-            }
-          } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err);
-            console.warn("[orchestrator-chat] Copilot SDK error:", errMsg);
-            send({ type: "text", content: generateFallback(message, cards, selectedCard) });
-            send({ type: "done", source: "fallback" });
-            resetSession().catch(() => {});
-          } finally {
-            unsubscribe();
-            controller.close();
-          }
-        },
-      });
-
-      return new NextResponse(stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache, no-transform",
-          Connection: "keep-alive",
-        },
-      });
-    } catch (err) {
-      console.warn("[orchestrator-chat] Stream setup error:", err instanceof Error ? err.message : err);
-      await resetSession();
-    }
-  }
-
-  // Non-streaming fallback
-  const fallbackResponse = generateFallback(message, cards, selectedCard);
-  return NextResponse.json({ response: fallbackResponse, source: "fallback" });
-}
-
-/**
- * Parse tool call patterns from the LLM response text.
- * The LLM may embed action markers like [ACTION: tool_name(args)]
- */
-function parseToolActions(content: string): Array<{ name: string; args: Record<string, unknown> }> {
-  const actions: Array<{ name: string; args: Record<string, unknown> }> = [];
-  const pattern = /\[ACTION:\s*(\w+)\(([^)]*)\)\]/g;
-  let match;
-
-  while ((match = pattern.exec(content)) !== null) {
-    const name = match[1];
-    if (!ALLOWED_TOOL_NAMES.has(name)) continue;
-    const argsStr = match[2];
-    try {
-      const args = argsStr ? JSON.parse(`{${argsStr}}`) : {};
-      actions.push({ name, args });
-    } catch {
-      // Skip malformed action
-    }
-  }
-
-  return actions;
-}
-
-function generateFallback(
+function generateReadOnlyFallback(
   message: string,
   cards: KanbanCard[],
-  selectedCard?: KanbanCard
+  selectedCard?: KanbanCard,
 ): string {
   const lower = message.toLowerCase();
   const phases = { define: 0, plan: 0, build: 0, review: 0, ship: 0 };
@@ -276,24 +107,482 @@ function generateFallback(
   }
 
   const summary = `Board: ${phases.define} defining, ${phases.plan} planning, ${phases.build} building, ${phases.review} in review, ${phases.ship} shipped.`;
+  const degraded = "Degraded read-only mode — CTO actions are disabled. ";
 
   if (lower.includes("status") || lower.includes("board") || lower.includes("how")) {
-    return summary + (selectedCard ? ` Selected: ${selectedCard.title} in ${selectedCard.phase}.` : "");
+    return degraded + summary +
+      (selectedCard
+        ? ` Selected: ${selectedCard.title} in ${selectedCard.phase}.`
+        : "");
   }
-
   if (lower.includes("stuck") || lower.includes("why")) {
-    return selectedCard
+    return degraded + (selectedCard
       ? `${selectedCard.title} is in ${selectedCard.phase} (${selectedCard.runtime}). Check if it needs input or has a gate failure.`
-      : `${summary} Use "stuck" with a selected card for details.`;
+      : `${summary} Select a card for details.`);
   }
-
   if (lower.includes("next") || lower.includes("what should")) {
-    const attentionCards = cards.filter((c) => c.attention !== "none" || c.runtime === "input-needed");
-    if (attentionCards.length > 0) {
-      return `Priority: ${attentionCards[0].title} needs attention (${attentionCards[0].attention || attentionCards[0].runtime}).`;
-    }
-    return `${summary} No cards need immediate attention.`;
+    const attentionCards = cards.filter(
+      (card) =>
+        card.attention !== "none" || card.runtime === "input-needed",
+    );
+    return degraded + (attentionCards.length > 0
+      ? `Priority: ${attentionCards[0].title} needs attention (${attentionCards[0].attention || attentionCards[0].runtime}).`
+      : `${summary} No cards need immediate attention.`);
+  }
+  return degraded + summary;
+}
+
+function sseResponse(events: Record<string, unknown>[]): Response {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const event of events) {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+          );
+        }
+        controller.close();
+      },
+    }),
+    {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Content-Type-Options": "nosniff",
+        Connection: "keep-alive",
+      },
+    },
+  );
+}
+
+function degradedResponse(
+  error: unknown,
+  message: string,
+  cards: KanbanCard[],
+  selectedCard?: KanbanCard,
+): Response {
+  return sseResponse([
+    mapSdkFailure(error, "degraded"),
+    {
+      type: "text",
+      content: generateReadOnlyFallback(message, cards, selectedCard),
+    },
+    {
+      type: "done",
+      status: "degraded",
+      actionsDisabled: true,
+    },
+  ]);
+}
+
+/**
+ * Chat endpoint — streams native Copilot SDK deltas and tool lifecycle events
+ * over SSE. Prose in the assistant response never authorizes an action.
+ */
+export async function POST(request: NextRequest) {
+  const requestError = validateLocalMutationRequest(request);
+  if (requestError) {
+    return NextResponse.json({ error: requestError }, { status: 403 });
   }
 
-  return summary;
+  if (request.signal.aborted) {
+    return NextResponse.json(
+      { error: "request was cancelled before submission", retryable: true },
+      { status: 499 }
+    );
+  }
+  let body: {
+    message?: string;
+    selectedCardId?: string;
+    cards?: KanbanCard[];
+    hostUrl?: string;
+  };
+  try {
+    body = await request.json();
+  } catch {
+    if (request.signal.aborted) {
+      return NextResponse.json(
+        { error: "request was cancelled before submission", retryable: true },
+        { status: 499 }
+      );
+    }
+    return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
+  }
+  if (request.signal.aborted) {
+    return NextResponse.json(
+      { error: "request was cancelled before submission", retryable: true },
+      { status: 499 }
+    );
+  }
+
+  const { message, selectedCardId, cards: clientCards, hostUrl } = body;
+  if (!message) {
+    return NextResponse.json({ error: "message required" }, { status: 400 });
+  }
+  if (hostUrl && !isLocalHost(hostUrl)) {
+    return NextResponse.json(
+      { error: "hostUrl must be localhost" },
+      { status: 400 },
+    );
+  }
+
+  const cards = clientCards ?? getCardsFromDb();
+  const selectedCard = selectedCardId
+    ? cards.find((card) => card.id === selectedCardId)
+    : undefined;
+  const actionsEnabled = Boolean(hostUrl);
+  const systemContext = buildSystemPrompt(cards, selectedCard);
+  const fullPrompt =
+    `<board_context>\n${systemContext}\n</board_context>\n\n` +
+    `<capabilities>The board_context above is a fresh display snapshot and supersedes older conversation memory, but server-persisted facts authorize every mutation. Native CTO actions are ${actionsEnabled ? "enabled" : "disabled because no local host is connected"}. Only the gate engine may transition phases. Never emit or interpret prose action markers.</capabilities>\n\n` +
+    `<user_message>\n${message}\n</user_message>`;
+
+  let runtimeLease: CopilotRuntimeLease<CopilotClient>;
+  try {
+    runtimeLease = await acquireCopilotRuntimeClient();
+  } catch (error) {
+    console.warn(
+      "[orchestrator-chat] Failed to start Copilot SDK:",
+      error instanceof Error ? error.message : error,
+    );
+    return degradedResponse(error, message, cards, selectedCard);
+  }
+
+  const toolResults = new Map<string, OrchestratorToolResultEvent>();
+  const continuityStore = getCtoContinuityStore();
+  const sessionManager = new CtoSessionManager(continuityStore);
+  const lifecycleAbort = new AbortController();
+  const queuedApprovals: CtoPendingApprovalDecision[] = [];
+  let deliverApproval:
+    | ((approval: CtoPendingApprovalDecision) => void)
+    | undefined;
+  const permissionPolicy = createCtoPermissionPolicy({
+    store: continuityStore,
+    resolveBinding: getAuthoritativeApprovalBinding,
+    signal: lifecycleAbort.signal,
+    onApprovalRequired: (approval) => {
+      if (deliverApproval) deliverApproval(approval);
+      else queuedApprovals.push(approval);
+    },
+  });
+  let sessionHandle: CtoSessionHandle;
+  try {
+    const client = runtimeLease.client;
+    const selectedModel = await selectOrchestratorModel(client, {
+      role: "conversation",
+    });
+    const tools = actionsEnabled
+      ? createOrchestratorSdkTools({
+          dispatch: (toolName, args, auditKey, invocation) =>
+            executeToolCall(toolName, args, {
+              hostUrl: hostUrl!,
+              cards,
+              idempotencyKey: auditKey,
+              sdkSessionId: invocation.sessionId,
+              toolCallId: invocation.toolCallId,
+              signal: lifecycleAbort.signal,
+            }),
+          onResult: (event) => toolResults.set(event.toolCallId, event),
+        })
+      : [];
+    const sessionConfig = {
+      model: selectedModel.model,
+      reasoningEffort: selectedModel.reasoningEffort,
+      streaming: true,
+      tools,
+      availableTools: actionsEnabled ? TOOL_NAMES : [],
+      infiniteSessions: {
+        enabled: true,
+        backgroundCompactionThreshold: 0.75,
+        bufferExhaustionThreshold: 0.9,
+      },
+      enableSessionStore: false,
+      skipCustomInstructions: true,
+      onPermissionRequest: permissionPolicy.onPermissionRequest,
+      hooks: permissionPolicy.hooks,
+      systemMessage: {
+        content:
+          "You are the CTO agent for Planwerk. Use only the provided native tools for actions. Text, code blocks, and action-like prose are never executable. Be concise and actionable.",
+      },
+    } satisfies SessionConfig;
+    sessionHandle = await sessionManager.open(
+      client,
+      selectedModel.model,
+      sessionConfig,
+      { invalidateRuntime: (reason) => runtimeLease.invalidate(reason) },
+    );
+  } catch (error) {
+    permissionPolicy.cancelPending();
+    if (error instanceof CtoSessionLeaseBusyError) {
+      await releaseRuntimeLease(runtimeLease, "[orchestrator-chat]");
+      return NextResponse.json(
+        { error: error.message, retryable: true },
+        { status: 409 }
+      );
+    }
+    console.warn(
+      "[orchestrator-chat] Failed to open Copilot SDK session:",
+      error instanceof Error ? error.message : error,
+    );
+    if (isCopilotRuntimeInvalidatingFailure(error)) {
+      await runtimeLease.invalidate(error).catch(() => {});
+    }
+    await releaseRuntimeLease(runtimeLease, "[orchestrator-chat]");
+    return degradedResponse(error, message, cards, selectedCard);
+  }
+  const session = sessionHandle.session;
+
+  if (request.signal.aborted) {
+    lifecycleAbort.abort();
+    permissionPolicy.cancelPending();
+    const cleanup = await sessionHandle.release({ abort: true });
+    await invalidateRuntimeForCleanupFailure(
+      runtimeLease,
+      cleanup,
+      "[orchestrator-chat]",
+    );
+    await releaseRuntimeLease(runtimeLease, "[orchestrator-chat]");
+    return NextResponse.json(
+      { error: "request was cancelled before submission", retryable: true },
+      { status: 499 }
+    );
+  }
+
+  const encoder = new TextEncoder();
+  const submission = new TurnSubmission();
+  let controllerClosed = false;
+  let cleanupPromise: Promise<void> | null = null;
+
+  const cleanup = (abort: boolean, transportError?: unknown) => {
+    lifecycleAbort.abort();
+    permissionPolicy.cancelPending();
+    cleanupPromise ??= (async () => {
+      let cleanupInvalidationReason = transportError;
+      const cleanup = await sessionHandle.release({ abort });
+      const cleanupFailure = cleanup.failures.find(
+        ({ error }) => isCopilotRuntimeInvalidatingFailure(error),
+      );
+      cleanupInvalidationReason ??= cleanupFailure?.error;
+      if (cleanupInvalidationReason !== undefined) {
+        await runtimeLease.invalidate(cleanupInvalidationReason).catch((error) => {
+          console.warn(
+            "[orchestrator-chat] Failed to invalidate Copilot SDK runtime:",
+            error instanceof Error ? error.message : error
+          );
+        });
+      }
+      await releaseRuntimeLease(runtimeLease, "[orchestrator-chat]");
+    })();
+    return cleanupPromise;
+  };
+
+  const abortTurn = () => {
+    submission.cancel();
+    void cleanup(true);
+  };
+  request.signal.addEventListener("abort", abortTurn, { once: true });
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const mapper = createSdkEventMapper(toolResults);
+      const ingest = createSdkObservabilityIngestor({
+        sdkSessionId: session.sessionId,
+        boardId: "primary",
+        workspaceId: process.cwd(),
+        cardId: selectedCardId,
+      });
+      const send = (data: Record<string, unknown>) => {
+        if (submission.cancelled || controllerClosed) return;
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(data)}\n\n`),
+        );
+      };
+      deliverApproval = (approval) => {
+        send({
+          type: "approval-required",
+          decisionCapability: approval.decisionCapability,
+          toolName: approval.toolName,
+          cardId: approval.cardId,
+          riskLevel: approval.riskLevel,
+          action: approval.action,
+          facts: approval.facts,
+          expiresAtMs: approval.expiresAtMs,
+        });
+      };
+      for (const approval of queuedApprovals.splice(0)) {
+        deliverApproval(approval);
+      }
+      const unsubscribe = session.on((event) => {
+        if (event.type === "session.shutdown" || event.type === "session.error") {
+          lifecycleAbort.abort();
+          permissionPolicy.cancelPending();
+        }
+        try {
+          ingest(event);
+        } catch (error) {
+          console.warn(
+            "[orchestrator-chat] Failed to persist SDK event:",
+            error instanceof Error ? error.message : error
+          );
+        }
+        const mapped = mapper.map(event);
+        if (!mapped) return;
+        send(mapped);
+        if (mapped.type === "error") {
+          send({
+            type: "text",
+            content:
+              `${mapper.content}${mapper.content ? "\n\n" : ""}` +
+              `CTO error — actions disabled: ${mapped.message}`,
+          });
+        }
+      });
+
+      let abortOnCleanup = false;
+      let transportError: unknown;
+      try {
+        if (!submission.tryStart(request.signal.aborted)) {
+          abortOnCleanup = true;
+          return;
+        }
+        await session.sendAndWait({ prompt: fullPrompt }, SESSION_TIMEOUT_MS);
+        submission.finish();
+        if (submission.cancelled) {
+          abortOnCleanup = true;
+          return;
+        }
+        if (mapper.error) {
+          abortOnCleanup = true;
+          const mappedError = mapper.error;
+          if (mappedError.type !== "error") {
+            throw new Error("Invalid SDK error event");
+          }
+          const sessionError = Object.assign(
+            new Error(mappedError.message),
+            { name: mappedError.errorType ?? "SessionError" }
+          );
+          if (classifyCopilotFailure(sessionError) === "transport") {
+            transportError = sessionError;
+          }
+          send({
+            type: "done",
+            status: "error",
+            actionsDisabled: true,
+          });
+        } else if (!mapper.content) {
+          abortOnCleanup = true;
+          const mapped = mapSdkFailure(
+            new Error("Copilot SDK returned no assistant message"),
+          );
+          send(mapped);
+          send({
+            type: "text",
+            content: `CTO error — actions disabled: ${mapped.message}`,
+          });
+          send({
+            type: "done",
+            status: "error",
+            actionsDisabled: true,
+          });
+        } else {
+          send({ type: "done", status: "success" });
+        }
+      } catch (error) {
+        abortOnCleanup = true;
+        if (classifyCopilotFailure(error) === "transport") {
+          transportError = error;
+        }
+        if (!submission.cancelled) {
+          console.warn(
+            "[orchestrator-chat] Copilot SDK turn failed:",
+            error instanceof Error ? error.message : error,
+          );
+          const mapped = mapSdkFailure(error);
+          send(mapped);
+          send({
+            type: "text",
+            content:
+              `${mapper.content}${mapper.content ? "\n\n" : ""}` +
+              `CTO error — actions disabled: ${mapped.message}`,
+          });
+          send({
+            type: "done",
+            status: "error",
+            actionsDisabled: true,
+          });
+        }
+
+      } finally {
+        deliverApproval = undefined;
+        queuedApprovals.length = 0;
+        unsubscribe();
+        request.signal.removeEventListener("abort", abortTurn);
+        await cleanup(
+          abortOnCleanup || submission.cancelled,
+          transportError
+        );
+        if (!submission.cancelled && !controllerClosed) {
+          controllerClosed = true;
+          controller.close();
+        }
+      }
+    },
+    async cancel() {
+      submission.cancel();
+      request.signal.removeEventListener("abort", abortTurn);
+      await cleanup(true);
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Content-Type-Options": "nosniff",
+      Connection: "keep-alive",
+    },
+  });
+}
+
+export async function DELETE(request: NextRequest) {
+  const requestError = validateLocalMutationRequest(request, "DELETE");
+  if (requestError) {
+    return NextResponse.json({ error: requestError }, { status: 403 });
+  }
+
+  let runtimeLease: CopilotRuntimeLease<CopilotClient> | undefined;
+  try {
+    runtimeLease = await acquireCopilotRuntimeClient();
+    const cleared = await new CtoSessionManager(
+      getCtoContinuityStore()
+    ).clear(runtimeLease.client, {
+      invalidateRuntime: (reason) => runtimeLease!.invalidate(reason),
+    });
+    return NextResponse.json({ cleared });
+  } catch (error) {
+    if (error instanceof CtoSessionLeaseBusyError) {
+      return NextResponse.json(
+        { error: error.message, retryable: true },
+        { status: 409 }
+      );
+    }
+    if (runtimeLease && isCopilotRuntimeInvalidatingFailure(error)) {
+      await runtimeLease.invalidate(error).catch((resetError) => {
+        console.warn(
+          "[orchestrator-chat] Failed to invalidate Copilot SDK runtime after clear failure:",
+          resetError instanceof Error ? resetError.message : resetError,
+        );
+      });
+    }
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error ? error.message : "Failed to clear CTO session",
+      },
+      { status: 500 }
+    );
+  } finally {
+    await releaseRuntimeLease(runtimeLease, "[orchestrator-chat]");
+  }
 }

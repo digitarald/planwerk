@@ -10,7 +10,10 @@ import {
   isStaticChangesetUri,
 } from "@/lib/ahp/changeset-review";
 import { findSessionChangeset } from "@/lib/ahp/changeset-enricher";
-import { readChangesetState, readSessionState } from "@/lib/ahp/snapshot";
+import { readReadyChangesetState } from "@/lib/ahp/changeset-readiness";
+import { readSessionState } from "@/lib/ahp/snapshot";
+import { withAHPClient } from "@/lib/ahp/client-operation";
+import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
 
 const debug = (...args: unknown[]) => {
   if (process.env.AHP_DEBUG) console.info("[ahp:review]", ...args);
@@ -28,6 +31,11 @@ function reviewResponse(changeset: Changeset, files: Parameters<typeof changeset
  * again from the host, so stale cards cannot mutate a different changeset.
  */
 export async function POST(request: NextRequest) {
+  const requestError = validateLocalMutationRequest(request);
+  if (requestError) {
+    return NextResponse.json({ error: requestError }, { status: 403 });
+  }
+
   const body = (await request.json()) as {
     hostUrl?: unknown;
     sessionUri?: unknown;
@@ -57,10 +65,7 @@ export async function POST(request: NextRequest) {
   const fileIds = files as string[];
 
   try {
-    const { getAHPClient, releaseAHPClient } = await import("@/lib/ahp/client-manager");
-    const client = await getAHPClient(hostUrl);
-
-    try {
+    return await withAHPClient(hostUrl, async (client) => {
       const session = await readSessionState(client, sessionUri);
       const changeset = session?.changesets ? findSessionChangeset(session.changesets) : undefined;
 
@@ -78,13 +83,12 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      const before = await readChangesetState(client, changeset.uriTemplate);
-      if (!before || before.status !== "ready") {
+      const before = await readReadyChangesetState(client, changeset.uriTemplate);
+      if (!before) {
         return NextResponse.json(
           {
             error: "Changeset is not ready",
             stale: true,
-            ...(before ? reviewResponse(changeset, before.files) : {}),
           },
           { status: 409 },
         );
@@ -129,13 +133,12 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      const after = await readChangesetState(client, authoritativeChangeset.uriTemplate);
-      if (!after || after.status !== "ready") {
+      const after = await readReadyChangesetState(client, authoritativeChangeset.uriTemplate);
+      if (!after) {
         return NextResponse.json(
           {
             error: "Changeset changed while updating review state",
             stale: true,
-            ...(after ? reviewResponse(authoritativeChangeset, after.files) : {}),
           },
           { status: 409 },
         );
@@ -160,9 +163,7 @@ export async function POST(request: NextRequest) {
       }
 
       return NextResponse.json({ ok: true, ...reviewResponse(authoritativeChangeset, after.files) });
-    } finally {
-      releaseAHPClient(hostUrl);
-    }
+    });
   } catch (err) {
     console.error("[ahp:review] error:", err instanceof Error ? err.message : err);
     return ahpErrorResponse(err, "Failed to update file review state");

@@ -19,6 +19,8 @@ import {
   isInputObservedRemoved,
 } from "@/lib/ahp/input-presence";
 import { resolveToolConfirmationDecision } from "@/lib/ahp/tool-safety";
+import { withAHPClient } from "@/lib/ahp/client-operation";
+import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
 
 const debug = (...args: unknown[]) => {
   if (process.env.AHP_DEBUG) console.info("[ahp:input]", ...args);
@@ -34,6 +36,11 @@ const debug = (...args: unknown[]) => {
  * - otherwise → user elicitation (dispatch `chat/inputAnswerChanged` + `chat/inputCompleted`).
  */
 export async function POST(request: NextRequest) {
+  const requestError = validateLocalMutationRequest(request);
+  if (requestError) {
+    return NextResponse.json({ error: requestError }, { status: 403 });
+  }
+
   const body = (await request.json()) as {
     hostUrl?: string;
     sessionUri?: string;
@@ -61,10 +68,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { getAHPClient, releaseAHPClient } = await import("@/lib/ahp/client-manager");
-    const client = await getAHPClient(hostUrl);
-
-    try {
+    return await withAHPClient(hostUrl, async (client) => {
       const sessionState = await readSessionState(client, sessionUri);
       const inputNeeded = sessionState?.inputNeeded;
       if (!hasObservedInputNeeded(inputNeeded)) {
@@ -148,9 +152,7 @@ export async function POST(request: NextRequest) {
       const inputRemoved = isInputObservedRemoved(after?.inputNeeded, requestId);
       debug("elicitation inputRemoved:", inputRemoved);
       return NextResponse.json({ ok: true, inputRemoved });
-    } finally {
-      releaseAHPClient(hostUrl);
-    }
+    });
   } catch (err) {
     console.error("[ahp:input] error:", err instanceof Error ? err.message : err);
     return ahpErrorResponse(err, "Failed to submit input");

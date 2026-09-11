@@ -5,14 +5,25 @@ import type { AhpEndpointDiagnostics } from "@/lib/ahp/endpoint";
 import { enrichSessionToCard, type EnrichOptions } from "@/lib/ahp/enrich-card";
 import { mapSessionToCard } from "@/lib/ahp/map-session";
 import type { ChangesetEnrichment } from "@/lib/ahp/changeset-enricher";
-import { ConnectionError } from "@/lib/ahp/connection-error";
+import {
+  classifyError,
+  type ConnectionError,
+} from "@/lib/ahp/connection-error";
+import {
+  HostStreamRegistry,
+  type HostStreamPartition,
+} from "@/lib/ahp/host-stream-registry";
 import { AHPSessionSummary } from "@/lib/ahp/types";
 import { getCachedSessions } from "@/lib/db/session-cache";
 import { triageCard } from "@/lib/orchestrator/triage";
 import { getPersistedCardPhase } from "@/lib/orchestrator/gate-engine";
-import { getCardRisk } from "@/lib/orchestrator/risk-store";
+import {
+  getAuthoritativeCardRisk,
+  getAuthoritativeRiskSnapshot,
+} from "@/lib/orchestrator/risk-store";
 import { startHeartbeat, stopHeartbeat, isHeartbeatRunning, type HeartbeatAction } from "@/lib/orchestrator/heartbeat";
 import { isCardInAnyAutomationScope, parseWorkspaceScope } from "@/lib/automation-scope";
+import { validateLocalEventStreamRequest } from "@/lib/http/local-mutation";
 import { KanbanCard, type Phase, type RiskLevel } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -49,35 +60,33 @@ function safeEnrich(
 const TRIAGE_PHASES: Phase[] = ["plan", "build"];
 
 async function tryTriage(
+  hostUrl: string,
   card: KanbanCard,
-  session: AHPSessionSummary,
-  enrichment?: ChangesetEnrichment | null
+  _session: AHPSessionSummary,
+  _enrichment?: ChangesetEnrichment | null,
+  automationScopes: Iterable<Set<string> | null> = [],
+  phaseChanged = false,
 ): Promise<TriageEvent | undefined> {
-  if (!isCardInAnyAutomationScope(card, automationScopes.values())) return undefined;
+  if (!isCardInAnyAutomationScope(card, automationScopes)) return undefined;
   if (!TRIAGE_PHASES.includes(card.phase)) return undefined;
 
   // Only triage when the agent is done or waiting on input — not while running
   if (card.runtime === "running") return undefined;
 
   // Triage when the card's inferred phase differs from what's persisted in DB.
-  const persistedPhase = getPersistedCardPhase(card.id);
-  if (persistedPhase === card.phase) {
-    if (getCardRisk(card.id)) return undefined;
+  if (!phaseChanged) {
+    const risk = getAuthoritativeCardRisk(card.id, hostUrl);
+    // Initial triage is automatic. A stale/legacy assessment must be explicitly
+    // reassessed instead of creating an event-driven reassessment loop.
+    if (risk.status !== "missing") return undefined;
   }
 
   try {
+    const snapshot = getAuthoritativeRiskSnapshot(hostUrl, card.id);
+    if (!snapshot) return undefined;
     const result = await triageCard(
       card.id,
-      {
-        title: session.title,
-        activity: session.activity,
-        filesChanged: session.changes?.files ?? 0,
-        additions: session.changes?.additions ?? 0,
-        deletions: session.changes?.deletions ?? 0,
-        filePaths: enrichment?.fileChanges?.map(f => f.path),
-        lastAgentMessage: enrichment?.lastAgentMessage,
-        planContent: enrichment?.planContent,
-      },
+      snapshot,
       card.phase
     );
 
@@ -103,7 +112,11 @@ async function tryTriage(
   }
 }
 
-async function projectRemoteEvent(event: BridgeEvent): Promise<CardStreamEvent> {
+async function projectRemoteEvent(
+  hostUrl: string,
+  event: BridgeEvent,
+  automationScopes: Iterable<Set<string> | null>,
+): Promise<CardStreamEvent> {
   if (event.type === "error") {
     return event;
   }
@@ -125,12 +138,25 @@ async function projectRemoteEvent(event: BridgeEvent): Promise<CardStreamEvent> 
     };
   }
 
-  const card = safeEnrich(event.session, event.enrichment, undefined, event.workers);
+  const previousPhase = getPersistedCardPhase(event.session.resource);
+  let card = safeEnrich(event.session, event.enrichment, undefined, event.workers);
   // Attach pending input if available (null means explicitly cleared)
   if (event.pendingInput !== undefined) {
     card.pendingInput = event.pendingInput ?? undefined;
   }
-  const triage = await tryTriage(card, event.session, event.enrichment);
+  const triage = await tryTriage(
+    hostUrl,
+    card,
+    event.session,
+    event.enrichment,
+    automationScopes,
+    previousPhase !== card.phase,
+  );
+  if (triage) {
+    const pendingInput = card.pendingInput;
+    card = safeEnrich(event.session, event.enrichment, undefined, event.workers);
+    if (pendingInput) card.pendingInput = pendingInput;
+  }
 
   return {
     type: "cardChanged",
@@ -153,16 +179,194 @@ function createEmptyStream(): ReadableStream<Uint8Array> {
   });
 }
 
-// Module-level card state for heartbeat access
-let currentCards: KanbanCard[] = [];
-let activeStreamCount = 0;
 let nextStreamId = 0;
-const automationScopes = new Map<number, Set<string> | null>();
 
-function getAutomationCards(): KanbanCard[] {
-  return currentCards.filter((card) =>
-    isCardInAnyAutomationScope(card, automationScopes.values())
+interface HostConnectionResource {
+  abortController: AbortController;
+  bridgeStarted: boolean;
+  streamWrites: Promise<void>;
+}
+
+type HostPartition = HostStreamPartition<
+  KanbanCard,
+  CardStreamEvent,
+  HostConnectionResource
+>;
+
+const hostStreams = new HostStreamRegistry<
+  KanbanCard,
+  CardStreamEvent,
+  HostConnectionResource
+>(
+  () => ({
+    abortController: new AbortController(),
+    bridgeStarted: false,
+    streamWrites: Promise.resolve(),
+  }),
+  (resource) => resource.abortController.abort(),
+);
+
+function getAutomationHosts() {
+  return Array.from(hostStreams.entries(), ([hostUrl, partition]) => {
+    const scopes = Array.from(
+      partition.subscribers.values(),
+      (subscriber) => subscriber.workspaceScope,
+    );
+    return {
+      hostUrl,
+      cards: partition.cards.filter((card) =>
+        isCardInAnyAutomationScope(card, scopes)
+      ),
+    };
+  });
+}
+
+function reprojectCard(
+  hostUrl: string,
+  cardId: string,
+): KanbanCard | undefined {
+  const partition = hostStreams.get(hostUrl);
+  const existing = partition?.cards.find((card) => card.id === cardId);
+  if (!partition || !existing) return undefined;
+
+  const cached = getCachedSessions(hostUrl).find(
+    (entry) => entry.sessionUri === cardId,
   );
+  if (!cached) return undefined;
+
+  const refreshed = safeEnrich(
+    cached.summary,
+    cached.enrichment,
+    { recordStatus: false },
+    existing.workers,
+  );
+  if (existing.pendingInput && refreshed.runtime === "input-needed") {
+    refreshed.pendingInput = existing.pendingInput;
+  }
+  partition.cards = [
+    ...partition.cards.filter((card) => card.id !== cardId),
+    refreshed,
+  ];
+  return refreshed;
+}
+
+function deliverHeartbeatAction(
+  hostUrl: string,
+  action: HeartbeatAction,
+): void {
+  hostStreams.broadcast(hostUrl, { type: "heartbeat", action });
+  if (!("cardId" in action)) return;
+
+  const refreshed = reprojectCard(hostUrl, action.cardId);
+  if (refreshed) {
+    hostStreams.broadcast(hostUrl, { type: "cardChanged", card: refreshed });
+  }
+}
+
+function ensureHeartbeat(): void {
+  if (!isHeartbeatRunning()) {
+    startHeartbeat(getAutomationHosts, deliverHeartbeatAction);
+  }
+}
+
+function applyProjectedEvent(
+  partition: HostPartition,
+  projected: CardStreamEvent,
+): void {
+  if (projected.type === "init") {
+    partition.cards = projected.cards;
+    partition.initialized = true;
+    return;
+  }
+  if (projected.type === "cardChanged") {
+    const incoming = projected.card;
+    const existing = partition.cards.find((card) => card.id === incoming.id);
+    if (
+      existing?.pendingInput &&
+      !incoming.pendingInput &&
+      incoming.runtime === "input-needed"
+    ) {
+      incoming.pendingInput = existing.pendingInput;
+    }
+    partition.cards = [
+      ...partition.cards.filter((card) => card.id !== incoming.id),
+      incoming,
+    ];
+    return;
+  }
+  if (projected.type === "cardRemoved") {
+    partition.cards = partition.cards.filter(
+      (card) => card.id !== projected.cardId,
+    );
+  }
+}
+
+function terminateHost(partition: HostPartition, message: string): void {
+  if (!hostStreams.isCurrent(partition)) return;
+  hostStreams.broadcastPartition(
+    partition,
+    classifyError(message, "stream"),
+  );
+  hostStreams.closeHost(partition.hostUrl, partition);
+  if (hostStreams.size === 0) void stopHeartbeat();
+}
+
+function startHostBridge(partition: HostPartition): void {
+  if (partition.resource.bridgeStarted) return;
+  partition.resource.bridgeStarted = true;
+
+  void createAHPBridge({
+    hostUrl: partition.hostUrl,
+    signal: partition.resource.abortController.signal,
+    onEvent(event: BridgeEvent) {
+      partition.resource.streamWrites = partition.resource.streamWrites
+        .then(async () => {
+          if (hostStreams.get(partition.hostUrl) !== partition) return;
+          const scopes = Array.from(
+            partition.subscribers.values(),
+            (subscriber) => subscriber.workspaceScope,
+          );
+          const projected = await projectRemoteEvent(
+            partition.hostUrl,
+            event,
+            scopes,
+          );
+          if (!hostStreams.isCurrent(partition)) return;
+          if (
+            !hostStreams.applyIfCurrent(
+              partition,
+              (current) => applyProjectedEvent(current, projected),
+            )
+          ) {
+            return;
+          }
+          hostStreams.broadcastPartition(partition, projected);
+        })
+        .catch((error) => {
+          if (
+            partition.resource.abortController.signal.aborted ||
+            !hostStreams.isCurrent(partition)
+          ) {
+            return;
+          }
+          terminateHost(
+            partition,
+            error instanceof Error ? error.message : "Connection failed",
+          );
+        });
+    },
+  }).catch((error) => {
+    if (
+      partition.resource.abortController.signal.aborted ||
+      !hostStreams.isCurrent(partition)
+    ) {
+      return;
+    }
+    terminateHost(
+      partition,
+      error instanceof Error ? error.message : "Connection failed",
+    );
+  });
 }
 
 function createRemoteStream(
@@ -170,144 +374,55 @@ function createRemoteStream(
   workspaceScope: Set<string> | null
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
-  const abortController = new AbortController();
   const streamId = nextStreamId++;
   let closed = false;
-
-  function reprojectCard(cardId: string): KanbanCard | undefined {
-    const existing = currentCards.find((card) => card.id === cardId);
-    if (!existing) return undefined;
-
-    const cached = getCachedSessions(hostUrl).find((entry) => entry.sessionUri === cardId);
-    if (!cached) return undefined;
-
-    const refreshed = safeEnrich(
-      cached.summary,
-      cached.enrichment,
-      { recordStatus: false },
-      existing.workers,
-    );
-    if (existing.pendingInput && refreshed.runtime === "input-needed") {
-      refreshed.pendingInput = existing.pendingInput;
-    }
-    currentCards = [
-      ...currentCards.filter((card) => card.id !== cardId),
-      refreshed,
-    ];
-    return refreshed;
-  }
 
   function closeStream(): void {
     if (closed) return;
     closed = true;
-    abortController.abort();
-    automationScopes.delete(streamId);
-    activeStreamCount--;
-    if (activeStreamCount <= 0) {
-      activeStreamCount = 0;
-      stopHeartbeat();
-    }
+    const { activeHostCount } = hostStreams.unsubscribe(hostUrl, streamId);
+    if (activeHostCount === 0) void stopHeartbeat();
   }
 
   return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      activeStreamCount++;
-      automationScopes.set(streamId, workspaceScope);
-
-      // Start heartbeat if this is the first active stream
-      if (!isHeartbeatRunning()) {
-        startHeartbeat(
-          hostUrl,
-          getAutomationCards,
-          (action) => {
-            try {
-              const event: CardStreamEvent = { type: "heartbeat", action };
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-
-              // Heartbeat actions mutate persisted gates, reviews, phases, and
-              // attention independently of AHP. Re-project immediately so the
-              // board never waits for an unrelated host event to see that truth.
-              if ("cardId" in action) {
-                const refreshed = reprojectCard(action.cardId);
-                if (refreshed) {
-                  const cardEvent: CardStreamEvent = { type: "cardChanged", card: refreshed };
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(cardEvent)}\n\n`));
-                }
-              }
-            } catch {
-              // Stream may already be closed
-            }
-          }
-        );
-      }
-
-      try {
-        let streamWrites = Promise.resolve();
-
-        // Serve cached data immediately for fast reload
-        try {
-          const cached = getCachedSessions(hostUrl);
-          if (cached.length > 0) {
-            const cards = cached.map((c) => safeEnrich(c.summary, c.enrichment, { recordStatus: false }));
-            currentCards = cards;
-            const cacheEvent: CardStreamEvent = { type: "init", cards };
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(cacheEvent)}\n\n`));
-          }
-        } catch {
-          // Cache read failure is non-fatal
-        }
-
-        await createAHPBridge({
-          hostUrl,
-          signal: abortController.signal,
-          onEvent(event: BridgeEvent) {
-            streamWrites = streamWrites
-              .then(async () => {
-                const projected = await projectRemoteEvent(event);
-                // Track card state for heartbeat (immutable updates)
-                if (projected.type === "init") {
-                  currentCards = projected.cards;
-                } else if (projected.type === "cardChanged") {
-                  // pendingInput is fetched asynchronously and arrives on its
-                  // own event; enrichment events (changeset/plan) re-emit the
-                  // card without it. Preserve the existing pendingInput while
-                  // the card is still input-needed so those events don't clobber
-                  // it (mirrors the client store's mergeCard semantics). Once the
-                  // input resolves, runtime leaves input-needed and it clears.
-                  const incoming = projected.card;
-                  const existing = currentCards.find((c) => c.id === incoming.id);
-                  if (
-                    existing?.pendingInput &&
-                    !incoming.pendingInput &&
-                    incoming.runtime === "input-needed"
-                  ) {
-                    incoming.pendingInput = existing.pendingInput;
-                  }
-                  currentCards = [
-                    ...currentCards.filter((c) => c.id !== incoming.id),
-                    incoming,
-                  ];
-                } else if (projected.type === "cardRemoved") {
-                  currentCards = currentCards.filter((c) => c.id !== projected.cardId);
-                }
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify(projected)}\n\n`));
-              })
-              .catch(() => {
-                // Stream closed by client
-                closeStream();
-              });
-          },
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Connection failed";
-        try {
+    start(controller) {
+      const subscriber = {
+        id: streamId,
+        workspaceScope,
+        send(event: CardStreamEvent) {
           controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify({ type: "error", message })}\n\n`)
+            encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
           );
+        },
+        close() {
           controller.close();
-        } catch {}
-        closeStream();
+        },
+      };
+      const { partition, firstForHost } = hostStreams.subscribe(
+        hostUrl,
+        subscriber,
+      );
+
+      if (firstForHost) {
+        try {
+          partition.cards = getCachedSessions(hostUrl).map((cached) =>
+            safeEnrich(cached.summary, cached.enrichment, {
+              recordStatus: false,
+            })
+          );
+        } catch {
+          partition.cards = [];
+        }
+        partition.initialized = true;
       }
+      hostStreams.replayInitialization(
+        partition,
+        subscriber,
+        (cards) => ({ type: "init", cards }),
+      );
+
+      ensureHeartbeat();
+      startHostBridge(partition);
     },
     cancel() {
       closeStream();
@@ -316,6 +431,11 @@ function createRemoteStream(
 }
 
 export async function GET(request: NextRequest) {
+  const requestError = validateLocalEventStreamRequest(request);
+  if (requestError) {
+    return NextResponse.json({ error: requestError }, { status: 403 });
+  }
+
   const hostUrl = request.nextUrl.searchParams.get("host");
   console.info("[ahp:sse]", hostUrl ? `remote stream → ${hostUrl}` : "no host (empty board)");
   const workspaceScope = parseWorkspaceScope(request.nextUrl.searchParams.get("workspaceScope"));

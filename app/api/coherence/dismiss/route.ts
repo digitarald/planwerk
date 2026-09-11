@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { dismissConflict } from "@/lib/orchestrator/coherence-engine";
+import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,6 +12,11 @@ export const dynamic = "force-dynamic";
  * different overlap (new signature) reopens the pair.
  */
 export async function POST(request: NextRequest) {
+  const requestError = validateLocalMutationRequest(request);
+  if (requestError) {
+    return NextResponse.json({ error: requestError }, { status: 403 });
+  }
+
   const body = (await request.json()) as { cardId?: string; otherCardId?: string };
   const { cardId, otherCardId } = body;
 

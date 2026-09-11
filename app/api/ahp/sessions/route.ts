@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { AHPSessionSummary, shouldShowSession } from "@/lib/ahp/types";
 import { listAllSessions } from "@/lib/ahp/catalog";
 import { connectInitializedAhpClient } from "@/lib/ahp/endpoint";
+import { withAHPClient } from "@/lib/ahp/client-operation";
 import { mapSdkSessionSummary } from "@/lib/ahp/session-summary";
-import { injectMessage } from "@/lib/ahp/session-messenger";
+import { injectMessageWithClient } from "@/lib/ahp/session-messenger";
 import { ahpErrorResponse } from "@/lib/ahp/api-error";
+import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
 
 /** Default agent provider for new sessions on this host. */
 const DEFAULT_PROVIDER = "copilotcli";
@@ -58,6 +60,11 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const requestError = validateLocalMutationRequest(request);
+  if (requestError) {
+    return NextResponse.json({ error: requestError }, { status: 403 });
+  }
+
   const { hostUrl, title, prompt, provider, workingDirectory } =
     (await request.json()) as {
       hostUrl?: string;
@@ -82,14 +89,12 @@ export async function POST(request: NextRequest) {
   const agentProvider = provider || DEFAULT_PROVIDER;
 
   try {
-    const { getAHPClient, releaseAHPClient } = await import("@/lib/ahp/client-manager");
-    const client = await getAHPClient(hostUrl);
     const sessionId = crypto.randomUUID();
     // The session URI scheme must match the provider so the host routes it to
     // the right agent (e.g. `copilotcli:/<uuid>`).
     const channel = `${agentProvider}:/${sessionId}`;
 
-    try {
+    const delivered = await withAHPClient(hostUrl, async (client) => {
       // Model selection is provider-defined session config (not a
       // top-level createSession field); the provider applies its default here and
       // the selection is surfaced from SessionState.config afterwards.
@@ -99,13 +104,8 @@ export async function POST(request: NextRequest) {
         workingDirectories: workingDirectory ? [workingDirectory] : undefined,
         config: NEW_SESSION_CONFIG,
       });
-    } finally {
-      releaseAHPClient(hostUrl);
-    }
-
-    // Deliver the task as the first message so the planning turn starts.
-    // injectMessage manages its own client lifecycle and flushes via ping.
-    const delivered = await injectMessage(hostUrl, channel, task);
+      return injectMessageWithClient(client, channel, task);
+    });
     if (!delivered.success) {
       return NextResponse.json(
         { error: "Session created but failed to start the task" },

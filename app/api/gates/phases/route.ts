@@ -5,7 +5,7 @@ import {
   getNextPhase,
   getPersistedPhases,
 } from "@/lib/orchestrator/gate-engine";
-import { getCardRisk } from "@/lib/orchestrator/risk-store";
+import { getRiskForAutomation } from "@/lib/orchestrator/risk-store";
 import type { GateStatus } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
   for (const [cardId, phase] of Object.entries(phases)) {
     const nextPhase = getNextPhase(phase);
     const gateStatus: GateStatus = nextPhase
-      ? deriveGateStatus(cardId, phase, nextPhase, getCardRisk(cardId)?.level)
+      ? deriveGateStatus(cardId, phase, nextPhase, getRiskForAutomation(cardId))
       : "passed";
     states[cardId] = { phase, gateStatus };
   }

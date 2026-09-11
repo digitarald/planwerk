@@ -8,25 +8,41 @@ import {
   getGatesForTransition,
   getNextPhase,
   logManualOverride,
+  resolveConfiguredGate,
   setCardPhase,
   startGateRun,
   type GateType,
 } from "@/lib/orchestrator/gate-engine";
-import { getCardRisk } from "@/lib/orchestrator/risk-store";
+import { getDb } from "@/lib/db/schema";
+import {
+  getAuthoritativeCardRisk,
+  getRiskForAutomation,
+} from "@/lib/orchestrator/risk-store";
+import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
+import { resolveAuthoritativeGateRevision } from "@/lib/orchestrator/gate-revision";
 import { advanceReviewToShip } from "@/lib/orchestrator/phase-advance";
 import { loadConfig } from "@/lib/orchestrator/skill-config";
-import { PHASE_ORDER, type Phase, type RiskLevel } from "@/lib/types";
+import {
+  normalizeChangesetRef,
+  PHASE_ORDER,
+  type Phase,
+  type RiskLevel,
+} from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function getCardRiskLevel(cardId: string): RiskLevel | undefined {
-  const risk = getCardRisk(cardId);
-  return risk?.level;
+  return getRiskForAutomation(cardId);
 }
 
 export async function POST(request: NextRequest) {
-  const body = (await request.json()) as {
+  const requestError = validateLocalMutationRequest(request);
+  if (requestError) {
+    return NextResponse.json({ error: requestError }, { status: 403 });
+  }
+
+  let body: {
     cardId?: string;
     action?: string;
     gateType?: GateType;
@@ -36,6 +52,11 @@ export async function POST(request: NextRequest) {
     changesetRef?: string;
     toPhase?: Phase;
   };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
+  }
   const { cardId, action } = body;
 
   if (!cardId) {
@@ -91,6 +112,36 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Already at final phase" }, { status: 400 });
   }
 
+  const authoritativeRevision = resolveAuthoritativeGateRevision(
+    getDb(),
+    cardId,
+    currentPhase,
+  );
+  if (!authoritativeRevision.ok) {
+    return NextResponse.json(
+      {
+        error: "Authoritative revision unavailable",
+        detail: authoritativeRevision.reason,
+        retryable: true,
+      },
+      { status: 409 },
+    );
+  }
+  if (
+    body.changesetRef !== undefined &&
+    normalizeChangesetRef(body.changesetRef) !==
+      normalizeChangesetRef(authoritativeRevision.changesetRef)
+  ) {
+    return NextResponse.json(
+      {
+        error: "Changeset revision does not match current AHP facts",
+        stale: true,
+      },
+      { status: 409 },
+    );
+  }
+  const changesetRef = authoritativeRevision.changesetRef;
+
   if (action === "check") {
     const riskLevel = getCardRiskLevel(cardId);
     const result = canAdvancePhase(
@@ -99,7 +150,7 @@ export async function POST(request: NextRequest) {
       nextPhase,
       body.projectPath,
       riskLevel,
-      body.changesetRef
+      changesetRef
     );
 
     return NextResponse.json({
@@ -111,14 +162,28 @@ export async function POST(request: NextRequest) {
   }
 
   if (action === "advance") {
-    const riskLevel = getCardRiskLevel(cardId);
+    const authoritativeRisk = getAuthoritativeCardRisk(cardId);
+    if (authoritativeRisk.status !== "current") {
+      return NextResponse.json(
+        {
+          error: "Risk reassessment required before advancing",
+          detail:
+            "Reassess risk against the current authoritative card facts, then retry advancement.",
+          riskStatus: authoritativeRisk.status,
+          retryable: true,
+        },
+        { status: 409 }
+      );
+    }
+
+    const riskLevel = authoritativeRisk.assessment.level;
     const { allowed, pendingGates } = canAdvancePhase(
       cardId,
       currentPhase,
       nextPhase,
       body.projectPath,
       riskLevel,
-      body.changesetRef
+      changesetRef
     );
 
     if (!allowed) {
@@ -170,22 +235,21 @@ export async function POST(request: NextRequest) {
     }
 
     const riskLevel = getCardRiskLevel(cardId);
-    const gates = getGatesForTransition(
-      currentPhase,
-      nextPhase,
-      body.projectPath,
-      riskLevel
-    );
-    const gate = gates.find(
-      (g) => g.gateType === gateType && (!gateName || g.gateName === gateName)
-    );
-
-    if (!gate) {
+    const configuredGate = resolveConfiguredGate({
+      fromPhase: currentPhase,
+      toPhase: nextPhase,
+      gateType,
+      gateName,
+      projectPath: body.projectPath,
+      riskLevel,
+    });
+    if (!configuredGate.ok) {
       return NextResponse.json(
-        { error: `No configured gate matches type "${gateType}"${gateName ? ` name "${gateName}"` : ""}` },
+        { error: configuredGate.reason },
         { status: 400 }
       );
     }
+    const gate = configuredGate.gate;
 
     if (gate.gateType === "artifact" || gate.gateType === "review") {
       return NextResponse.json(
@@ -206,14 +270,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const runId = startGateRun(
+    const runId = startGateRun({
       cardId,
-      currentPhase,
-      nextPhase,
-      gateType,
-      gateName,
-      body.changesetRef
-    );
+      fromPhase: currentPhase,
+      toPhase: nextPhase,
+      gateType: gate.gateType,
+      gateName: gate.gateName,
+      changesetRef,
+    });
 
     // Commands are trusted project/admin configuration, never request input.
     const cwd = body.workingDirectory || process.cwd();
@@ -233,31 +297,30 @@ export async function POST(request: NextRequest) {
     }
 
     const riskLevel = getCardRiskLevel(cardId);
-    const gates = getGatesForTransition(
-      currentPhase,
-      nextPhase,
-      body.projectPath,
-      riskLevel
-    );
-    const gate = gates.find(
-      (g) => g.gateType === "human-approval" && (!gateName || g.gateName === gateName)
-    );
-
-    if (!gate) {
+    const configuredGate = resolveConfiguredGate({
+      fromPhase: currentPhase,
+      toPhase: nextPhase,
+      gateType: "human-approval",
+      gateName,
+      projectPath: body.projectPath,
+      riskLevel,
+    });
+    if (!configuredGate.ok) {
       return NextResponse.json(
-        { error: "No human-approval gate found for this transition" },
+        { error: configuredGate.reason },
         { status: 400 }
       );
     }
+    const gate = configuredGate.gate;
 
-    const runId = startGateRun(
+    const runId = startGateRun({
       cardId,
-      currentPhase,
-      nextPhase,
-      "human-approval",
-      gate.gateName ?? gateName,
-      body.changesetRef
-    );
+      fromPhase: currentPhase,
+      toPhase: nextPhase,
+      gateType: "human-approval",
+      gateName: gate.gateName,
+      changesetRef,
+    });
     completeGateRun(runId, "passed", "Approved by human");
 
     return NextResponse.json({
@@ -294,13 +357,41 @@ export async function GET(request: NextRequest) {
 
   const riskLevel = getCardRiskLevel(cardId);
   const gates = getGatesForTransition(currentPhase, nextPhase, projectPath, riskLevel);
+  const authoritativeRevision = resolveAuthoritativeGateRevision(
+    getDb(),
+    cardId,
+    currentPhase,
+  );
+  if (!authoritativeRevision.ok) {
+    return NextResponse.json(
+      {
+        error: "Authoritative revision unavailable",
+        detail: authoritativeRevision.reason,
+        retryable: true,
+      },
+      { status: 409 },
+    );
+  }
+  if (
+    changesetRef !== undefined &&
+    normalizeChangesetRef(changesetRef) !==
+      normalizeChangesetRef(authoritativeRevision.changesetRef)
+  ) {
+    return NextResponse.json(
+      {
+        error: "Changeset revision does not match current AHP facts",
+        stale: true,
+      },
+      { status: 409 },
+    );
+  }
   const { allowed, pendingGates } = canAdvancePhase(
     cardId,
     currentPhase,
     nextPhase,
     projectPath,
     riskLevel,
-    changesetRef
+    authoritativeRevision.changesetRef
   );
 
   return NextResponse.json({

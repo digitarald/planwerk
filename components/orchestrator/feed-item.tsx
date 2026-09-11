@@ -3,16 +3,20 @@
 import {
   AlertTriangle,
   Bot,
+  Check,
   CheckCircle2,
   Lightbulb,
   RefreshCw,
   Shield,
+  ShieldAlert,
   User,
   Wrench,
+  X,
   Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBoardStore } from "@/lib/store/board-store";
+import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import type { KanbanCard } from "@/lib/types";
 
 type FeedItemType =
@@ -24,7 +28,8 @@ type FeedItemType =
   | "user"
   | "response"
   | "heartbeat"
-  | "tool-action";
+  | "tool-action"
+  | "approval-required";
 
 interface FeedItemProps {
   id: string;
@@ -36,6 +41,15 @@ interface FeedItemProps {
   projectName?: string;
   isStreaming?: boolean;
   toolName?: string;
+  approval?: {
+    decisionCapability: string;
+    toolName: string;
+    riskLevel: string;
+    action: Record<string, unknown>;
+    facts: Record<string, unknown>;
+    expiresAtMs: number;
+  };
+  decisionPending?: boolean;
 }
 
 const typeConfig: Record<FeedItemType, { icon: typeof RefreshCw; color: string; label: string }> = {
@@ -48,6 +62,11 @@ const typeConfig: Record<FeedItemType, { icon: typeof RefreshCw; color: string; 
   response: { icon: Bot, color: "text-muted-foreground", label: "Orchestrator" },
   heartbeat: { icon: RefreshCw, color: "text-muted-foreground/70", label: "Heartbeat" },
   "tool-action": { icon: Wrench, color: "text-muted-foreground", label: "Tool action" },
+  "approval-required": {
+    icon: ShieldAlert,
+    color: "text-amber-600",
+    label: "Human decision required",
+  },
 };
 
 function formatRelativeTime(timestamp: number): string {
@@ -140,10 +159,13 @@ export function FeedItem({
   projectName,
   isStreaming,
   toolName,
+  approval,
+  decisionPending,
 }: FeedItemProps) {
   const config = typeConfig[type];
   const Icon = config.icon;
   const card = useBoardStore((s) => (cardId ? s.getCard(cardId) : undefined));
+  const decideApproval = useOrchestratorStore((s) => s.decideApproval);
 
   const showInlineInput = type === "alert" && card?.pendingInput;
   const resolvedProjectName = projectName ?? card?.project?.name;
@@ -200,6 +222,50 @@ export function FeedItem({
         </p>
 
         {showInlineInput && card && <InlinePendingInput card={card} />}
+        {approval && (
+          <div
+            className="mt-2 flex items-center justify-between gap-2 rounded-md border border-amber-600/30 bg-amber-500/5 p-2"
+            role="group"
+            aria-label="High-risk action decision"
+          >
+            <div className="min-w-0 text-[10px] leading-4 text-foreground">
+              <span className="font-medium">
+                {String(approval.action.reason ?? "Human sign-off required")}
+              </span>
+              <span className="block text-muted-foreground">
+                One action · expires{" "}
+                {new Date(approval.expiresAtMs).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </span>
+            </div>
+            <div className="flex shrink-0 gap-1">
+              <button
+                type="button"
+                disabled={decisionPending}
+                onClick={() =>
+                  void decideApproval(approval.decisionCapability, "reject")
+                }
+                className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-background px-2 text-[10px] font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <X className="h-3 w-3" aria-hidden="true" />
+                Reject
+              </button>
+              <button
+                type="button"
+                disabled={decisionPending}
+                onClick={() =>
+                  void decideApproval(approval.decisionCapability, "approve")
+                }
+                className="inline-flex h-7 items-center gap-1 rounded-md bg-primary px-2 text-[10px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Check className="h-3 w-3" aria-hidden="true" />
+                Approve once
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

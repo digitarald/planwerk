@@ -2,12 +2,18 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { injectMessage } from "@/lib/ahp/session-messenger";
 import { ahpErrorResponse } from "@/lib/ahp/api-error";
+import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
 
 const debug = (...args: unknown[]) => {
   if (process.env.AHP_DEBUG) console.info("[ahp:message]", ...args);
 };
 
 export async function POST(request: NextRequest) {
+  const requestError = validateLocalMutationRequest(request);
+  if (requestError) {
+    return NextResponse.json({ error: requestError }, { status: 403 });
+  }
+
   const body = (await request.json()) as {
     hostUrl?: string;
     sessionUri?: string;
@@ -26,7 +32,9 @@ export async function POST(request: NextRequest) {
   debug("POST:", sessionUri, "len:", message.trim().length);
 
   try {
-    const result = await injectMessage(hostUrl, sessionUri, message.trim());
+    const result = await injectMessage(hostUrl, sessionUri, message.trim(), {
+      signal: request.signal,
+    });
 
     if (!result.success) {
       return NextResponse.json(
