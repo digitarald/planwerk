@@ -1,18 +1,30 @@
 import "server-only";
 
-import { CopilotClient } from "@github/copilot-sdk";
+import type { CopilotClient } from "@github/copilot-sdk";
+import { randomUUID } from "node:crypto";
 
 import type { CoherenceTier } from "@/lib/types";
-import { getCardRisk } from "./risk-store";
+import { getRiskForAutomation } from "./risk-store";
 import { effectiveRisk } from "./coherence-detect";
-import { disposeOneShotSession } from "./copilot-session";
 import {
-  claimForReview,
+  disposeOneShotSession,
+  invalidateRuntimeForCleanupFailure,
+  releaseRuntimeLease,
+} from "./copilot-session";
+import {
+  claimForReviewOwner,
   completeReview,
+  renewCoherenceReviewLease,
   type CoherenceRow,
 } from "./coherence-engine";
+import { WORK_LEASE_MS } from "@/lib/db/work-lease-schema";
 import { fetchOverlapContent, type CardOverlapContent } from "./coherence-content";
-import { ORCHESTRATOR_MODEL } from "./model";
+import { selectOrchestratorModel } from "./model";
+import {
+  acquireCopilotRuntimeClient,
+  classifyCopilotFailure,
+} from "./sdk-runtime";
+import type { CopilotRuntimeLease } from "./sdk-runtime-manager";
 
 /** Per-card context the reviewer needs beyond what the DB row carries. */
 export interface ReviewCardCtx {
@@ -32,33 +44,6 @@ export interface CoherenceReviewOutcome {
 
 /** How many pairs a single executor pass will review — bounds LLM cost per tick. */
 const MAX_REVIEWS_PER_PASS = 2;
-
-// Copilot SDK singleton (same lifecycle pattern as risk-assessor).
-let clientInstance: CopilotClient | null = null;
-let clientStarting: Promise<CopilotClient> | null = null;
-
-async function getClient(): Promise<CopilotClient> {
-  if (clientInstance) return clientInstance;
-  if (clientStarting) return clientStarting;
-  clientStarting = (async () => {
-    try {
-      const client = new CopilotClient();
-      await client.start();
-      clientInstance = client;
-      return client;
-    } finally {
-      clientStarting = null;
-    }
-  })();
-  return clientStarting;
-}
-
-async function resetClient() {
-  const old = clientInstance;
-  clientInstance = null;
-  clientStarting = null;
-  if (old) await old.stop().catch(() => {});
-}
 
 const SYSTEM_PROMPT = `You are a coherence reviewer for a system that runs multiple AI coding agents in parallel on the same repository.
 
@@ -135,8 +120,8 @@ function parseVerdict(content: string): Verdict | null {
 }
 
 function highRiskInvolved(cardA: string, cardB: string): boolean {
-  const a = effectiveRisk(getCardRisk(cardA)?.level);
-  const b = effectiveRisk(getCardRisk(cardB)?.level);
+  const a = effectiveRisk(getRiskForAutomation(cardA));
+  const b = effectiveRisk(getRiskForAutomation(cardB));
   return a === "high" || b === "high";
 }
 
@@ -163,11 +148,21 @@ async function reviewPair(
     };
   }
 
+  let client: CopilotClient | undefined;
+  let runtimeLease: CopilotRuntimeLease<CopilotClient> | undefined;
   try {
-    const client = await getClient();
+    runtimeLease = await acquireCopilotRuntimeClient();
+    client = runtimeLease.client;
+    const selectedModel = await selectOrchestratorModel(client, {
+      role: "review",
+      risk: highRiskInvolved(row.cardA, row.cardB) ? "high" : "medium",
+    });
     const session = await client.createSession({
-      model: ORCHESTRATOR_MODEL,
+      model: selectedModel.model,
+      reasoningEffort: selectedModel.reasoningEffort,
       systemMessage: { content: SYSTEM_PROMPT },
+      availableTools: [],
+      skipCustomInstructions: true,
     });
     let responseCompleted = false;
     try {
@@ -180,19 +175,33 @@ async function reviewPair(
       const parsed = content ? parseVerdict(content) : null;
       if (parsed) return parsed;
     } finally {
-      await disposeOneShotSession(
+      const cleanup = await disposeOneShotSession(
         client,
         session,
         !responseCompleted,
         "[coherence-reviewer]"
       );
+      await invalidateRuntimeForCleanupFailure(
+        runtimeLease,
+        cleanup,
+        "[coherence-reviewer]",
+      );
     }
   } catch (err) {
-    await resetClient();
+    if (runtimeLease && classifyCopilotFailure(err) === "transport") {
+      await runtimeLease.invalidate(err).catch((resetError) => {
+      console.warn(
+        "[coherence-reviewer] Failed to reset Copilot SDK runtime:",
+        resetError instanceof Error ? resetError.message : resetError
+      );
+      });
+    }
     console.warn(
       "[coherence-reviewer] SDK call failed:",
       err instanceof Error ? err.message : err
     );
+  } finally {
+    await releaseRuntimeLease(runtimeLease, "[coherence-reviewer]");
   }
 
   // Reviewer unavailable → don't fabricate a verdict; defer to human.
@@ -219,11 +228,26 @@ export async function runCoherenceExecutor(
   for (const row of rows) {
     if (reviewed >= MAX_REVIEWS_PER_PASS) break;
     // CAS-claim: only the winner proceeds; skips if signature changed meanwhile.
-    if (!claimForReview(row.id, row.signature)) continue;
+    const ownerId = randomUUID();
+    if (!claimForReviewOwner(row.id, row.signature, ownerId)) continue;
     reviewed++;
 
-    const verdict = await reviewPair(hostUrl, row, ctxById);
-    const applied = completeReview(row.id, row.signature, verdict);
+    const renewal = setInterval(() => {
+      renewCoherenceReviewLease(row.id, row.signature, ownerId);
+    }, Math.max(1, Math.floor(WORK_LEASE_MS / 3)));
+    renewal.unref();
+    let verdict;
+    try {
+      verdict = await reviewPair(hostUrl, row, ctxById);
+    } finally {
+      clearInterval(renewal);
+    }
+    const applied = completeReview(
+      row.id,
+      row.signature,
+      verdict,
+      ownerId,
+    );
     if (applied) {
       outcomes.push({
         rowId: row.id,

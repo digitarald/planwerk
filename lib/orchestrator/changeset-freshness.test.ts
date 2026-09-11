@@ -6,6 +6,7 @@ import {
   isPlanChangesetRef,
   changesetCodeRef,
   isGateRunStale,
+  sourceChangesetRef,
   type GateRunView,
 } from "../types.ts";
 
@@ -40,6 +41,36 @@ test("normalizeChangesetRef: plan ref is opaque (compared whole)", () => {
   assert.ok(!isPlanChangesetRef("25:752:179"));
 });
 
+test("source revisions are opaque gate identities", () => {
+  const stored = sourceChangesetRef("ahp:revision-1");
+  assert.equal(normalizeChangesetRef(stored), stored);
+  assert.equal(
+    isGateRunStale(
+      passedRun(stored),
+      {
+        filesChanged: 0,
+        additions: 0,
+        deletions: 0,
+        changesetVerified: false,
+      },
+    ),
+    true,
+  );
+  assert.equal(
+    isGateRunStale(
+      passedRun(stored),
+      {
+        filesChanged: 1,
+        additions: 2,
+        deletions: 1,
+        changesetVerified: true,
+        sourceRevision: "ahp:revision-2",
+      },
+    ),
+    true,
+  );
+});
+
 test("changesetCodeRef: joins the three diff dimensions", () => {
   assert.equal(
     changesetCodeRef({ filesChanged: 25, additions: 752, deletions: 179 }),
@@ -47,8 +78,8 @@ test("changesetCodeRef: joins the three diff dimensions", () => {
   );
 });
 
-test("isGateRunStale: no ref recorded → never stale", () => {
-  assert.equal(isGateRunStale(passedRun(undefined), { filesChanged: 5, additions: 10, deletions: 2 }), false);
+test("isGateRunStale: unbound evidence fails closed", () => {
+  assert.equal(isGateRunStale(passedRun(undefined), { filesChanged: 5, additions: 10, deletions: 2 }), true);
 });
 
 test("isGateRunStale: code ref differs → stale when verified", () => {
@@ -67,12 +98,12 @@ test("isGateRunStale: code ref matches → not stale", () => {
   );
 });
 
-test("isGateRunStale: unverified diff counts never invalidate a code verdict (the flap fix)", () => {
+test("isGateRunStale: unverified current diff invalidates prior code evidence", () => {
   const run = passedRun("25:752:179:123");
   // Counts flapped to 0:0:0 from a shared/unenriched summary — must NOT read stale.
   assert.equal(
     isGateRunStale(run, { filesChanged: 0, additions: 0, deletions: 0, changesetVerified: false }),
-    false
+    true
   );
 });
 
@@ -84,10 +115,10 @@ test("isGateRunStale: plan ref compares against the card's plan hash", () => {
   assert.equal(isGateRunStale(run, { filesChanged: 0, additions: 0, deletions: 0, planContentHash: "plan:bbbb2222" }), true);
 });
 
-test("isGateRunStale: plan ref with unknown current plan hash → not stale", () => {
+test("isGateRunStale: plan ref with unknown current plan hash fails closed", () => {
   const run = passedRun("plan:aaaa1111");
   // Plan content not loaded yet (best-effort enrichment) — never invalidate.
-  assert.equal(isGateRunStale(run, { filesChanged: 0, additions: 0, deletions: 0 }), false);
+  assert.equal(isGateRunStale(run, { filesChanged: 0, additions: 0, deletions: 0 }), true);
 });
 
 test("isGateRunStale: plan-gate verdict is not affected by code-diff churn", () => {

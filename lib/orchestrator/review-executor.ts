@@ -1,6 +1,17 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
+
 import { getDb } from "@/lib/db/schema";
+import {
+  claimReviewJudgment,
+  claimReviewStart,
+  commitOwnedReviewOutcome,
+  failOwnedReviewIfSourceChanged,
+  linkOwnedReviewStartGate,
+  renewReviewJudgmentLease,
+  renewReviewStartLease,
+} from "@/lib/db/review-run-store";
 import {
   fetchChatTurnById,
   fetchTurnById,
@@ -20,21 +31,60 @@ import {
   completeGateRun,
   getGateRunsForCard,
 } from "./gate-engine";
-import type { Phase, RiskLevel } from "@/lib/types";
-import { normalizeChangesetRef } from "@/lib/types";
+import {
+  normalizeChangesetRef,
+  type Phase,
+  type RiskLevel,
+} from "@/lib/types";
 import { extractReviewEvidence } from "./review-evidence";
 import { decideReviewAction, type ReviewAction } from "./review-decision";
 import { judgeReviewResponse } from "./verdict-judge";
 import type { ReviewVerdict } from "./verdict-judge-core";
+import { getRiskForAutomation } from "./risk-store";
+import {
+  isOperationAborted,
+  throwIfAborted,
+} from "@/lib/abort";
+import { terminalizeCancelledReviewStart } from "./review-start-cancellation";
+import {
+  finalizeOwnedReviewDispatch,
+  persistReviewStartFailure,
+  prepareOwnedReviewDispatch,
+  reconcileRecoveredReviewDispatch,
+  shouldStartReviewForRun,
+} from "./review-start-state";
+import { attemptReviewPeerChatCleanup } from "./review-chat-cleanup";
+import { PeerChatCleanupRequiredError } from "@/lib/ahp/peer-review-dispatch";
+import { runLeaseRenewalTick } from "./lease-renewal";
+import { WORK_LEASE_MS } from "@/lib/db/work-lease-schema";
 
-const reviewJudgmentsInFlight = new Set<number>();
+const REVIEW_JUDGMENT_LEASE_MS = 60_000;
+
+interface RenewalScheduler {
+  set(callback: () => void, delayMs: number): unknown;
+  clear(handle: unknown): void;
+}
+
+const reviewRenewalScheduler: RenewalScheduler = {
+  set(callback, delayMs) {
+    const timer = setInterval(callback, delayMs);
+    timer.unref();
+    return timer;
+  },
+  clear(handle) {
+    clearInterval(handle as ReturnType<typeof setInterval>);
+  },
+};
 
 export type ReviewRunStatus =
   | "pending"
+  | "dispatching"
   | "injected"
   | "extracting"
   | "passed"
   | "failed"
+  | "cancelled"
+  | "ambiguous"
   | "escalated";
 
 export interface ReviewRun {
@@ -53,6 +103,10 @@ export interface ReviewRun {
   changesetRef: string | null;
   turnId: string | null;
   chatUri: string | null;
+  chatCleanupStatus: "pending" | "completed" | "error" | null;
+  chatCleanupError: string | null;
+  chatCleanupAttempts: number;
+  chatCleanupLastAttemptAt: string | null;
 }
 
 interface ReviewRunRow {
@@ -71,6 +125,10 @@ interface ReviewRunRow {
   changeset_ref: string | null;
   turn_id: string | null;
   chat_uri: string | null;
+  chat_cleanup_status: "pending" | "completed" | "error" | null;
+  chat_cleanup_error: string | null;
+  chat_cleanup_attempts: number;
+  chat_cleanup_last_attempt_at: string | null;
 }
 
 function mapRow(row: ReviewRunRow): ReviewRun {
@@ -90,7 +148,33 @@ function mapRow(row: ReviewRunRow): ReviewRun {
     changesetRef: row.changeset_ref,
     turnId: row.turn_id,
     chatUri: row.chat_uri,
+    chatCleanupStatus: row.chat_cleanup_status,
+    chatCleanupError: row.chat_cleanup_error,
+    chatCleanupAttempts: row.chat_cleanup_attempts,
+    chatCleanupLastAttemptAt: row.chat_cleanup_last_attempt_at,
   };
+}
+
+async function cleanupTerminalReviewChat(
+  db: ReturnType<typeof getDb>,
+  hostUrl: string,
+  run: ReviewRun,
+): Promise<void> {
+  if (!run.chatUri) return;
+  try {
+    await attemptReviewPeerChatCleanup(
+      db,
+      hostUrl,
+      run.id,
+      run.chatUri,
+      disposePeerChat,
+    );
+  } catch (error) {
+    console.warn(
+      `[review-executor] Could not persist peer-chat cleanup diagnostics for review run ${run.id}:`,
+      error instanceof Error ? error.message : error,
+    );
+  }
 }
 
 /**
@@ -100,7 +184,7 @@ export function getActiveReviewRuns(cardId: string): ReviewRun[] {
   const db = getDb();
   const rows = db
     .prepare(
-      "SELECT * FROM review_runs WHERE card_id = ? AND status NOT IN ('passed', 'escalated') ORDER BY id DESC"
+      "SELECT * FROM review_runs WHERE card_id = ? AND status NOT IN ('passed', 'escalated', 'ambiguous', 'cancelled') ORDER BY id DESC"
     )
     .all(cardId) as ReviewRunRow[];
   return rows.map(mapRow);
@@ -138,9 +222,11 @@ export function getLatestReviewRun(
 /**
  * Whether a review skill should be (re)started for a transition.
  *
- * Skips a skill whose latest run is a *fresh* terminal outcome:
+ * Skips a skill whose latest run is already resolved or in-flight:
  *  - `passed`    → the gate is already satisfied for this changeset.
  *  - `escalated` → parked for a human; re-injecting would restart the churn.
+ *  - `dispatching` → a durable pre-side-effect reservation is still unresolved.
+ *  - `ambiguous` → dispatch may still be running and is never auto-retried.
  * A terminal run recorded against a *different* changeset (the reviewed diff has
  * since changed) is stale, so we return `true` to re-review the new changes.
  * When no run exists yet, returns `true` (first review).
@@ -152,16 +238,7 @@ export function shouldStartReview(
   currentChangesetRef?: string
 ): boolean {
   const latest = getLatestReviewRun(cardId, skillId, phaseTransition);
-  if (!latest) return true;
-  const terminal = latest.status === "passed" || latest.status === "escalated";
-  if (!terminal) return true;
-  // Unknown current ref (e.g. unverified/shared diff counts, or plan content not
-  // loaded yet) carries no freshness signal — never invalidate a terminal run on
-  // missing info, or the review re-injects forever. Treat as fresh.
-  const current = normalizeChangesetRef(currentChangesetRef);
-  if (current === "") return false;
-  const fresh = normalizeChangesetRef(latest.changesetRef ?? undefined) === current;
-  return !fresh;
+  return shouldStartReviewForRun(latest, currentChangesetRef);
 }
 
 /**
@@ -170,10 +247,13 @@ export function shouldStartReview(
 export function hasPassingReviews(
   cardId: string,
   phaseTransition: string,
-  riskLevel: RiskLevel
+  riskLevel: RiskLevel,
+  currentChangesetRef?: string,
 ): boolean {
   const skills = getApplicableSkills(phaseTransition, riskLevel);
   if (skills.length === 0) return true;
+  const current = normalizeChangesetRef(currentChangesetRef);
+  if (current === "") return false;
 
   const db = getDb();
   // Only consider required skills from gate config
@@ -189,11 +269,19 @@ export function hasPassingReviews(
   for (const skillId of requiredSkillIds) {
     const passingRun = db
       .prepare(
-        "SELECT id FROM review_runs WHERE card_id = ? AND skill_id = ? AND phase_transition = ? AND status = 'passed' ORDER BY id DESC LIMIT 1"
+        "SELECT id, changeset_ref FROM review_runs WHERE card_id = ? AND skill_id = ? AND phase_transition = ? AND status = 'passed' ORDER BY id DESC LIMIT 1"
       )
-      .get(cardId, skillId, phaseTransition) as { id: number } | undefined;
+      .get(cardId, skillId, phaseTransition) as {
+        id: number;
+        changeset_ref: string | null;
+      } | undefined;
 
-    if (!passingRun) return false;
+    if (
+      !passingRun
+      || normalizeChangesetRef(passingRun.changeset_ref ?? undefined) !== current
+    ) {
+      return false;
+    }
   }
 
   return true;
@@ -211,102 +299,266 @@ export async function startReview(
   phaseTransition: string,
   riskLevel: RiskLevel,
   changesetRef?: string,
-  options?: { pendingRequestId?: string },
-): Promise<{ reviewRunId: number; success: boolean }> {
+  options?: {
+    pendingRequestId?: string;
+    signal?: AbortSignal;
+  },
+): Promise<{
+  reviewRunId: number;
+  success: boolean;
+  disposition: "terminal" | "retryable" | "needs-human";
+}> {
+  if (normalizeChangesetRef(changesetRef) === "") {
+    throw new Error(
+      "Cannot start review without an authoritative current changeset revision.",
+    );
+  }
   const db = getDb();
   const maxIterations = getEffectiveMaxIterations(skill.id, riskLevel);
+  const signal = options?.signal;
+  const startOwnerId = randomUUID();
 
-  // Atomic claim: check for existing active run AND for an already-injected run
-  // to prevent heartbeat/chat race creating duplicates
-  const existing = db
-    .prepare(
-      "SELECT id, iteration, status FROM review_runs WHERE card_id = ? AND skill_id = ? AND status NOT IN ('passed', 'escalated') ORDER BY id DESC LIMIT 1"
-    )
-    .get(cardId, skill.id) as { id: number; iteration: number; status: string } | undefined;
-
-  // If already injected/pending/extracting, don't double-inject
-  if (existing && (existing.status === "injected" || existing.status === "pending" || existing.status === "extracting")) {
-    return { reviewRunId: existing.id, success: true };
+  throwIfAborted(signal);
+  const recoveredDispatch = reconcileRecoveredReviewDispatch(db, {
+    cardId,
+    skillId: skill.id,
+    phaseTransition,
+  });
+  if (recoveredDispatch) {
+    return {
+      reviewRunId: recoveredDispatch.reviewRunId,
+      success: false,
+      disposition: "needs-human",
+    };
+  }
+  const startClaim = claimReviewStart(db, {
+    cardId,
+    skillId: skill.id,
+    phaseTransition,
+    maxIterations,
+    changesetRef,
+    ownerId: startOwnerId,
+    leaseMs: WORK_LEASE_MS,
+  });
+  if (startClaim.state === "ambiguous") {
+    return {
+      reviewRunId: startClaim.reviewRunId,
+      success: false,
+      disposition: "needs-human",
+    };
+  }
+  if (startClaim.state === "active") {
+    return {
+      reviewRunId: startClaim.reviewRunId,
+      success: true,
+      disposition: "terminal",
+    };
+  }
+  if (startClaim.state === "maxed") {
+    return {
+      reviewRunId: startClaim.reviewRunId,
+      success: false,
+      disposition: "terminal",
+    };
   }
 
-  let reviewRunId: number;
-  let iteration: number;
-
-  if (existing) {
-    // Re-inject for existing failed run (next iteration)
-    reviewRunId = existing.id;
-    iteration = existing.iteration + 1;
-
-    if (iteration > maxIterations) {
-      db.prepare(
-        "UPDATE review_runs SET status = 'escalated', verdict_summary = 'Max iterations reached' WHERE id = ?"
-      ).run(reviewRunId);
-      return { reviewRunId, success: false };
+  const reviewRunId = startClaim.reviewRunId;
+  let gateRunId: number | undefined;
+  let dispatchPreparation:
+    | ReturnType<typeof prepareOwnedReviewDispatch>
+    | undefined;
+  const iteration = startClaim.iteration;
+  const leaseState: { failure?: unknown } = {};
+  const renewalTimer = reviewRenewalScheduler.set(() => {
+    runLeaseRenewalTick(
+      leaseState,
+      () => renewReviewStartLease(
+        db,
+        reviewRunId,
+        startOwnerId,
+        WORK_LEASE_MS,
+      ),
+      () => {},
+      "Review dispatch lease ownership was lost.",
+    );
+  }, Math.max(1, Math.floor(WORK_LEASE_MS / 3)));
+  try {
+    const [fromPhase, toPhase] = phaseTransition.split("->") as [Phase, Phase];
+    gateRunId = startGateRun({
+      cardId,
+      fromPhase,
+      toPhase,
+      gateType: "review",
+      gateName: skill.id,
+      changesetRef,
+      signal,
+      ownerId: startOwnerId,
+    });
+    throwIfAborted(signal);
+    if (!linkOwnedReviewStartGate(
+      db,
+      reviewRunId,
+      startOwnerId,
+      gateRunId,
+    )) {
+      throw new Error("Review start claim was lost before gate linkage.");
     }
 
-    db.prepare(
-      "UPDATE review_runs SET status = 'injected', iteration = ?, prompt_injected_at = datetime('now'), changeset_ref = ? WHERE id = ?"
-    ).run(iteration, changesetRef ?? null, reviewRunId);
-  } else {
-    // Create new review run
-    const result = db
-      .prepare(
-        `INSERT INTO review_runs (card_id, skill_id, phase_transition, status, iteration, max_iterations, changeset_ref)
-         VALUES (?, ?, ?, 'pending', 1, ?, ?)`
-      )
-      .run(cardId, skill.id, phaseTransition, maxIterations, changesetRef ?? null);
-    reviewRunId = Number(result.lastInsertRowid);
-    iteration = 1;
-  }
-
-  // Also create a corresponding gate_run record for gate-engine integration
-  const [fromPhase, toPhase] = phaseTransition.split("->") as [Phase, Phase];
-  const gateRunId = startGateRun(cardId, fromPhase, toPhase, "review", skill.id, changesetRef);
-  db.prepare("UPDATE review_runs SET gate_run_id = ? WHERE id = ?").run(gateRunId, reviewRunId);
-
-  // Inject the review prompt into the session (failure-safe: always terminalize on error)
-  const prompt = buildReviewPrompt(skill, iteration, maxIterations, cardId);
-  try {
+    const prompt = buildReviewPrompt(skill, iteration, maxIterations, cardId);
+    const beforeDispatch = (identity: {
+      chatUri: string;
+      turnId: string;
+      disposablePeerChat: boolean;
+    }) => {
+      dispatchPreparation = prepareOwnedReviewDispatch(
+        db,
+        {
+          reviewRunId,
+          ownerId: startOwnerId,
+          hostUrl,
+          ...identity,
+        },
+      );
+      if (dispatchPreparation.state !== "ready") {
+        throw new Error(
+          dispatchPreparation.summary
+            ?? "Review start claim was lost before prompt dispatch.",
+        );
+      }
+    };
     const injection = options?.pendingRequestId
       ? await startPeerChatReview(
           hostUrl,
           sessionUri,
           options.pendingRequestId,
           prompt,
+          { signal, beforeDispatch },
         )
-      : await injectMessage(hostUrl, sessionUri, prompt);
+      : await injectMessage(
+          hostUrl,
+          sessionUri,
+          prompt,
+          { signal, beforeDispatch },
+        );
     const { success, turnId } = injection;
     const queued = "queued" in injection ? injection.queued : false;
     const chatUri = "chatUri" in injection ? injection.chatUri : undefined;
-
     if (success) {
       // Persist turnId only when the prompt started a turn immediately —
       // a queued message's id isn't guaranteed by the protocol to become the
       // eventual Turn.id (see fetchTurnById's docs), so recording it would
       // create a false sense of precision. Without an exact id, verdict
       // processing fails closed to human review.
-      const persistedTurnId = queued ? null : turnId;
-      db.prepare(
-        "UPDATE review_runs SET status = 'injected', prompt_injected_at = datetime('now'), turn_id = ?, chat_uri = ? WHERE id = ?"
-      ).run(persistedTurnId, chatUri ?? null, reviewRunId);
+      const persistedTurnId = queued ? null : turnId ?? null;
+      const finalized = finalizeOwnedReviewDispatch(db, {
+        hostUrl,
+        reviewRunId,
+        ownerId: startOwnerId,
+        turnId: persistedTurnId,
+        chatUri: chatUri ?? null,
+        disposablePeerChat: Boolean(options?.pendingRequestId),
+      });
+      if (finalized.state === "orphaned") {
+        return {
+          reviewRunId,
+          success: false,
+          disposition: "needs-human",
+        };
+      }
     } else {
+      if (dispatchPreparation?.state === "blocked") {
+        return {
+          reviewRunId,
+          success: false,
+          disposition: "needs-human",
+        };
+      }
+      if (leaseState.failure !== undefined) throw leaseState.failure;
       const reason = "reason" in injection && injection.reason
         ? injection.reason
         : "Failed to inject review prompt into session";
-      db.prepare("UPDATE review_runs SET status = 'escalated', verdict_summary = ? WHERE id = ?")
-        .run(reason, reviewRunId);
-      completeGateRun(gateRunId, "failed", reason);
+      const failure = persistReviewStartFailure(
+        db,
+        hostUrl,
+        reviewRunId,
+        reason,
+        { ownerId: startOwnerId },
+      );
+      if (failure.applied) completeGateRun(gateRunId, "failed", reason);
     }
 
-    return { reviewRunId, success };
+    return {
+      reviewRunId,
+      success,
+      disposition: success ? "terminal" : "retryable",
+    };
   } catch (err) {
-    // Ensure DB rows don't get stuck in pending/running state
-    db.prepare("UPDATE review_runs SET status = 'failed', verdict_summary = ? WHERE id = ?").run(
-      `Injection error: ${err instanceof Error ? err.message : String(err)}`,
-      reviewRunId
+    if (dispatchPreparation?.state === "blocked") {
+      persistReviewStartFailure(db, hostUrl, reviewRunId, err, {
+        ownerId: startOwnerId,
+      });
+      return {
+        reviewRunId,
+        success: false,
+        disposition: "needs-human",
+      };
+    }
+    const cleanupAfterCancellation = err instanceof PeerChatCleanupRequiredError
+      && isOperationAborted(err.cause);
+    if (isOperationAborted(err) || cleanupAfterCancellation) {
+      if (cleanupAfterCancellation) {
+        const failure = persistReviewStartFailure(
+          db,
+          hostUrl,
+          reviewRunId,
+          err,
+          { ownerId: startOwnerId },
+        );
+        if (failure.applied && gateRunId !== undefined) {
+          completeGateRun(
+            gateRunId,
+            "failed",
+            "Review prompt dispatch is ambiguous; human review required",
+          );
+        }
+      } else {
+        terminalizeCancelledReviewStart(
+          db,
+          reviewRunId,
+          gateRunId,
+          completeGateRun,
+          { ownerId: startOwnerId },
+        );
+      }
+      return {
+        reviewRunId,
+        success: false,
+        disposition: "retryable",
+      };
+    }
+    const failure = persistReviewStartFailure(
+      db,
+      hostUrl,
+      reviewRunId,
+      err,
+      { ownerId: startOwnerId },
     );
-    completeGateRun(gateRunId, "failed", "Exception during prompt injection");
-    return { reviewRunId, success: false };
+    if (failure.applied && gateRunId !== undefined) {
+      completeGateRun(
+        gateRunId,
+        "failed",
+        failure.disposition === "needs-human"
+          ? "Review prompt dispatch is ambiguous; human review required"
+          : "Exception before prompt dispatch"
+      );
+    }
+    return {
+      reviewRunId,
+      success: false,
+      disposition: failure.disposition,
+    };
+  } finally {
+    reviewRenewalScheduler.clear(renewalTimer);
   }
 }
 
@@ -321,14 +573,19 @@ export async function processReviewResult(
   currentChangesetRef?: string,
   projectPath?: string,
 ): Promise<(ReviewVerdict & { action: ReviewAction }) | null> {
-  if (reviewJudgmentsInFlight.has(reviewRunId)) return null;
-
   const db = getDb();
-  const row = db
-    .prepare("SELECT * FROM review_runs WHERE id = ?")
-    .get(reviewRunId) as ReviewRunRow | undefined;
-
+  const ownerId = randomUUID();
+  const row = claimReviewJudgment(
+    db,
+    reviewRunId,
+    ownerId,
+    REVIEW_JUDGMENT_LEASE_MS,
+  );
   if (!row) {
+    const exists = db.prepare(
+      "SELECT 1 FROM review_runs WHERE id = ?",
+    ).get(reviewRunId);
+    if (exists) return null;
     return {
       status: "needs-human",
       summary: "Review run not found",
@@ -338,19 +595,46 @@ export async function processReviewResult(
     };
   }
 
-  const run = mapRow(row);
-  if (run.status === "injected") {
-    const claimed = db
-      .prepare(
-        "UPDATE review_runs SET status = 'extracting' WHERE id = ? AND status = 'injected'"
-      )
-      .run(reviewRunId);
-    if (claimed.changes === 0) return null;
-  } else if (run.status !== "extracting") {
+  const run = mapRow(row as ReviewRunRow);
+  const freshness = failOwnedReviewIfSourceChanged(
+    db,
+    reviewRunId,
+    ownerId,
+    currentChangesetRef,
+  );
+  if (freshness === "lost") {
     return null;
   }
+  if (freshness === "stale") {
+    const staleVerdict: ReviewVerdict & { action: ReviewAction } = {
+      status: "failed",
+      summary:
+        "Review evidence is stale because the source changed after dispatch; re-review required.",
+      findings: [],
+      madeEdits: false,
+      action: "re-iterate",
+    };
+    await cleanupTerminalReviewChat(db, hostUrl, run);
+    return staleVerdict;
+  }
 
-  reviewJudgmentsInFlight.add(reviewRunId);
+  const leaseState: { failure?: unknown } = {};
+  const renewalTimer = reviewRenewalScheduler.set(() => {
+    runLeaseRenewalTick(
+      leaseState,
+      () => renewReviewJudgmentLease(
+        db,
+        reviewRunId,
+        ownerId,
+        REVIEW_JUDGMENT_LEASE_MS,
+      ),
+      () => {},
+      "Review judgment lease ownership was lost.",
+    );
+  }, Math.max(1, Math.floor(REVIEW_JUDGMENT_LEASE_MS / 3)));
+
+  let result: (ReviewVerdict & { action: ReviewAction }) | null = null;
+  let committed = false;
   try {
     let verdict: ReviewVerdict;
     try {
@@ -390,37 +674,10 @@ export async function processReviewResult(
         madeEdits: false,
       };
     }
-
-    // Store verdict
-    db.prepare(
-      `UPDATE review_runs SET
-        verdict_extracted_at = datetime('now'),
-        verdict_summary = ?,
-        findings_json = ?,
-        changeset_ref = ?
-      WHERE id = ?`
-    ).run(
-      verdict.summary,
-      JSON.stringify(verdict.findings),
-      currentChangesetRef ?? null,
-      reviewRunId
-    );
-
-    // Keep the linked gate_run's changeset_ref in lockstep with the review_run's.
-    // The verdict was rendered against the code state at *processing* time, not at
-    // injection time — recording the injection-time ref (from startGateRun) would
-    // leave the gate looking stale while shouldStartReview sees the review as fresh,
-    // deadlocking the card in its current phase. This matters most for the opt-in
-    // busy plan-review path, where the agent keeps editing during the review.
-    if (run.gateRunId) {
-      db.prepare("UPDATE gate_runs SET changeset_ref = ? WHERE id = ?").run(
-        currentChangesetRef ?? null,
-        run.gateRunId
-      );
-    }
+    if (leaseState.failure !== undefined) return null;
 
     const config = loadConfig(projectPath);
-    const riskLevel = guessRiskFromPhaseTransition(run.cardId);
+    const riskLevel = getRiskForAutomation(run.cardId);
     const maxIterations = run.maxIterations;
     const action = decideReviewAction(
       verdict,
@@ -430,54 +687,59 @@ export async function processReviewResult(
     );
 
     if (action === "passed") {
-      db.prepare("UPDATE review_runs SET status = 'passed' WHERE id = ?").run(reviewRunId);
-      if (run.gateRunId) {
-        completeGateRun(run.gateRunId, "passed", verdict.summary);
-      }
-      if (run.chatUri) await disposePeerChat(hostUrl, run.chatUri).catch(() => {});
-      return { ...verdict, action };
+      committed = commitOwnedReviewOutcome(db, reviewRunId, ownerId, {
+        reviewStatus: "passed",
+        verdictSummary: verdict.summary,
+        findings: verdict.findings,
+        gateStatus: "passed",
+        gateOutput: verdict.summary,
+      });
+      result = committed ? { ...verdict, action } : null;
+    } else if (action === "re-iterate") {
+      const gateOutput = verdict.status === "passed"
+        ? "Fixes applied — re-review required at this risk level."
+        : verdict.summary;
+      committed = commitOwnedReviewOutcome(db, reviewRunId, ownerId, {
+        reviewStatus: "failed",
+        verdictSummary: verdict.summary,
+        findings: verdict.findings,
+        gateStatus: "failed",
+        gateOutput,
+      });
+      result = committed
+        ? {
+            ...verdict,
+            status: verdict.status === "passed" ? "failed" : verdict.status,
+            action,
+          }
+        : null;
+    } else if (verdict.status === "needs-human") {
+      committed = commitOwnedReviewOutcome(db, reviewRunId, ownerId, {
+        reviewStatus: "escalated",
+        verdictSummary: verdict.summary,
+        findings: verdict.findings,
+        gateStatus: "failed",
+        gateOutput: "Escalated to human: " + verdict.summary,
+      });
+      result = committed ? { ...verdict, action } : null;
+    } else {
+      const summary =
+        `Max iterations (${maxIterations}) reached: ${verdict.summary}`;
+      committed = commitOwnedReviewOutcome(db, reviewRunId, ownerId, {
+        reviewStatus: "escalated",
+        verdictSummary: summary,
+        findings: verdict.findings,
+        gateStatus: "failed",
+        gateOutput:
+          `Escalated after ${maxIterations} iterations: ${verdict.summary}`,
+      });
+      result = committed ? { ...verdict, action } : null;
     }
-
-    if (action === "re-iterate") {
-      db.prepare("UPDATE review_runs SET status = 'failed' WHERE id = ?").run(reviewRunId);
-      if (run.gateRunId) {
-        completeGateRun(
-          run.gateRunId,
-          "failed",
-          verdict.status === "passed"
-            ? "Fixes applied — re-review required at this risk level."
-            : verdict.summary
-        );
-      }
-      if (run.chatUri) await disposePeerChat(hostUrl, run.chatUri).catch(() => {});
-      return {
-        ...verdict,
-        status: verdict.status === "passed" ? "failed" : verdict.status,
-        action,
-      };
-    }
-
-    if (verdict.status === "needs-human") {
-      db.prepare("UPDATE review_runs SET status = 'escalated' WHERE id = ?").run(reviewRunId);
-      if (run.gateRunId) {
-        completeGateRun(run.gateRunId, "failed", "Escalated to human: " + verdict.summary);
-      }
-      if (run.chatUri) await disposePeerChat(hostUrl, run.chatUri).catch(() => {});
-      return { ...verdict, action };
-    }
-
-    db.prepare("UPDATE review_runs SET status = 'escalated', verdict_summary = ? WHERE id = ?").run(
-      `Max iterations (${maxIterations}) reached: ${verdict.summary}`,
-      reviewRunId
-    );
-    if (run.gateRunId) {
-      completeGateRun(run.gateRunId, "failed", `Escalated after ${maxIterations} iterations: ${verdict.summary}`);
-    }
-    if (run.chatUri) await disposePeerChat(hostUrl, run.chatUri).catch(() => {});
-    return { ...verdict, action };
   } finally {
-    reviewJudgmentsInFlight.delete(reviewRunId);
+    reviewRenewalScheduler.clear(renewalTimer);
   }
+  if (committed) await cleanupTerminalReviewChat(db, hostUrl, run);
+  return result;
 }
 
 /** Whether the exact peer-chat review turn has completed and can be judged. */
@@ -539,12 +801,4 @@ function buildReviewPrompt(
   }
 
   return prompt;
-}
-
-function guessRiskFromPhaseTransition(cardId: string): RiskLevel {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT risk_level FROM card_risk WHERE card_id = ?")
-    .get(cardId) as { risk_level: string } | undefined;
-  return (row?.risk_level as RiskLevel) ?? "medium";
 }

@@ -1,19 +1,34 @@
 import "server-only";
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { getDb } from "@/lib/db/schema";
-import { KanbanCard, Phase, RiskLevel, PendingInput, normalizeChangesetRef } from "@/lib/types";
+import {
+  KanbanCard,
+  Phase,
+  RiskLevel,
+  PendingInput,
+  normalizeChangesetRef,
+} from "@/lib/types";
 import { loadConfig } from "./skill-config";
 import { getActiveReviewRuns, getLatestReviewRun, startReview, processReviewResult, getRequiredReviewSkills, isReviewResultReady, shouldStartReview } from "./review-executor";
-import { canAdvancePhase, setCardPhase, getNextPhase, computeChangesetRef, startGateRun, getGateRunsForCard, completeGateRun, executeGateCommand } from "./gate-engine";
+import { canAdvancePhase, setCardPhase, getNextPhase, startGateRun, getGateRunsForCard, completeGateRun, executeGateCommand } from "./gate-engine";
 import { isRetryableGateFailure } from "./gate-command";
-import { getCardRisk } from "./risk-store";
+import { getAuthoritativeCardRisk } from "./risk-store";
+import { riskAutomationPolicy } from "./risk-authority";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
-import { answerInput, submitPlanFeedback } from "@/lib/ahp/session-messenger";
+import { answerInput, disposePeerChat, submitPlanFeedback } from "@/lib/ahp/session-messenger";
 import { syncCoherence } from "./coherence-engine";
 import { runCoherenceExecutor, type ReviewCardCtx } from "./coherence-reviewer";
 import { advanceReviewToShip } from "./phase-advance";
 import { hasReadableArtifact } from "./artifact-gate";
 import { selectPendingReviewSkills } from "./plan-gate-selection";
+import { retryPendingReviewChatCleanup } from "./review-chat-cleanup";
+import { resolveAuthoritativeGateRevision } from "./gate-revision";
+import {
+  SerializedGenerationScheduler,
+  type SchedulerGeneration,
+} from "./generation-scheduler";
 
 /**
  * Heartbeat action types emitted to the orchestrator feed.
@@ -34,6 +49,8 @@ export type HeartbeatAction =
   | { type: "plan-review-passed"; cardId: string }
   | { type: "plan-feedback-delivered"; cardId: string }
   | { type: "plan-review-failed"; cardId: string; reason: string }
+  | { type: "risk-assessment-required"; cardId: string; reason: string }
+  | { type: "source-revision-required"; cardId: string; reason: string }
   | { type: "coherence-conflict"; cardId: string; otherCardId: string; summary: string }
   | { type: "coherence-cleared"; cardId: string; otherCardId: string }
   | { type: "coherence-blocked"; cardId: string; reason: string };
@@ -53,81 +70,159 @@ interface HeartbeatState {
   lastWipViolations: Map<string, number>; // phase → count when last emitted
   coherenceBlocked: Set<string>; // cards for which a ship-block was already announced
   planBusySince: Map<string, number>; // plan-phase card → first tick seen continuously running
+  riskBlockers: Map<string, string>; // card → current missing/stale blocker key
+  revisionBlockers: Map<string, string>; // card → current source/plan blocker
 }
 
-const state: HeartbeatState = {
-  lastTickAt: 0,
-  tickCount: 0,
-  stuckSince: new Map(),
-  nudgeCount: new Map(),
-  gateRetryCount: new Map(),
-  pipelineStage: new Map(),
-  lastWipViolations: new Map(),
-  coherenceBlocked: new Set(),
-  planBusySince: new Map(),
-};
+function createHeartbeatState(): HeartbeatState {
+  return {
+    lastTickAt: 0,
+    tickCount: 0,
+    stuckSince: new Map(),
+    nudgeCount: new Map(),
+    gateRetryCount: new Map(),
+    pipelineStage: new Map(),
+    lastWipViolations: new Map(),
+    coherenceBlocked: new Set(),
+    planBusySince: new Map(),
+    riskBlockers: new Map(),
+    revisionBlockers: new Map(),
+  };
+}
+
+interface HeartbeatGeneration {
+  token: SchedulerGeneration;
+  getHosts: () => HeartbeatHostSnapshot[];
+  onAction: (hostUrl: string, action: HeartbeatAction) => void;
+  hostStates: Map<string, HeartbeatState>;
+}
+
+const heartbeatScheduler = new SerializedGenerationScheduler();
+const heartbeatGenerationStorage =
+  new AsyncLocalStorage<HeartbeatGeneration>();
+const heartbeatGenerations =
+  new WeakMap<SchedulerGeneration, HeartbeatGeneration>();
+let currentHeartbeatGeneration: SchedulerGeneration | null = null;
+
+function stateForHost(
+  generation: HeartbeatGeneration,
+  hostUrl: string,
+): HeartbeatState {
+  let state = generation.hostStates.get(hostUrl);
+  if (!state) {
+    state = createHeartbeatState();
+    generation.hostStates.set(hostUrl, state);
+  }
+  return state;
+}
 
 const NO_LOCAL_WORKING_DIRECTORY_PREFIX = "No local working directory available:";
 
-let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-let onAction: ((action: HeartbeatAction) => void) | null = null;
-let tickInProgress = false;
+export interface HeartbeatHostSnapshot {
+  hostUrl: string;
+  cards: KanbanCard[];
+}
 
 /**
  * Start the heartbeat loop. Only one loop runs at a time.
  * Returns a stop function.
  */
 export function startHeartbeat(
-  hostUrl: string,
-  getCards: () => KanbanCard[],
-  actionHandler: (action: HeartbeatAction) => void
+  getHosts: () => HeartbeatHostSnapshot[],
+  actionHandler: (hostUrl: string, action: HeartbeatAction) => void
 ): () => void {
-  if (heartbeatInterval) return () => stopHeartbeat();
+  if (heartbeatScheduler.isRunning()) {
+    const existingGeneration = currentHeartbeatGeneration;
+    return () => void stopHeartbeat(existingGeneration);
+  }
 
-  onAction = actionHandler;
   const config = loadConfig();
-  const intervalMs = config.orchestrator.heartbeatInterval;
+  const token = heartbeatScheduler.start({
+    intervalMs: config.orchestrator.heartbeatInterval,
+    run(scheduledGeneration) {
+      const generation = heartbeatGenerations.get(scheduledGeneration);
+      if (!generation) return Promise.resolve();
+      return heartbeatGenerationStorage.run(
+        generation,
+        () => runSchedulerTick(generation),
+      ).then(() => undefined);
+    },
+    onError(err) {
+      console.warn(
+        "[heartbeat] tick error:",
+        err instanceof Error ? err.message : err,
+      );
+    },
+  });
+  heartbeatGenerations.set(token, {
+    token,
+    getHosts,
+    onAction: actionHandler,
+    hostStates: new Map(),
+  });
+  currentHeartbeatGeneration = token;
 
-  heartbeatInterval = setInterval(() => {
-    if (tickInProgress) return; // Skip if previous tick still running
-    tickInProgress = true;
-    runTick(hostUrl, getCards())
-      .catch((err) => {
-        console.warn("[heartbeat] tick error:", err instanceof Error ? err.message : err);
-      })
-      .finally(() => {
-        tickInProgress = false;
-      });
-  }, intervalMs);
-
-  // Run immediately on start
-  tickInProgress = true;
-  runTick(hostUrl, getCards())
-    .catch((err) => {
-      console.warn("[heartbeat] initial tick error:", err instanceof Error ? err.message : err);
-    })
-    .finally(() => {
-      tickInProgress = false;
-    });
-
-  return () => stopHeartbeat();
+  return () => void stopHeartbeat(token);
 }
 
-export function stopHeartbeat(): void {
-  if (heartbeatInterval) {
-    clearInterval(heartbeatInterval);
-    heartbeatInterval = null;
+export async function stopHeartbeat(
+  generation: SchedulerGeneration | null = currentHeartbeatGeneration,
+): Promise<void> {
+  if (!generation) return;
+  if (currentHeartbeatGeneration === generation) {
+    currentHeartbeatGeneration = null;
   }
-  onAction = null;
+  await heartbeatScheduler.stop(generation);
+  heartbeatGenerations.get(generation)?.hostStates.clear();
+  heartbeatGenerations.delete(generation);
 }
 
 export function isHeartbeatRunning(): boolean {
-  return heartbeatInterval !== null;
+  return heartbeatScheduler.isRunning();
 }
 
-function emit(action: HeartbeatAction): void {
-  if (onAction) onAction(action);
+function emit(hostUrl: string, action: HeartbeatAction): void {
+  const generation = heartbeatGenerationStorage.getStore();
+  if (
+    !generation ||
+    !heartbeatScheduler.isCurrent(generation.token) ||
+    generation.token.signal.aborted
+  ) {
+    return;
+  }
+  generation.onAction(hostUrl, action);
   logAction(action);
+}
+
+function trackGenerationTask<T>(task: Promise<T>): Promise<T> {
+  const generation = heartbeatGenerationStorage.getStore();
+  if (!generation) return task;
+  return heartbeatScheduler.track(generation.token, task);
+}
+
+async function runSchedulerTick(
+  generation: HeartbeatGeneration,
+): Promise<HeartbeatTickResult[]> {
+  const { signal } = generation.token;
+  try {
+    await retryPendingReviewChatCleanup(getDb(), disposePeerChat);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn("[heartbeat:review-cleanup] Reconciliation failed:", detail);
+  }
+  if (signal.aborted) return [];
+
+  const hosts = generation.getHosts();
+  const results: HeartbeatTickResult[] = [];
+  const activeHosts = new Set(hosts.map(({ hostUrl }) => hostUrl));
+  for (const hostUrl of generation.hostStates.keys()) {
+    if (!activeHosts.has(hostUrl)) generation.hostStates.delete(hostUrl);
+  }
+  for (const { hostUrl, cards } of hosts) {
+    if (signal.aborted) break;
+    results.push(await runTick(generation, hostUrl, cards));
+  }
+  return results;
 }
 
 function logAction(action: HeartbeatAction): void {
@@ -155,13 +250,17 @@ function canEnterPhase(phase: Phase, cards: KanbanCard[], config: ReturnType<typ
 /**
  * Core tick logic: scan cards and execute the build-phase pipeline.
  */
-async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatTickResult> {
+async function runTick(
+  generation: HeartbeatGeneration,
+  hostUrl: string,
+  cards: KanbanCard[],
+): Promise<HeartbeatTickResult> {
+  const state = stateForHost(generation, hostUrl);
   state.lastTickAt = Date.now();
   state.tickCount++;
   const config = loadConfig();
   const actions: HeartbeatAction[] = [];
   const errors: string[] = [];
-
   // Process non-archived, non-shipped cards. `define` cards are normally
   // skipped, but a brand-new session's plan-approval (and other input requests)
   // can appear while planwerk still has the card in `define`, so include
@@ -175,7 +274,7 @@ async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatT
 
   for (const card of activeCards) {
     try {
-      const cardActions = await processCard(hostUrl, card, config, cards);
+      const cardActions = await processCard(hostUrl, card, config, cards, state);
       actions.push(...cardActions);
     } catch (err) {
       const msg = `${card.id}: ${err instanceof Error ? err.message : String(err)}`;
@@ -222,7 +321,7 @@ async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatT
     if (count > limit && lastCount !== count) {
       state.lastWipViolations.set(phase, count);
       const action: HeartbeatAction = { type: "wip-violation", phase: phase as Phase, count, limit };
-      emit(action);
+      emit(hostUrl, action);
       actions.push(action);
     } else if (count <= limit) {
       state.lastWipViolations.delete(phase);
@@ -237,13 +336,17 @@ async function runTick(hostUrl: string, cards: KanbanCard[]): Promise<HeartbeatT
       if (escalatable.length > 0) {
         const ctxById = buildCoherenceCtx(cards);
         // Fire-and-forget: reviewer runs off-tick; verdicts are emitted when ready.
-        void runCoherenceExecutor(hostUrl, escalatable, ctxById)
-          .then((outcomes) => {
-            for (const o of outcomes) emitCoherenceOutcome(o);
-          })
-          .catch((err) => {
-            if (process.env.AHP_DEBUG) console.warn("[heartbeat:coherence]", err);
-          });
+        void trackGenerationTask(
+          runCoherenceExecutor(hostUrl, escalatable, ctxById)
+            .then((outcomes) => {
+              for (const o of outcomes) emitCoherenceOutcome(hostUrl, o);
+            })
+            .catch((err) => {
+              if (process.env.AHP_DEBUG) {
+                console.warn("[heartbeat:coherence]", err);
+              }
+            }),
+        );
       }
     } catch (err) {
       errors.push(`coherence: ${err instanceof Error ? err.message : String(err)}`);
@@ -269,18 +372,18 @@ function buildCoherenceCtx(cards: KanbanCard[]): Map<string, ReviewCardCtx> {
 }
 
 /** Translate an executor verdict into a feed action. */
-function emitCoherenceOutcome(o: {
+function emitCoherenceOutcome(hostUrl: string, o: {
   cardA: string;
   cardB: string;
   status: "conflict" | "coherent" | "needs-human";
   summary: string;
 }): void {
   if (o.status === "conflict") {
-    emit({ type: "coherence-conflict", cardId: o.cardA, otherCardId: o.cardB, summary: o.summary });
+    emit(hostUrl, { type: "coherence-conflict", cardId: o.cardA, otherCardId: o.cardB, summary: o.summary });
   } else if (o.status === "coherent") {
-    emit({ type: "coherence-cleared", cardId: o.cardA, otherCardId: o.cardB });
+    emit(hostUrl, { type: "coherence-cleared", cardId: o.cardA, otherCardId: o.cardB });
   } else {
-    emit({ type: "coherence-blocked", cardId: o.cardA, reason: o.summary });
+    emit(hostUrl, { type: "coherence-blocked", cardId: o.cardA, reason: o.summary });
   }
 }
 
@@ -291,32 +394,81 @@ function kickReviewJudgment(
   reviewRunId: number,
   changesetRef: string | undefined
 ): void {
-  void processReviewResult(hostUrl, cardId, reviewRunId, changesetRef)
-    .then((verdict) => {
-      if (!verdict) return;
-      if (verdict.action === "passed") {
-        emit({ type: "review-passed", cardId, skillId });
-      } else if (verdict.action === "escalated") {
-        emit({ type: "escalated", cardId, reason: verdict.summary });
-      }
-    })
-    .catch((error) => {
-      console.warn(
-        `[heartbeat:review] Failed to process review ${reviewRunId}:`,
-        error instanceof Error ? error.message : error
-      );
-    });
+  void trackGenerationTask(
+    processReviewResult(hostUrl, cardId, reviewRunId, changesetRef)
+      .then((verdict) => {
+        if (!verdict) return;
+        if (verdict.action === "passed") {
+          emit(hostUrl, { type: "review-passed", cardId, skillId });
+        } else if (verdict.action === "escalated") {
+          emit(hostUrl, {
+            type: "escalated",
+            cardId,
+            reason: verdict.summary,
+          });
+        }
+      })
+      .catch((error) => {
+        console.warn(
+          `[heartbeat:review] Failed to process review ${reviewRunId}:`,
+          error instanceof Error ? error.message : error,
+        );
+      }),
+  );
 }
 
 async function processCard(
   hostUrl: string,
   card: KanbanCard,
   config: ReturnType<typeof loadConfig>,
-  allCards: KanbanCard[]
+  allCards: KanbanCard[],
+  state: HeartbeatState,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
-  const storedRisk = getCardRisk(card.id);
-  const riskLevel: RiskLevel = storedRisk?.level ?? card.risk ?? "medium";
+  const authoritativeRisk = getAuthoritativeCardRisk(card.id, hostUrl);
+  const riskPolicy = riskAutomationPolicy(authoritativeRisk);
+  if (!riskPolicy.current || authoritativeRisk.status !== "current") {
+    const blockerKey = [
+      authoritativeRisk.status,
+      authoritativeRisk.currentDigest ?? "",
+      "assessment" in authoritativeRisk
+        ? authoritativeRisk.assessment.riskDigest ?? ""
+        : "",
+    ].join(":");
+    if (state.riskBlockers.get(card.id) !== blockerKey) {
+      state.riskBlockers.set(card.id, blockerKey);
+      const action: HeartbeatAction = {
+        type: "risk-assessment-required",
+        cardId: card.id,
+        reason: `${riskPolicy.reason} Reassess risk before automation can continue.`,
+      };
+      emit(hostUrl, action);
+      actions.push(action);
+    }
+    return actions;
+  }
+  state.riskBlockers.delete(card.id);
+  const riskLevel: RiskLevel = riskPolicy.level;
+  const revision = ["plan", "build", "review"].includes(card.phase)
+    ? resolveAuthoritativeGateRevision(getDb(), card.id, card.phase, hostUrl)
+    : null;
+  if (revision && !revision.ok) {
+    if (state.revisionBlockers.get(card.id) !== revision.reason) {
+      state.revisionBlockers.set(card.id, revision.reason);
+      const action: HeartbeatAction = {
+        type: "source-revision-required",
+        cardId: card.id,
+        reason: `${revision.reason}; automation is blocked until current facts are available.`,
+      };
+      emit(hostUrl, action);
+      actions.push(action);
+    }
+    return actions;
+  }
+  state.revisionBlockers.delete(card.id);
+  const authoritativeChangesetRef = revision?.ok
+    ? revision.changesetRef
+    : undefined;
 
   // Only process idle cards — running cards are doing work
   if (card.runtime !== "idle") {
@@ -331,14 +483,18 @@ async function processCard(
           card.pendingInput!,
           planApproval,
           config,
+          riskLevel,
+          authoritativeChangesetRef!,
+          authoritativeRisk.currentDigest,
+          state,
         );
         actions.push(...planActions);
-      } else if (shouldAutoAnswer(card)) {
+      } else if (shouldAutoAnswer(hostUrl, card)) {
         // Regular clarifying question — auto-answer below the risk threshold.
         const result = await autoAnswer(hostUrl, card);
         if (result.answered) {
           const action: HeartbeatAction = { type: "auto-answered", cardId: card.id, answer: result.answer ?? "" };
-          emit(action);
+          emit(hostUrl, action);
           actions.push(action);
         }
       }
@@ -347,40 +503,50 @@ async function processCard(
       // idle-only plan-review gate would never run. When enabled, inject it via
       // a queued message so the gate still grades before any advance. Key on the
       // plan content, not the code diff (this is a plan review).
-      const planRef = card.planContentHash;
-      const busyActions = await maybeInjectBusyPlanReview(hostUrl, card, riskLevel, planRef, config);
+      const busyActions = await maybeInjectBusyPlanReview(
+        hostUrl,
+        card,
+        riskLevel,
+        authoritativeChangesetRef,
+        config,
+        state,
+      );
       actions.push(...busyActions);
     }
     return actions;
   }
 
   const phase = card.phase;
-  // Code-diff freshness ref for build/review→ship gates. Only trust it when the
-  // card's diff counts are session-scoped (verified); otherwise pass `undefined`
-  // ("unknown") so a flapping shared working-tree summary can't invalidate a
-  // passed gate. Plan→build gates use the plan-content ref instead (see below).
-  const codeChangesetRef = card.changesetVerified
-    ? computeChangesetRef(card.filesChanged, card.additions, card.deletions, card.modifiedAt)
-    : undefined;
-  // Plan→build reviews review the plan artifact, so key their freshness on the
-  // plan content, never the code diff. `undefined` when no plan is loaded yet.
-  const planChangesetRef = card.planContentHash;
-
   // Build phase pipeline: deterministic gates → review skills → auto-advance
   if (phase === "build") {
-    const buildActions = await runBuildPipeline(hostUrl, card, riskLevel, codeChangesetRef, config, allCards);
+    const buildActions = await runBuildPipeline(
+      hostUrl,
+      card,
+      riskLevel,
+      authoritativeChangesetRef,
+      config,
+      allCards,
+      state,
+    );
     actions.push(...buildActions);
   }
 
   // Plan phase: check for plan review gates
   if (phase === "plan") {
-    const planActions = await runPlanPipeline(hostUrl, card, riskLevel, planChangesetRef, allCards);
+    const planActions = await runPlanPipeline(hostUrl, card, riskLevel, authoritativeChangesetRef, allCards);
     actions.push(...planActions);
   }
 
   // Review phase: check for review skills
   if (phase === "review") {
-    const reviewActions = await runReviewPipeline(hostUrl, card, riskLevel, codeChangesetRef, allCards);
+    const reviewActions = await runReviewPipeline(
+      hostUrl,
+      card,
+      riskLevel,
+      authoritativeChangesetRef,
+      allCards,
+      state,
+    );
     actions.push(...reviewActions);
   }
 
@@ -393,7 +559,7 @@ async function processCard(
       const msg = buildNudgeMessage(card, nudges);
       // Note: in production this would use the session URI from the card
       // For now, emit the action for the feed
-      emit({ type: "nudge-sent", cardId: card.id, message: msg });
+      emit(hostUrl, { type: "nudge-sent", cardId: card.id, message: msg });
       actions.push({ type: "nudge-sent", cardId: card.id, message: msg });
       state.nudgeCount.set(card.id, nudges + 1);
     }
@@ -437,7 +603,7 @@ async function startPendingReviews(
     );
     if (success) {
       const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: 1 };
-      emit(action);
+      emit(hostUrl, action);
       actions.push(action);
     }
   }
@@ -453,7 +619,8 @@ async function runBuildPipeline(
   riskLevel: RiskLevel,
   changesetRef: string | undefined,
   config: ReturnType<typeof loadConfig>,
-  allCards: KanbanCard[]
+  allCards: KanbanCard[],
+  state: HeartbeatState,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
   const transition = "build->review";
@@ -518,22 +685,29 @@ async function runBuildPipeline(
       );
 
       // Start (or re-start) the gate
-      const runId = startGateRun(card.id, "build", "review", gate.gateType, gate.gateName, changesetRef);
+      const runId = startGateRun({
+        cardId: card.id,
+        fromPhase: "build",
+        toPhase: "review",
+        gateType: gate.gateType,
+        gateName: gate.gateName,
+        changesetRef,
+      });
 
       if (staleRun) {
         const action: HeartbeatAction = { type: "stale-gate-invalidated", cardId: card.id, gateType: gate.gateType };
-        emit(action);
+        emit(hostUrl, action);
         actions.push(action);
       } else {
         const action: HeartbeatAction = { type: "gate-triggered", cardId: card.id, gateType: gate.gateType };
-        emit(action);
+        emit(hostUrl, action);
         actions.push(action);
       }
 
       // Execute the gate command if available, otherwise fail explicitly.
       if (gate.command && card.workingDirectory) {
         executeGateCommand(runId, gate.command, card.workingDirectory, (status) => {
-          emit({ type: "gate-completed", cardId: card.id, gateType: gate.gateType, status });
+          emit(hostUrl, { type: "gate-completed", cardId: card.id, gateType: gate.gateType, status });
         });
       } else if (gate.command) {
         completeGateRun(
@@ -541,10 +715,10 @@ async function runBuildPipeline(
           "failed",
           `${NO_LOCAL_WORKING_DIRECTORY_PREFIX} select a single local workspace root`,
         );
-        emit({ type: "gate-completed", cardId: card.id, gateType: gate.gateType, status: "failed" });
+        emit(hostUrl, { type: "gate-completed", cardId: card.id, gateType: gate.gateType, status: "failed" });
       } else {
         completeGateRun(runId, "failed", `No command configured for ${gate.gateName ?? gate.gateType}`);
-        emit({ type: "gate-completed", cardId: card.id, gateType: gate.gateType, status: "failed" });
+        emit(hostUrl, { type: "gate-completed", cardId: card.id, gateType: gate.gateType, status: "failed" });
       }
     }
     return actions;
@@ -597,7 +771,7 @@ async function runBuildPipeline(
                 skillId: skill.id,
                 iteration: review.iteration + 1,
               };
-              emit(action);
+              emit(hostUrl, action);
               actions.push(action);
             }
           }
@@ -614,7 +788,7 @@ async function runBuildPipeline(
       state.pipelineStage.set(card.id, "advancing");
       setCardPhase(card.id, nextPhase);
       const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "build", to: nextPhase };
-      emit(action);
+      emit(hostUrl, action);
       actions.push(action);
       state.pipelineStage.delete(card.id);
       state.stuckSince.delete(card.id);
@@ -718,11 +892,44 @@ async function runPlanApprovalPipeline(
   input: PendingInput,
   approval: { questionId: string; approveOptionId: string },
   config: ReturnType<typeof loadConfig>,
+  riskLevel: RiskLevel,
+  changesetRef: string,
+  riskDigest: string,
+  state: HeartbeatState,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
-  const assessedRisk = getCardRisk(card.id)?.level;
+
+  const riskStillCurrent = (): boolean => {
+    const currentRisk = getAuthoritativeCardRisk(card.id, hostUrl);
+    if (
+      currentRisk.status === "current" &&
+      currentRisk.currentDigest === riskDigest
+    ) {
+      return true;
+    }
+    const blockerKey = [
+      currentRisk.status,
+      currentRisk.currentDigest ?? "",
+      "assessment" in currentRisk
+        ? currentRisk.assessment.riskDigest ?? ""
+        : "",
+    ].join(":");
+    if (state.riskBlockers.get(card.id) !== blockerKey) {
+      state.riskBlockers.set(card.id, blockerKey);
+      const action: HeartbeatAction = {
+        type: "risk-assessment-required",
+        cardId: card.id,
+        reason:
+          "Risk facts or assessment changed during plan review. Reassess risk before plan approval can continue.",
+      };
+      emit(hostUrl, action);
+      actions.push(action);
+    }
+    return false;
+  };
 
   const approvePlan = async (): Promise<void> => {
+    if (!riskStillCurrent()) return;
     const answers = {
       [approval.questionId]: {
         state: "submitted",
@@ -741,7 +948,7 @@ async function runPlanApprovalPipeline(
 
     if (result.success) {
       const action: HeartbeatAction = { type: "plan-approved", cardId: card.id };
-      emit(action);
+      emit(hostUrl, action);
       actions.push(action);
     } else if (!result.stale) {
       // Dispatched but the host never consumed it — a genuine failure. (A
@@ -753,21 +960,21 @@ async function runPlanApprovalPipeline(
         cardId: card.id,
         reason: "Dispatched the plan approval but the host never confirmed it (still awaiting input).",
       };
-      emit(action);
+      emit(hostUrl, action);
       actions.push(action);
     }
   };
 
-  const riskLevel = assessedRisk ?? "medium";
+  if (!riskStillCurrent()) return actions;
   const policy = config.reviewPolicy[riskLevel];
-  const planRef = normalizeChangesetRef(card.planContentHash);
+  const planRef = normalizeChangesetRef(changesetRef);
   if (!planRef) {
     const action: HeartbeatAction = {
       type: "plan-review-failed",
       cardId: card.id,
       reason: "The current plan hash is unavailable; human review is required.",
     };
-    emit(action);
+    emit(hostUrl, action);
     actions.push(action);
     return actions;
   }
@@ -798,7 +1005,7 @@ async function runPlanApprovalPipeline(
       cardId: card.id,
       reason: `Required plan gates are pending outside the review pipeline: ${selection.nonReviewNames.join(", ")}.`,
     };
-    emit(action);
+    emit(hostUrl, action);
     actions.push(action);
     return actions;
   }
@@ -809,7 +1016,7 @@ async function runPlanApprovalPipeline(
       cardId: card.id,
       reason: `Configured review skills are unavailable: ${selection.missingReviewNames.join(", ")}.`,
     };
-    emit(action);
+    emit(hostUrl, action);
     actions.push(action);
     return actions;
   }
@@ -819,6 +1026,9 @@ async function runPlanApprovalPipeline(
     const latest = getLatestReviewRun(card.id, skill.id, transition);
     const fresh = latest
       && normalizeChangesetRef(latest.changesetRef ?? undefined) === planRef;
+    if (latest?.status === "ambiguous") {
+      continue;
+    }
     if (latest && fresh && (latest.status === "injected" || latest.status === "extracting")) {
       if (await isReviewResultReady(hostUrl, latest)) {
         const verdict = await processReviewResult(
@@ -834,6 +1044,7 @@ async function runPlanApprovalPipeline(
     }
     if (latest && fresh) continue;
     if (!config.orchestrator.autoInjectReviews) continue;
+    if (!riskStillCurrent()) return actions;
 
     const { success } = await startReview(
       hostUrl,
@@ -852,7 +1063,7 @@ async function runPlanApprovalPipeline(
         skillId: skill.id,
         iteration: getLatestReviewRun(card.id, skill.id, transition)?.iteration ?? 1,
       };
-      emit(action);
+      emit(hostUrl, action);
       actions.push(action);
     } else {
       const failed = getLatestReviewRun(card.id, skill.id, transition);
@@ -861,7 +1072,7 @@ async function runPlanApprovalPipeline(
         cardId: card.id,
         reason: failed?.verdictSummary ?? `Failed to start configured review gate ${skill.id}.`,
       };
-      emit(action);
+      emit(hostUrl, action);
       actions.push(action);
     }
   }
@@ -874,6 +1085,7 @@ async function runPlanApprovalPipeline(
     ({ run }) => run && (run.status === "injected" || run.status === "extracting"),
   );
   if (stillRunning) return actions;
+  if (!riskStillCurrent()) return actions;
 
   const passing = canAdvancePhase(
     card.id,
@@ -886,7 +1098,7 @@ async function runPlanApprovalPipeline(
   if (passing) {
     if (processedPass) {
       const action: HeartbeatAction = { type: "plan-review-passed", cardId: card.id };
-      emit(action);
+      emit(hostUrl, action);
       actions.push(action);
     }
     if (policy.autoApprovePlan) await approvePlan();
@@ -927,7 +1139,7 @@ async function runPlanApprovalPipeline(
 
   if (result.success) {
     const action: HeartbeatAction = { type: "plan-feedback-delivered", cardId: card.id };
-    emit(action);
+    emit(hostUrl, action);
     actions.push(action);
   } else if (!result.stale) {
     const action: HeartbeatAction = {
@@ -935,7 +1147,7 @@ async function runPlanApprovalPipeline(
       cardId: card.id,
       reason: "Review findings were generated but the host did not consume the plan feedback.",
     };
-    emit(action);
+    emit(hostUrl, action);
     actions.push(action);
   }
   return actions;
@@ -955,7 +1167,8 @@ async function maybeInjectBusyPlanReview(
   card: KanbanCard,
   riskLevel: RiskLevel,
   changesetRef: string | undefined,
-  config: ReturnType<typeof loadConfig>
+  config: ReturnType<typeof loadConfig>,
+  state: HeartbeatState,
 ): Promise<HeartbeatAction[]> {
   if (!config.orchestrator.injectReviewsWhileBusy) return [];
   if (!config.orchestrator.autoInjectReviews) return [];
@@ -1017,7 +1230,7 @@ async function runPlanPipeline(
     if (config.orchestrator.autoAdvancePhases && canEnterPhase("build", allCards, config)) {
       setCardPhase(card.id, "build");
       const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "plan", to: "build" };
-      emit(action);
+      emit(hostUrl, action);
       actions.push(action);
     }
     return actions;
@@ -1053,7 +1266,7 @@ async function runPlanPipeline(
             const { success } = await startReview(hostUrl, sessionUri, card.id, skill, transition, riskLevel, changesetRef);
             if (success) {
               const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: review.iteration + 1 };
-              emit(action);
+              emit(hostUrl, action);
               actions.push(action);
             }
           }
@@ -1069,7 +1282,8 @@ async function runReviewPipeline(
   card: KanbanCard,
   riskLevel: RiskLevel,
   changesetRef: string | undefined,
-  allCards: KanbanCard[]
+  allCards: KanbanCard[],
+  state: HeartbeatState,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
   const config = loadConfig(card.workingDirectory);
@@ -1089,14 +1303,14 @@ async function runReviewPipeline(
   );
   for (const gate of artifactPending) {
     if (!hasReadableArtifact(card.artifacts, gate.artifactType!)) continue;
-    const runId = startGateRun(
-      card.id,
-      "review",
-      "ship",
-      "artifact",
-      gate.gateName,
-      changesetRef
-    );
+    const runId = startGateRun({
+      cardId: card.id,
+      fromPhase: "review",
+      toPhase: "ship",
+      gateType: "artifact",
+      gateName: gate.gateName,
+      changesetRef,
+    });
     completeGateRun(
       runId,
       "passed",
@@ -1108,7 +1322,7 @@ async function runReviewPipeline(
       gateType: "artifact",
       status: "passed",
     };
-    emit(action);
+    emit(hostUrl, action);
     actions.push(action);
   }
   if (allowed) {
@@ -1117,7 +1331,7 @@ async function runReviewPipeline(
       if (advanced) {
         state.coherenceBlocked.delete(card.id);
         const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "review", to: "ship" };
-        emit(action);
+        emit(hostUrl, action);
         actions.push(action);
       } else if (blockedBy.length > 0 && !state.coherenceBlocked.has(card.id)) {
         // Announce the ship-block once (not every tick) until it clears.
@@ -1129,7 +1343,7 @@ async function runReviewPipeline(
           cardId: card.id,
           reason: `Ship blocked: unresolved coherence conflict with ${other}`,
         };
-        emit(action);
+        emit(hostUrl, action);
         actions.push(action);
       }
     }
@@ -1165,7 +1379,7 @@ async function runReviewPipeline(
             const { success } = await startReview(hostUrl, sessionUri, card.id, skill, transition, riskLevel, changesetRef);
             if (success) {
               const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: review.iteration + 1 };
-              emit(action);
+              emit(hostUrl, action);
               actions.push(action);
             }
           }

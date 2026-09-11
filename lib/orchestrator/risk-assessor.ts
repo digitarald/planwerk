@@ -1,61 +1,47 @@
 import "server-only";
 
-import { CopilotClient } from "@github/copilot-sdk";
+import type { CopilotClient } from "@github/copilot-sdk";
 
 import { RiskLevel } from "@/lib/types";
-import { disposeOneShotSession } from "./copilot-session";
-import { ORCHESTRATOR_MODEL } from "./model";
+import {
+  disposeOneShotSession,
+  invalidateRuntimeForCleanupFailure,
+  releaseRuntimeLease,
+} from "./copilot-session";
+import { selectOrchestratorModel } from "./model";
+import {
+  acquireCopilotRuntimeClient,
+  classifyCopilotFailure,
+} from "./sdk-runtime";
+import type { CopilotRuntimeLease } from "./sdk-runtime-manager";
+import {
+  classifyRiskDeterministically,
+  requiresConservativeHighRisk,
+} from "./risk-classifier";
 
 export interface RiskInput {
   title: string;
   activity?: string;
+  sourceRevision?: string;
   filesChanged: number;
   additions: number;
   deletions: number;
   filePaths?: string[];
   lastAgentMessage?: string;
   planContent?: string;
+  pendingElicitation?: unknown;
+  /** True only when verified, revision-bound per-file facts cover the changeset. */
+  factsComplete?: boolean;
 }
 
-interface RiskAssessment {
+export interface RiskAssessment {
   level: RiskLevel;
   factors: string[];
 }
 
-// Module-level singleton — started lazily, reused across calls
-let clientInstance: CopilotClient | null = null;
-let clientStarting: Promise<CopilotClient> | null = null;
-
-async function getClient(): Promise<CopilotClient> {
-  if (clientInstance) return clientInstance;
-  if (clientStarting) return clientStarting;
-
-  clientStarting = (async () => {
-    try {
-      const client = new CopilotClient();
-      await client.start();
-      clientInstance = client;
-      return client;
-    } finally {
-      clientStarting = null;
-    }
-  })();
-
-  return clientStarting;
-}
-
-async function resetClient() {
-  const old = clientInstance;
-  clientInstance = null;
-  clientStarting = null;
-  if (old) {
-    await old.stop().catch(() => {});
-  }
-}
-
 const SYSTEM_PROMPT = `You are a risk triage agent for a software development lifecycle system.
 
-Given context about a task (title, activity, file metrics, plan content, and the agent's last response), assess the risk level as one of: "low", "medium", or "high".
+Given context about a task (title, activity, source revision, file metrics, plan content, pending elicitation, and the agent's last response), assess the risk level as one of: "low", "medium", or "high".
 
 Risk criteria:
 - **Low**: Typo fixes, config changes, documentation, small isolated changes (<5 files, <50 lines)
@@ -66,6 +52,7 @@ Pay special attention to:
 - The plan content (if provided) — it describes the intended scope and approach
 - The agent's last message — it summarizes the most recent work done
 - File paths — security/auth/migration/payment paths indicate higher risk
+- Pending elicitation — supporting evidence only; deterministic authorization is enforced separately
 
 Respond with ONLY a JSON object (no markdown fences, no extra text):
 {"level": "low|medium|high", "factors": ["reason 1", "reason 2"]}
@@ -76,6 +63,7 @@ function buildPrompt(input: RiskInput): string {
   const lines = [
     `Task: ${input.title}`,
     input.activity ? `Activity: ${input.activity}` : null,
+    input.sourceRevision ? `Source revision: ${input.sourceRevision}` : null,
     `Files changed: ${input.filesChanged}`,
     `Lines added: ${input.additions}, deleted: ${input.deletions}`,
     input.filePaths?.length
@@ -86,6 +74,9 @@ function buildPrompt(input: RiskInput): string {
       : null,
     input.lastAgentMessage
       ? `Agent's last response:\n${input.lastAgentMessage.slice(0, 2000)}`
+      : null,
+    input.pendingElicitation
+      ? `Pending elicitation (normalized):\n${JSON.stringify(input.pendingElicitation).slice(0, 3000)}`
       : null,
   ];
   return lines.filter(Boolean).join("\n\n");
@@ -113,43 +104,26 @@ function parseResponse(content: string): RiskAssessment | null {
   return null;
 }
 
-/**
- * Simple fallback when the Copilot SDK is unavailable.
- * Uses only file/line thresholds — no keyword scanning.
- */
-function fallbackAssessRisk(input: RiskInput): RiskAssessment {
-  const factors: string[] = [];
-  let score = 0;
-
-  if (input.filesChanged > 10) {
-    score += 2;
-    factors.push(`Large changeset (${input.filesChanged} files)`);
-  } else if (input.filesChanged > 5) {
-    score += 1;
-    factors.push(`Moderate changeset (${input.filesChanged} files)`);
-  }
-
-  const totalChanges = input.additions + input.deletions;
-  if (totalChanges > 200) {
-    score += 2;
-    factors.push(`${totalChanges} lines changed`);
-  } else if (totalChanges > 50) {
-    score += 1;
-  }
-
-  const level: RiskLevel = score >= 3 ? "high" : score >= 1 ? "medium" : "low";
-  if (factors.length === 0) {
-    factors.push("Small, isolated change");
-  }
-  return { level, factors };
-}
-
 export async function assessRisk(input: RiskInput): Promise<RiskAssessment> {
+  // The model may add scrutiny, but it may never downgrade an incomplete or
+  // deterministically sensitive source snapshot.
+  const conservative = requiresConservativeHighRisk(input);
+  if (conservative) return conservative;
+
+  let client: CopilotClient | undefined;
+  let runtimeLease: CopilotRuntimeLease<CopilotClient> | undefined;
   try {
-    const client = await getClient();
+    runtimeLease = await acquireCopilotRuntimeClient();
+    client = runtimeLease.client;
+    const selectedModel = await selectOrchestratorModel(client, {
+      role: "triage",
+    });
     const session = await client.createSession({
-      model: ORCHESTRATOR_MODEL,
+      model: selectedModel.model,
+      reasoningEffort: selectedModel.reasoningEffort,
       systemMessage: { content: SYSTEM_PROMPT },
+      availableTools: [],
+      skipCustomInstructions: true,
     });
     let responseCompleted = false;
 
@@ -166,21 +140,34 @@ export async function assessRisk(input: RiskInput): Promise<RiskAssessment> {
         if (parsed) return parsed;
       }
     } finally {
-      await disposeOneShotSession(
+      const cleanup = await disposeOneShotSession(
         client,
         session,
         !responseCompleted,
         "[risk-assessor]"
       );
+      await invalidateRuntimeForCleanupFailure(
+        runtimeLease,
+        cleanup,
+        "[risk-assessor]",
+      );
     }
   } catch (err) {
-    // Stop and reset client so the next call retries from scratch
-    await resetClient();
+    if (runtimeLease && classifyCopilotFailure(err) === "transport") {
+      await runtimeLease.invalidate(err).catch((resetError) => {
+      console.warn(
+        "[risk-assessor] Failed to reset Copilot SDK runtime:",
+        resetError instanceof Error ? resetError.message : resetError
+      );
+      });
+    }
     console.warn(
       "[risk-assessor] Copilot SDK call failed, using fallback:",
       err instanceof Error ? err.message : err
     );
+  } finally {
+    await releaseRuntimeLease(runtimeLease, "[risk-assessor]");
   }
 
-  return fallbackAssessRisk(input);
+  return classifyRiskDeterministically(input);
 }

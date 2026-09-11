@@ -1,19 +1,22 @@
 import "server-only";
 
 import { exec } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 
 import { getDb } from "@/lib/db/schema";
 import {
-  GateStatus,
-  Phase,
   PHASE_ORDER,
-  RiskLevel,
   normalizeChangesetRef,
   type ArtifactType,
+  type GateStatus,
+  type Phase,
+  type RiskLevel,
 } from "@/lib/types";
 import { resolveGateWorkingDirectory } from "./gate-command";
 import { loadConfig, type GateRef } from "./skill-config";
+import { throwIfAborted } from "@/lib/abort";
+import { WORK_LEASE_MS } from "@/lib/db/work-lease-schema";
 
 export type GateType =
   | "lint"
@@ -47,6 +50,30 @@ export interface GateConfig {
   artifactType?: ArtifactType;
   required: boolean;
   riskThreshold?: RiskLevel;
+}
+
+export interface ResolveConfiguredGateOptions {
+  fromPhase: Phase;
+  toPhase: Phase;
+  gateType: GateType;
+  gateName?: string;
+  projectPath?: string;
+  riskLevel?: RiskLevel;
+}
+
+export type ConfiguredGateResolution =
+  | { ok: true; gate: GateConfig }
+  | { ok: false; reason: string };
+
+export interface StartGateRunOptions {
+  cardId: string;
+  fromPhase: Phase;
+  toPhase: Phase;
+  gateType: GateType;
+  gateName?: string;
+  changesetRef?: string;
+  signal?: AbortSignal;
+  ownerId?: string;
 }
 
 /**
@@ -208,37 +235,115 @@ export function getGatesForTransition(
   return filterGatesByRisk(gates, riskLevel);
 }
 
-export function startGateRun(
-  cardId: string,
-  fromPhase: Phase,
-  toPhase: Phase,
-  gateType: GateType,
-  gateName?: string,
-  changesetRef?: string
-): number {
+export function resolveConfiguredGate({
+  fromPhase,
+  toPhase,
+  gateType,
+  gateName,
+  projectPath,
+  riskLevel,
+}: ResolveConfiguredGateOptions): ConfiguredGateResolution {
+  const candidates = getGatesForTransition(
+    fromPhase,
+    toPhase,
+    projectPath,
+    riskLevel,
+  ).filter((gate) => gate.gateType === gateType);
+
+  if (gateName !== undefined) {
+    const gate = candidates.find((candidate) => candidate.gateName === gateName);
+    return gate
+      ? { ok: true, gate }
+      : {
+          ok: false,
+          reason: `No configured gate matches type "${gateType}" name "${gateName}"`,
+        };
+  }
+
+  if (candidates.length === 1) {
+    return { ok: true, gate: candidates[0] };
+  }
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      reason: `No configured gate matches type "${gateType}"`,
+    };
+  }
+
+  return {
+    ok: false,
+    reason:
+      `Multiple configured gates match type "${gateType}"; ` +
+      "a configured gate name is required",
+  };
+}
+
+export function startGateRun({
+  cardId,
+  fromPhase,
+  toPhase,
+  gateType,
+  gateName,
+  changesetRef,
+  signal,
+  ownerId = randomUUID(),
+}: StartGateRunOptions): number {
+  throwIfAborted(signal);
   const db = getDb();
+  throwIfAborted(signal);
   db.prepare(
     "INSERT OR IGNORE INTO card_phases (card_id, phase, updated_at) VALUES (?, ?, datetime('now'))"
   ).run(cardId, fromPhase);
 
+  throwIfAborted(signal);
   const result = db
     .prepare(
-      "INSERT INTO gate_runs (card_id, from_phase, to_phase, gate_type, gate_name, changeset_ref) VALUES (?, ?, ?, ?, ?, ?)"
+      `INSERT INTO gate_runs (
+        card_id, from_phase, to_phase, gate_type, gate_name, changeset_ref,
+        owner_id, lease_expires_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(cardId, fromPhase, toPhase, gateType, gateName || null, changesetRef || null);
+    .run(
+      cardId,
+      fromPhase,
+      toPhase,
+      gateType,
+      gateName || null,
+      changesetRef || null,
+      ownerId,
+      Date.now() + WORK_LEASE_MS,
+    );
 
-  return Number(result.lastInsertRowid);
+  const runId = Number(result.lastInsertRowid);
+  gateRunOwners.set(runId, ownerId);
+  return runId;
 }
+
+const gateRunOwners = new Map<number, string>();
 
 export function completeGateRun(
   runId: number,
   status: "passed" | "failed",
   output?: string
-): void {
+): boolean {
   const db = getDb();
-  db.prepare(
-    "UPDATE gate_runs SET status = ?, output = ?, completed_at = datetime('now') WHERE id = ?"
-  ).run(status, output || null, runId);
+  const ownerId = gateRunOwners.get(runId);
+  const result = ownerId
+    ? db.prepare(`
+        UPDATE gate_runs
+        SET status = ?, output = ?, completed_at = datetime('now'),
+            lease_expires_at_ms = NULL
+        WHERE id = ? AND status = 'running' AND owner_id = ?
+          AND lease_expires_at_ms > ?
+      `).run(status, output || null, runId, ownerId, Date.now())
+    : db.prepare(`
+        UPDATE gate_runs
+        SET status = ?, output = ?, completed_at = datetime('now'),
+            lease_expires_at_ms = NULL
+        WHERE id = ? AND status = 'running' AND owner_id IS NULL
+      `).run(status, output || null, runId);
+  gateRunOwners.delete(runId);
+  return result.changes === 1;
 }
 
 const GATE_MAX_OUTPUT = 64 * 1024;
@@ -258,9 +363,22 @@ export function executeGateCommand(
   onComplete?: (status: "passed" | "failed") => void,
 ): void {
   const complete = (status: "passed" | "failed", output: string): void => {
-    completeGateRun(runId, status, output);
-    onComplete?.(status);
+    clearInterval(renewalTimer);
+    if (completeGateRun(runId, status, output)) onComplete?.(status);
   };
+  const ownerId = gateRunOwners.get(runId);
+  const renewalTimer = setInterval(() => {
+    if (!ownerId) return;
+    const now = Date.now();
+    const renewed = getDb().prepare(`
+      UPDATE gate_runs
+      SET lease_expires_at_ms = ?
+      WHERE id = ? AND status = 'running' AND owner_id = ?
+        AND lease_expires_at_ms > ?
+    `).run(now + WORK_LEASE_MS, runId, ownerId, now);
+    if (renewed.changes !== 1) clearInterval(renewalTimer);
+  }, Math.max(1, Math.floor(WORK_LEASE_MS / 3)));
+  renewalTimer.unref();
 
   let resolvedCwd: string;
   try {
@@ -335,14 +453,11 @@ export function getLatestPassingRuns(
 
   return rows.map((row) => {
     const run = mapGateRun(row);
-    // Mark as stale only when we have a real current changeset ref that differs
-    // from the one the gate ran against. An empty/unknown current ref (unverified
-    // shared-diff counts, or plan content not yet loaded) carries no freshness
-    // signal — never invalidate a passed verdict on missing info, or the gate
-    // re-triggers forever. `normalizeChangesetRef` keeps `plan:` refs opaque and
-    // reduces code refs to their diff dimensions (ignoring activity-only ticks).
+    // Evidence is fresh only when both sides carry the same non-empty revision.
+    // Unknown current facts must never revive a verdict from an older source.
     if (
-      normalizedCurrent !== "" &&
+      normalizedCurrent === "" ||
+      normalizeChangesetRef(run.changesetRef) === "" ||
       normalizeChangesetRef(run.changesetRef) !== normalizedCurrent
     ) {
       run.stale = true;
@@ -361,6 +476,12 @@ export function canAdvancePhase(
 ): { allowed: boolean; pendingGates: GateConfig[] } {
   const gates = getGatesForTransition(fromPhase, toPhase, projectPath, riskLevel);
   const requiredGates = gates.filter((gate) => gate.required);
+
+  // Advancement is revision-bound even when a transition has no configured
+  // gates. Callers must establish the authoritative current source/plan first.
+  if (normalizeChangesetRef(changesetRef) === "") {
+    return { allowed: false, pendingGates: requiredGates };
+  }
 
   if (requiredGates.length === 0) {
     return { allowed: true, pendingGates: [] };

@@ -1,42 +1,23 @@
 import "server-only";
 
-import { CopilotClient } from "@github/copilot-sdk";
+import type { CopilotClient } from "@github/copilot-sdk";
 
-import { ORCHESTRATOR_MODEL } from "./model";
-import { disposeOneShotSession } from "./copilot-session";
+import { selectOrchestratorModel } from "./model";
+import {
+  disposeOneShotSession,
+  invalidateRuntimeForCleanupFailure,
+  releaseRuntimeLease,
+} from "./copilot-session";
 import {
   judgeWithTransport,
   type JudgeVerdict,
   type VerdictJudgeTransport,
 } from "./verdict-judge-core";
-
-let clientInstance: CopilotClient | null = null;
-let clientStarting: Promise<CopilotClient> | null = null;
-
-async function getClient(): Promise<CopilotClient> {
-  if (clientInstance) return clientInstance;
-  if (clientStarting) return clientStarting;
-
-  clientStarting = (async () => {
-    try {
-      const client = new CopilotClient();
-      await client.start();
-      clientInstance = client;
-      return client;
-    } finally {
-      clientStarting = null;
-    }
-  })();
-
-  return clientStarting;
-}
-
-async function resetClient(): Promise<void> {
-  const old = clientInstance;
-  clientInstance = null;
-  clientStarting = null;
-  if (old) await old.stop().catch(() => {});
-}
+import {
+  acquireCopilotRuntimeClient,
+  classifyCopilotFailure,
+} from "./sdk-runtime";
+import type { CopilotRuntimeLease } from "./sdk-runtime-manager";
 
 const SYSTEM_PROMPT = `You are an independent gate judge for an AI software-review workflow.
 
@@ -53,12 +34,20 @@ Respond with ONLY a JSON object:
 "findings" must contain only concrete unresolved blockers. It must be empty for "passed" and non-empty for "failed".`;
 
 const sdkTransport: VerdictJudgeTransport = async (reviewResponse) => {
+  let client: CopilotClient | undefined;
+  let runtimeLease: CopilotRuntimeLease<CopilotClient> | undefined;
   try {
-    const client = await getClient();
+    runtimeLease = await acquireCopilotRuntimeClient();
+    client = runtimeLease.client;
+    const selectedModel = await selectOrchestratorModel(client, {
+      role: "review",
+    });
     const session = await client.createSession({
-      model: ORCHESTRATOR_MODEL,
+      model: selectedModel.model,
+      reasoningEffort: selectedModel.reasoningEffort,
       systemMessage: { content: SYSTEM_PROMPT },
       availableTools: [],
+      skipCustomInstructions: true,
     });
     let responseCompleted = false;
 
@@ -74,20 +63,34 @@ const sdkTransport: VerdictJudgeTransport = async (reviewResponse) => {
       responseCompleted = true;
       return response?.data?.content;
     } finally {
-      await disposeOneShotSession(
+      const cleanup = await disposeOneShotSession(
         client,
         session,
         !responseCompleted,
         "[verdict-judge]"
       );
+      await invalidateRuntimeForCleanupFailure(
+        runtimeLease,
+        cleanup,
+        "[verdict-judge]",
+      );
     }
   } catch (error) {
-    await resetClient();
+    if (runtimeLease && classifyCopilotFailure(error) === "transport") {
+      await runtimeLease.invalidate(error).catch((resetError) => {
+      console.warn(
+        "[verdict-judge] Failed to reset Copilot SDK runtime:",
+        resetError instanceof Error ? resetError.message : resetError
+      );
+      });
+    }
     console.warn(
       "[verdict-judge] SDK call failed:",
       error instanceof Error ? error.message : error
     );
     throw error;
+  } finally {
+    await releaseRuntimeLease(runtimeLease, "[verdict-judge]");
   }
 };
 

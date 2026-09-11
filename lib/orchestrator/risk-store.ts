@@ -1,65 +1,68 @@
 import "server-only";
 
 import { getDb } from "@/lib/db/schema";
-import { RiskLevel } from "@/lib/types";
+import type { RiskLevel } from "@/lib/types";
+import type { RiskInput } from "./risk-assessor";
+import {
+  setCardRiskIfFactsCurrent,
+} from "./risk-persistence";
+import {
+  getRiskFactsSnapshot,
+  type RiskFactsSnapshot,
+} from "./risk-facts";
+import {
+  readAuthoritativeRisk,
+  riskAutomationPolicy,
+  type AuthoritativeRisk,
+} from "./risk-authority";
+export type { AuthoritativeRisk, StoredRisk } from "./risk-authority";
+export { setCardRiskIfFactsCurrent, setCardRiskInDb } from "./risk-persistence";
 
-export interface StoredRisk {
-  cardId: string;
-  level: RiskLevel;
-  factors: string[];
-  assessedAt: string;
-  assessedBy: "copilot" | "human";
-}
-
-interface RiskRow {
-  card_id: string;
-  risk_level: string;
-  risk_factors: string;
-  assessed_at: string;
-  assessed_by: string;
-}
-
-function mapRow(row: RiskRow): StoredRisk {
-  return {
-    cardId: row.card_id,
-    level: row.risk_level as RiskLevel,
-    factors: JSON.parse(row.risk_factors),
-    assessedAt: row.assessed_at,
-    assessedBy: row.assessed_by as "copilot" | "human",
-  };
-}
-
-export function getCardRisk(cardId: string): StoredRisk | undefined {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT * FROM card_risk WHERE card_id = ?")
-    .get(cardId) as RiskRow | undefined;
-
-  return row ? mapRow(row) : undefined;
-}
-
-export function setCardRisk(
+export function getAuthoritativeCardRisk(
   cardId: string,
+  hostUrl?: string,
+): AuthoritativeRisk {
+  return readAuthoritativeRisk(getDb(), cardId, hostUrl);
+}
+
+export function getRiskForAutomation(
+  cardId: string,
+  hostUrl?: string,
+): RiskLevel {
+  return riskAutomationPolicy(
+    getAuthoritativeCardRisk(cardId, hostUrl),
+  ).level;
+}
+
+/**
+ * Load risk inputs from Planwerk's server-owned session cache rather than the
+ * browser-supplied board snapshot used for conversational context.
+ */
+export function getAuthoritativeRiskInput(
+  hostUrl: string,
+  cardId: string,
+): RiskInput | null {
+  return getAuthoritativeRiskSnapshot(hostUrl, cardId)?.input ?? null;
+}
+
+export function getAuthoritativeRiskSnapshot(
+  hostUrl: string,
+  cardId: string,
+): RiskFactsSnapshot | null {
+  return getRiskFactsSnapshot(getDb(), hostUrl, cardId);
+}
+
+export function persistAuthoritativeRisk(
+  snapshot: RiskFactsSnapshot,
   level: RiskLevel,
   factors: string[],
-  assessedBy: "copilot" | "human" = "copilot"
-): void {
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO card_risk (card_id, risk_level, risk_factors, assessed_at, assessed_by)
-     VALUES (?, ?, ?, datetime('now'), ?)
-     ON CONFLICT(card_id) DO UPDATE SET
-       risk_level = ?,
-       risk_factors = ?,
-       assessed_at = datetime('now'),
-       assessed_by = ?`
-  ).run(
-    cardId,
+  assessedBy: "copilot" = "copilot",
+): boolean {
+  return setCardRiskIfFactsCurrent(
+    getDb(),
+    snapshot,
     level,
-    JSON.stringify(factors),
+    factors,
     assessedBy,
-    level,
-    JSON.stringify(factors),
-    assessedBy
   );
 }

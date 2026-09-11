@@ -1,13 +1,14 @@
 import "server-only";
 
 import type {
-  ChangesetState,
   ChangesetFile,
-  SessionState,
   Changeset,
 } from "@microsoft/agent-host-protocol";
 
-import { getAHPClient, releaseAHPClient } from "@/lib/ahp/client-manager";
+import { withAHPClient } from "@/lib/ahp/client-operation";
+import { readReadyChangesetState } from "@/lib/ahp/changeset-readiness";
+import { readTextResource } from "@/lib/ahp/resource-read";
+import { readSessionState } from "@/lib/ahp/snapshot";
 import type { CoherenceTier } from "@/lib/types";
 
 const MAX_FILES_PER_CARD = 5;
@@ -65,7 +66,7 @@ function buildMatcher(tier: CoherenceTier, overlapPaths: string[]): (path: strin
 
 /**
  * Fetch the content of a card's overlapping files from its AHP session changeset.
- * Leases the shared AHP client and always releases it in `finally`. Best-effort:
+ * Uses an exclusively owned AHP client for the complete read. Best-effort:
  * returns `failed: true` when the changeset can't be read so the caller can decide
  * how to treat degraded evidence (e.g. keep a high-risk pair blocked).
  */
@@ -76,69 +77,55 @@ export async function fetchOverlapContent(
   overlapPaths: string[]
 ): Promise<CardOverlapContent> {
   const matcher = buildMatcher(tier, overlapPaths);
-  const client = await getAHPClient(hostUrl);
 
   try {
-    // Subscribe session → find its changeset catalogue.
-    const { result: sessionResult, subscription: sessionSub } = await withTimeout(
-      client.subscribe(sessionUri),
-      READ_TIMEOUT_MS
-    );
-    sessionSub.close();
-    await client.unsubscribe(sessionUri).catch(() => {});
-
-    const sessionState = sessionResult.snapshot?.state as SessionState | undefined;
-    const changeset = sessionState?.changesets?.length
-      ? findSessionChangeset(sessionState.changesets)
-      : undefined;
-    if (!changeset || changeset.uriTemplate.includes("{")) {
-      return { sessionUri, files: [], failed: true };
-    }
-
-    const { result: csResult, subscription: csSub } = await withTimeout(
-      client.subscribe(changeset.uriTemplate),
-      READ_TIMEOUT_MS
-    );
-    csSub.close();
-    await client.unsubscribe(changeset.uriTemplate).catch(() => {});
-
-    const csState = csResult.snapshot?.state as ChangesetState | undefined;
-    // "computing" isn't done yet; "error" means `files` may be stale/partial
-    // (see ChangesetState.error, only present in that status) — neither is
-    // safe to treat as a final, trustworthy file list.
-    if (!csState?.files || csState.status === "computing" || csState.status === "error") {
-      return { sessionUri, files: [], failed: true };
-    }
-
-    const targets = csState.files
-      .filter((f) => matcher(extractFilePath(f)))
-      .slice(0, MAX_FILES_PER_CARD);
-
-    const files: OverlapFileContent[] = [];
-    for (const file of targets) {
-      const path = extractFilePath(file);
-      const contentUri = file.edit.after?.content?.uri;
-      if (!contentUri) {
-        files.push({ path, content: "(no content — file deleted or binary)", truncated: false });
-        continue;
+    return await withAHPClient(hostUrl, async (client) => {
+      const sessionState = await withTimeout(
+        readSessionState(client, sessionUri),
+        READ_TIMEOUT_MS,
+      );
+      const changeset = sessionState?.changesets?.length
+        ? findSessionChangeset(sessionState.changesets)
+        : undefined;
+      if (!changeset || changeset.uriTemplate.includes("{")) {
+        return { sessionUri, files: [], failed: true };
       }
-      try {
-        const res = await withTimeout(
-          client.request("resourceRead", { channel: "ahp-root://" as const, uri: contentUri }),
-          READ_TIMEOUT_MS
-        );
-        const raw = res.data ?? "";
-        const truncated = raw.length > MAX_BYTES_PER_FILE;
-        files.push({ path, content: raw.slice(0, MAX_BYTES_PER_FILE), truncated });
-      } catch {
-        files.push({ path, content: "(failed to read content)", truncated: false });
-      }
-    }
 
-    return { sessionUri, files, failed: false };
+      const csState = await withTimeout(
+        readReadyChangesetState(client, changeset.uriTemplate, READ_TIMEOUT_MS),
+        READ_TIMEOUT_MS + 1_000,
+      );
+      if (!csState?.files) {
+        return { sessionUri, files: [], failed: true };
+      }
+
+      const targets = csState.files
+        .filter((f) => matcher(extractFilePath(f)))
+        .slice(0, MAX_FILES_PER_CARD);
+
+      const files: OverlapFileContent[] = [];
+      for (const file of targets) {
+        const path = extractFilePath(file);
+        const contentUri = file.edit.after?.content?.uri;
+        if (!contentUri) {
+          files.push({ path, content: "(no content — file deleted or binary)", truncated: false });
+          continue;
+        }
+        try {
+          const raw = await withTimeout(
+            readTextResource(client, contentUri),
+            READ_TIMEOUT_MS,
+          );
+          const truncated = raw.length > MAX_BYTES_PER_FILE;
+          files.push({ path, content: raw.slice(0, MAX_BYTES_PER_FILE), truncated });
+        } catch {
+          files.push({ path, content: "(failed to read content)", truncated: false });
+        }
+      }
+
+      return { sessionUri, files, failed: false };
+    });
   } catch {
     return { sessionUri, files: [], failed: true };
-  } finally {
-    releaseAHPClient(hostUrl);
   }
 }

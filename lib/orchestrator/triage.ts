@@ -1,8 +1,14 @@
 import "server-only";
 
 import { type Phase } from "@/lib/types";
-import { assessRisk, type RiskInput } from "./risk-assessor";
-import { getCardRisk, setCardRisk, type StoredRisk } from "./risk-store";
+import { assessRisk } from "./risk-assessor";
+import {
+  getAuthoritativeCardRisk,
+  persistAuthoritativeRisk,
+  type StoredRisk,
+} from "./risk-store";
+import type { RiskFactsSnapshot } from "./risk-facts";
+import { reassessAndPersistRisk } from "./risk-reassessment";
 import { getGatesForTransition, getNextPhase, type GateConfig } from "./gate-engine";
 
 export interface TriageResult {
@@ -22,26 +28,24 @@ const TRIAGE_PHASES: Phase[] = ["plan", "build"];
  */
 export async function triageCard(
   cardId: string,
-  riskInput: RiskInput,
+  riskSnapshot: RiskFactsSnapshot,
   toPhase: Phase
 ): Promise<TriageResult | null> {
   if (!TRIAGE_PHASES.includes(toPhase)) {
     return null;
   }
 
-  const { level, factors } = await assessRisk(riskInput);
-
-  setCardRisk(cardId, level, factors, "copilot");
-
-  const storedRisk =
-    getCardRisk(cardId) ??
-    ({
-      cardId,
-      level,
-      factors,
-      assessedAt: new Date().toISOString(),
-      assessedBy: "copilot",
-    } satisfies StoredRisk);
+  await reassessAndPersistRisk(
+    cardId,
+    riskSnapshot,
+    assessRisk,
+    persistAuthoritativeRisk,
+  );
+  const authoritative = getAuthoritativeCardRisk(cardId, riskSnapshot.hostUrl);
+  if (authoritative.status !== "current") {
+    throw new Error("Risk assessment did not remain current after triage");
+  }
+  const storedRisk: StoredRisk = authoritative.assessment;
 
   const nextPhase = getNextPhase(toPhase);
   const applicableGates = nextPhase
