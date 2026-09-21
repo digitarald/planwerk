@@ -9,25 +9,42 @@ import { Separator } from "@/components/ui/separator";
 import { useShallow } from "zustand/react/shallow";
 import { useBoardStore, selectSessionCounts } from "@/lib/store/board-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
-import { Activity } from "lucide-react";
+import { Activity, Trash2 } from "lucide-react";
 
 export function OrchestratorFeed() {
   const feedItems = useOrchestratorStore((s) => s.feedItems);
   const monitoringStatus = useOrchestratorStore((s) => s.monitoringStatus);
+  const clearFeed = useOrchestratorStore((s) => s.clearFeed);
   const { total, active, idle, errors, needsInput } = useBoardStore(
     useShallow(selectSessionCounts)
+  );
+  const hasClearableItems = feedItems.some(
+    (item) => !item.isStreaming && !item.approval && !item.decisionPending
   );
 
   return (
     <div className="flex flex-col h-full">
       <div className="space-y-1 px-3 pb-2 pt-1">
-        <div className="flex items-center gap-1.5">
-          <Activity className="h-3 w-3 text-muted-foreground" />
-          <span className="text-[11px] font-medium text-foreground">
-            {total > 0
-              ? `${total} session${total === 1 ? "" : "s"}`
-              : "No sessions"}
-          </span>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <Activity className="h-3 w-3 shrink-0 text-muted-foreground" />
+            <span className="truncate text-[11px] font-medium text-foreground">
+              {total > 0
+                ? `${total} session${total === 1 ? "" : "s"}`
+                : "No sessions"}
+            </span>
+          </div>
+          {hasClearableItems && (
+            <button
+              type="button"
+              onClick={clearFeed}
+              className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              aria-label="Clear activity"
+              title="Clear activity"
+            >
+              <Trash2 className="h-3 w-3" />
+            </button>
+          )}
         </div>
         {/* Pinned instrument readout — connection + monitoring status, kept
             out of the conversational feed below. */}
@@ -49,7 +66,9 @@ export function OrchestratorFeed() {
         <div className="flex flex-col-reverse px-3">
           {feedItems.length === 0 ? (
             <p className="py-4 text-center text-[11px] text-muted-foreground">
-              No activity yet. Connect to an AHP host to begin.
+              {total > 0
+                ? "No recent activity."
+                : "Connect to VS Code to see activity."}
             </p>
           ) : (
             feedItems.map((item) => <FeedItem key={item.id} {...item} />)

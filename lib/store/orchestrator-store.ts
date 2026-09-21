@@ -357,7 +357,11 @@ export const useOrchestratorStore = create<OrchestratorState>()(
         }
       },
 
-      clearFeed: () => set({ feedItems: [] }),
+      clearFeed: () => set((state) => ({
+        feedItems: state.feedItems.filter(
+          (item) => item.isStreaming || item.approval || item.decisionPending
+        ),
+      })),
     }),
     {
       name: "planwerk-feed",

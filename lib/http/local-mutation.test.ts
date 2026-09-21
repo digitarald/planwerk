@@ -115,6 +115,18 @@ test("local event stream guard accepts loopback same-origin GET without Content-
       },
     });
     assert.equal(validateLocalEventStreamRequest(request), null, origin);
+
+    const eventSourceRequest = new Request(`${origin}/api/ahp/events`, {
+      headers: {
+        host: new URL(origin).host,
+        "sec-fetch-site": "same-origin",
+      },
+    });
+    assert.equal(
+      validateLocalEventStreamRequest(eventSourceRequest),
+      null,
+      `${origin} without Origin`,
+    );
   }
 });
 
@@ -147,8 +159,8 @@ test("local event stream guard rejects non-local and cross-origin requests", () 
       },
     },
     {
-      name: "missing Origin",
-      headers: { origin: "" },
+      name: "missing Origin and Fetch Metadata",
+      headers: { origin: "", "sec-fetch-site": "" },
     },
     {
       name: "unsupported method",

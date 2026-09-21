@@ -185,12 +185,13 @@ export function useLiveSessions() {
 
     es.onerror = () => {
       if (!hasHandshakedRef.current) {
-        // Failed during initial connection attempt
+        // The server sends AHP failures as structured SSE events. Reaching
+        // EventSource.onerror before init means the HTTP event stream failed.
         console.error("[ahp:sse]", "connection failed during handshake");
         setError({
-          message: "Could not connect to the AHP host",
+          message: "Could not open the Planwerk event stream",
           code: "connection_refused",
-          hint: "For VS Code local, open a desktop Agent Host socket in VS Code. For a manual host, verify its ws:// or wss:// endpoint.",
+          hint: "Reload Planwerk. VS Code local starts Agent Host automatically when AI features are enabled; no host configuration is required.",
         });
         es.close();
         eventSourceRef.current = null;

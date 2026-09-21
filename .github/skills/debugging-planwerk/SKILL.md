@@ -232,6 +232,12 @@ Set **`AHP_DEBUG=1`** to unlock verbose `debug()` output across the AHP layer
 (`client-bridge`, `changeset-enricher`, `plan-artifact`, `enrich-card`,
 `session-messenger`) and the heartbeat — invaluable for enrichment / input-fetch traces.
 
+If the browser reports that it could not open the Planwerk event stream before an
+`init` event, inspect the `/api/ahp/events` HTTP response before debugging AHP. Native
+same-origin `EventSource` requests may omit `Origin`; Planwerk accepts that browser shape
+only when Fetch Metadata says `Sec-Fetch-Site: same-origin`. A 403 here means the request
+was rejected by the local HTTP guard and never attempted an Agent Host connection.
+
 ### 6. Telemetry logs — the host's OTLP log stream
 `.planwerk/telemetry/logs.ndjson` (NDJSON; written by `lib/ahp/telemetry-logs.ts`, rotated
 on connect). These are **agent-host log lines** tapped off the WebSocket
