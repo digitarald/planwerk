@@ -143,9 +143,9 @@ export function InboxFeedItem({
   selected: boolean;
 }) {
   const articleRef = useRef<HTMLElement>(null);
-  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const sourceFactsRef = useRef<HTMLDivElement>(null);
   const [artifact, setArtifact] = useState<Artifact | null>(null);
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [sourceFactsOpen, setSourceFactsOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const selectItem = useInboxStore((state) => state.selectItem);
   const mutateItem = useInboxStore((state) => state.mutateItem);
@@ -173,10 +173,9 @@ export function InboxFeedItem({
     if (result) return;
 
     setActionError("Planwerk couldn't update this inbox item. Try again.");
-    setDetailsOpen(true);
-    if (detailsRef.current) {
-      detailsRef.current.open = true;
-      detailsRef.current.scrollIntoView({
+    setSourceFactsOpen(true);
+    if (sourceFactsRef.current) {
+      sourceFactsRef.current.scrollIntoView({
         behavior: "auto",
         block: "nearest",
       });
@@ -203,10 +202,9 @@ export function InboxFeedItem({
         return;
       case "unavailable":
         setActionError("The source session is no longer available on the board.");
-        setDetailsOpen(true);
-        if (detailsRef.current) {
-          detailsRef.current.open = true;
-          detailsRef.current.scrollIntoView({
+        setSourceFactsOpen(true);
+        if (sourceFactsRef.current) {
+          sourceFactsRef.current.scrollIntoView({
             behavior: "auto",
             block: "nearest",
           });
@@ -259,6 +257,19 @@ export function InboxFeedItem({
       };
       return (order[a.type] ?? 2) - (order[b.type] ?? 2);
     });
+  const evidenceSummary = item.briefing.evidenceSummary?.trim();
+  const recommendationReason = item.briefing.recommendationReason.trim();
+  const sourceEvidence = evidenceSummary || recommendationReason;
+  const hasSourceFacts = Boolean(
+    sourceEvidence
+      || item.briefing.outcome
+      || item.briefing.caveats.length > 0
+      || item.briefing.freshness.sourceRevision
+      || item.briefing.provenance !== "Planwerk"
+      || item.briefing.synthesisStatus !== "generated"
+      || note,
+  );
+  const sourceFactsId = `inbox-source-facts-${item.id}`;
 
   return (
     <>
@@ -408,17 +419,23 @@ export function InboxFeedItem({
                 {secondaryAction.label}
               </Button>
             )}
-            <details
-              ref={detailsRef}
-              className="group/details"
-              onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
-              onClick={(event) => event.stopPropagation()}
-            >
-              <summary className="flex h-6 cursor-pointer list-none items-center gap-1 rounded px-1.5 text-[10px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground">
-                Details
-                <ChevronDown className="h-3 w-3 transition-transform duration-150 group-open/details:rotate-180" />
-              </summary>
-            </details>
+            {(hasSourceFacts || actionError) && (
+              <Button
+                variant="ghost"
+                size="xs"
+                aria-expanded={sourceFactsOpen}
+                aria-controls={sourceFactsId}
+                onClick={() => setSourceFactsOpen((open) => !open)}
+              >
+                Source facts
+                <ChevronDown
+                  className={cn(
+                    "transition-transform duration-150",
+                    sourceFactsOpen && "rotate-180",
+                  )}
+                />
+              </Button>
+            )}
             <span className="mx-0.5 h-4 w-px bg-border/80" aria-hidden />
             <Button
               variant="ghost"
@@ -478,8 +495,12 @@ export function InboxFeedItem({
           </div>
         </div>
 
-        <div className={cn(detailsOpen ? "block" : "hidden")}>
-          <div className="mt-3 max-w-[66ch] space-y-2 border-t border-border/60 pt-3 text-[11px] leading-4 text-muted-foreground">
+        <div
+          ref={sourceFactsRef}
+          id={sourceFactsId}
+          className={cn(sourceFactsOpen ? "block" : "hidden")}
+        >
+          <div className="mt-3 max-w-[72ch] space-y-3 border-t border-border/60 pt-3 text-[11px] leading-4 text-muted-foreground">
             {actionError && (
               <p role="alert" className="flex gap-2 text-destructive">
                 <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
@@ -495,8 +516,17 @@ export function InboxFeedItem({
             {item.briefing.synthesisStatus === "failed" && (
               <p>Showing the source summary because a synthesized briefing is unavailable.</p>
             )}
+            {sourceEvidence && (
+              <div>
+                <p className="font-medium text-foreground/80">Evidence</p>
+                <p className="mt-0.5 text-foreground/70">{sourceEvidence}</p>
+              </div>
+            )}
             {item.briefing.outcome && (
-              <p className="text-foreground/80">{item.briefing.outcome}</p>
+              <div>
+                <p className="font-medium text-foreground/80">Outcome</p>
+                <p className="mt-0.5 text-foreground/70">{item.briefing.outcome}</p>
+              </div>
             )}
             {item.briefing.caveats.length > 0 && (
               <p className="flex gap-2 text-pw-warning-foreground">
@@ -505,8 +535,37 @@ export function InboxFeedItem({
               </p>
             )}
             {note && <p className="text-pw-warning-foreground">{note}</p>}
+            <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 border-t border-border/50 pt-2">
+              <dt>Trigger</dt>
+              <dd className="text-foreground/70">{sourceLabel}</dd>
+              <dt>Observed</dt>
+              <dd className="text-foreground/70">
+                <time dateTime={new Date(item.briefing.freshness.generatedAt).toISOString()}>
+                  {formattedTime(item.briefing.freshness.generatedAt)}
+                </time>
+              </dd>
+              <dt>Confidence</dt>
+              <dd className="capitalize text-foreground/70">
+                {item.briefing.confidence}
+              </dd>
+              {item.briefing.freshness.sourceRevision && (
+                <>
+                  <dt>Revision</dt>
+                  <dd className="break-all font-mono text-[10px] text-foreground/70">
+                    {item.briefing.freshness.sourceRevision}
+                  </dd>
+                </>
+              )}
+              {item.briefing.provenance !== "Planwerk" && (
+                <>
+                  <dt>Source</dt>
+                  <dd className="break-all text-foreground/70">
+                    {item.briefing.provenance}
+                  </dd>
+                </>
+              )}
+            </dl>
           </div>
-
         </div>
       </div>
       </article>
