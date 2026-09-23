@@ -1,0 +1,114 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  matchesResumableTurn,
+  projectSessionDetails,
+} from "./session-details-core.ts";
+
+test("projects final agent markdown for zero-file completion sessions", () => {
+  const details = projectSessionDetails(
+    { defaultChat: "ahp-chat://default/session" },
+    {
+      resource: "ahp-chat://default/session",
+      turns: [{
+        id: "turn-1",
+        state: "complete",
+        responseParts: [{ kind: "markdown", content: "Research complete." }],
+      }],
+    },
+  );
+
+  assert.equal(details.lastAgentMessage, "Research complete.");
+  assert.equal(details.runtimeError, undefined);
+});
+
+test("projects the latest errored turn and its resume identity", () => {
+  const details = projectSessionDetails(
+    { defaultChat: "ahp-chat://default/session" },
+    {
+      resource: "ahp-chat://default/session",
+      turns: [{
+        id: "turn-2",
+        startedAt: "2026-09-23T20:00:00.000Z",
+        state: "error",
+        responseParts: [{
+          kind: "error",
+          error: {
+            errorType: "invalid-input-item",
+            message: "Input item does not belong to this connection",
+            stack: "stack",
+          },
+          resumable: true,
+        }],
+      }],
+    },
+  );
+
+  assert.deepEqual(details.runtimeError, {
+    source: "turn",
+    errorType: "invalid-input-item",
+    message: "Input item does not belong to this connection",
+    stack: "stack",
+    chatUri: "ahp-chat://default/session",
+    turnId: "turn-2",
+    startedAt: "2026-09-23T20:00:00.000Z",
+    resumable: true,
+  });
+  assert.equal(
+    matchesResumableTurn(
+      details,
+      "ahp-chat://default/session",
+      "turn-2",
+    ),
+    true,
+  );
+  assert.equal(
+    matchesResumableTurn(
+      details,
+      "ahp-chat://default/session",
+      "stale-turn",
+    ),
+    false,
+  );
+});
+
+test("falls back to creation errors without inventing resumability", () => {
+  const details = projectSessionDetails({
+    creationError: {
+      errorType: "provider-start",
+      message: "Provider failed to start",
+    },
+  });
+
+  assert.deepEqual(details.runtimeError, {
+    source: "creation",
+    errorType: "provider-start",
+    message: "Provider failed to start",
+    stack: undefined,
+    resumable: false,
+  });
+});
+
+test("ignores malformed and non-final turn error parts", () => {
+  const details = projectSessionDetails(
+    {},
+    {
+      turns: [{
+        id: "turn-3",
+        state: "error",
+        responseParts: [
+          {
+            kind: "error",
+            error: { errorType: "old", message: "Superseded error" },
+            resumable: true,
+          },
+          { kind: "markdown", content: "Recovered response" },
+        ],
+      }],
+    },
+  );
+
+  assert.equal(details.runtimeError, undefined);
+  assert.equal(details.lastAgentMessage, "Recovered response");
+});

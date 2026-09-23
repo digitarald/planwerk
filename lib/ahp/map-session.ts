@@ -358,6 +358,7 @@ export function mapSessionToCard(
     project: session.project,
     artifacts: artifacts.length > 0 ? artifacts : undefined,
     lastAgentMessage: enrichment?.lastAgentMessage,
+    runtimeError: enrichment?.runtimeError,
     fileChanges: enrichment?.fileChanges.length ? enrichment.fileChanges : undefined,
     changesetReview: enrichment?.changesetReview,
     isArchived,

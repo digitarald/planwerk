@@ -6,13 +6,18 @@ import type {
 } from "@microsoft/agent-host-protocol";
 import { createHash } from "node:crypto";
 
-import type { Artifact, ArtifactType, ChangesetReview, FileChange } from "../types";
+import type {
+  Artifact,
+  ArtifactType,
+  ChangesetReview,
+  FileChange,
+  SessionRuntimeError,
+} from "../types";
 
-import { readChatState, readSessionState } from "./snapshot";
+import { readSessionState } from "./snapshot";
 import { readReadyChangesetState } from "./changeset-readiness";
 import { readTextResource } from "./resource-read";
 import { changesetReviewSummary, isChangesetFileReviewed } from "./changeset-review";
-import { extractLastAgentMessage } from "./response-parts";
 import { classifyArtifactFile, isNonCodeFile } from "./artifact-classification";
 
 const LOG_PREFIX = "[ahp:changeset]";
@@ -37,6 +42,7 @@ export interface ChangesetEnrichment {
    *  plan with content is present. */
   planContentHash?: string;
   lastAgentMessage?: string;
+  runtimeError?: SessionRuntimeError;
   planContent?: string;
   /** Selected channel and AHP review facts; informational only. */
   changesetReview?: ChangesetReview;
@@ -93,30 +99,9 @@ export async function enrichFromChangeset(
     const sessionState = providedSessionState
       ?? await readSessionState(client, sessionUri);
 
-    // Extract last agent message. Turns live on the chat channel, so read from
-    // the session's defaultChat. `ChatState.turns` is a tail window that already
-    // contains the most recent turns (older turns page in via `turnsNextCursor`),
-    // which is all we need for the latest agent message.
-    let lastAgentMessage: string | undefined;
-    const defaultChatUri = sessionState?.defaultChat;
-    if (defaultChatUri) {
-      try {
-        const chatState = await readChatState(client, defaultChatUri);
-        if (chatState?.turns?.length) {
-          lastAgentMessage = extractLastAgentMessage(chatState.turns);
-        }
-      } catch {
-        debug("chat subscribe failed for agent message extraction:", sessionUri);
-      }
-    }
-
     if (!sessionState?.changesets?.length) {
       debug("no changesets for", sessionUri);
-      // No changeset catalogue — counts are unknown (not a verified zero).
-      // Return agent message even without changeset data.
-      return lastAgentMessage
-        ? { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], additions: 0, deletions: 0, changesetVerified: false, lastAgentMessage }
-        : null;
+      return null;
     }
 
     const changeset = findSessionChangeset(sessionState.changesets);
@@ -136,7 +121,7 @@ export async function enrichFromChangeset(
     if (!csState?.files) {
       debug("changeset has no files:", changesetUri);
       // Files not readable — treat as unknown, not a verified zero.
-      return { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], additions: 0, deletions: 0, changesetVerified: false, lastAgentMessage };
+      return { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], additions: 0, deletions: 0, changesetVerified: false };
     }
 
     // Classify files
@@ -214,7 +199,6 @@ export async function enrichFromChangeset(
       deletions,
       changesetVerified: true,
       planContentHash,
-      lastAgentMessage,
       planContent,
       changesetReview: changesetReviewSummary(changeset, csState.files),
     };

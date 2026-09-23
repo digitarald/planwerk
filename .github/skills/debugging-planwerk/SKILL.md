@@ -148,6 +148,14 @@ changeset URI, opaque file IDs, and host-owned reviewed bits; it does **not** af
 risk, or phase. Tool authentication is likewise represented only as a redacted
 `pendingInput` handoff — it never contains OAuth challenge data.
 Note `enrichment_json` may be `null` — enrichment is best-effort and async.
+Successful no-code outcomes and runtime-error details are transcript facts, not
+changeset facts. When Planwerk is already allowed to perform a live enrichment
+(an active session, a relevant host event such as active → idle/error, or an
+explicit user/orchestrator action), it reads the session's `defaultChat` and
+persists `lastAgentMessage` and/or `runtimeError` in `enrichment_json` even when
+the session reports zero changed files. If an idle completion says its outcome
+was not captured, or an error card has only a red status badge, inspect whether
+that transcript-only enrichment was produced and source-bound.
 
 ### 3. Live AHP host — the source of truth for runtime facts
 The cache and DB can lag; the WebSocket host is authoritative. Find the port and connect
@@ -259,6 +267,20 @@ Planwerk's imperative routes and orchestrator helpers use `lib/ahp/client-operat
 for one exclusive connection per logical operation; the board bridge keeps a separate
 persistent observer client and performs one-shot enrichment/input reads on operation clients.
 
+Detailed completion/error truth lives on the default chat. Its `ChatState.turns`
+tail is oldest-first; the latest completed turn is the last entry. Successful
+outcomes come from agent-authored markdown response parts. A runtime failure is
+authoritative only when the latest turn has `state:"error"` and its final response
+part is `kind:"error"`; the nested `ErrorInfo` carries `errorType`, `message`,
+optional `stack`, and the part's `resumable:true` is the only condition that permits
+`chat/turnResume`. Session creation failures instead use
+`SessionState.creationError` and are never resumable through that action.
+Planwerk intentionally does not subscribe to every cold idle/error session at
+startup. Opening a card whose outcome/error detail is missing uses the guarded
+`/api/ahp/sessions/details` explicit-inspection path; resume uses
+`/api/ahp/sessions/resume`, which re-reads and verifies the same chat/turn identity
+before dispatch.
+
 ### 4. Copilot CLI per-session files — what the agent actually did
 `~/.copilot/session-state/<session-uuid>/` (the UUID is the tail of a `copilotcli:/<uuid>`
 card id). Contents worth reading:
@@ -337,6 +359,9 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
   human-readable "why isn't this advancing" reason shown when `gateStatus` is a
   silent `pending`, e.g. "Plan review not started").
 - `lib/ahp/changeset-enricher.ts`, `lib/ahp/plan-artifact.ts` — file/artifact enrichment.
+- `lib/ahp/session-details-core.ts`, `lib/ahp/session-details.ts` — default-chat
+  final-response/error projection, explicit detail reads, and verified resumable-turn
+  recovery. Transcript extraction is independent of whether a changeset exists.
 - `lib/ahp/protocol.ts`, `lib/ahp/protocol-rpc.ts`, and `lib/ahp/initialize.ts` —
   protocol negotiation. Planwerk is built against AHP 0.9.0 and never offers older
   protocol versions. Development and test connections may reconnect once with exact,

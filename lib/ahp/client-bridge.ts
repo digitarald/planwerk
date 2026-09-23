@@ -28,9 +28,15 @@ import {
   shouldReadLiveSessionState,
 } from "./session-read-policy";
 import { withAHPClient } from "./client-operation";
-import type { Artifact, PendingInput, WorkerActivity } from "@/lib/types";
+import type {
+  Artifact,
+  PendingInput,
+  SessionDetails,
+  WorkerActivity,
+} from "@/lib/types";
 import { mapWorkerChats, retainInactiveWorkers, type WorkerChatSummary } from "./worker-activity";
 import { getWorkerActivityHistory, recordWorkerActivity } from "@/lib/orchestrator/worker-activity-store";
+import { readSessionDetailsForState } from "./session-details";
 
 // Re-export for consumers that imported from here
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
@@ -219,8 +225,16 @@ function sessionSignature(summary: AHPSessionSummary): string {
 export function mergeFreshEnrichment(
   changesetResult: ChangesetEnrichment | null,
   sessionArtifacts: Artifact[],
+  sessionDetails?: SessionDetails,
 ): ChangesetEnrichment | null {
-  if (!changesetResult && sessionArtifacts.length === 0) return null;
+  if (
+    !changesetResult &&
+    sessionArtifacts.length === 0 &&
+    !sessionDetails?.lastAgentMessage &&
+    !sessionDetails?.runtimeError
+  ) {
+    return null;
+  }
 
   const artifacts = [...(changesetResult?.artifacts ?? [])];
   for (const artifact of sessionArtifacts) {
@@ -249,6 +263,8 @@ export function mergeFreshEnrichment(
     artifacts,
     planContent,
     planContentHash: planContent ? hashPlanContent(planContent) : undefined,
+    lastAgentMessage: sessionDetails?.lastAgentMessage,
+    runtimeError: sessionDetails?.runtimeError,
   };
 }
 
@@ -367,15 +383,17 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     // the session, and parallel model + changeset reads previously subscribed
     // to the same channel twice.
     withAHPClient(hostUrl, async (detailClient) => {
-      const sessionStatePromise =
-        hasFileChanges || !session.model
-          ? readSessionState(detailClient, sessionUri)
-          : Promise.resolve(undefined);
+      const sessionStatePromise = readSessionState(detailClient, sessionUri);
       const changesetPromise = hasFileChanges
         ? sessionStatePromise.then((state) =>
             enrichFromChangeset(detailClient, sessionUri, state)
           )
         : Promise.resolve(null);
+      const detailsPromise = sessionStatePromise.then((state) =>
+        state
+          ? readSessionDetailsForState(detailClient, state)
+          : ({} satisfies SessionDetails)
+      );
       const artifactPromise = fetchCopilotCliArtifacts(
         detailClient,
         sessionUri,
@@ -386,9 +404,14 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         : sessionStatePromise
             .then((state) => extractModelFromConfig(state?.config))
             .catch(() => undefined);
-      return Promise.all([changesetPromise, artifactPromise, modelPromise]);
+      return Promise.all([
+        changesetPromise,
+        artifactPromise,
+        modelPromise,
+        detailsPromise,
+      ]);
     })
-      .then(([changesetResult, sessionArtifacts, model]) => {
+      .then(([changesetResult, sessionArtifacts, model, sessionDetails]) => {
         if (disposed || !sessions.has(sessionUri)) return;
 
         if (model) {
@@ -402,7 +425,11 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           return;
         }
 
-        const fresh = mergeFreshEnrichment(changesetResult, sessionArtifacts);
+        const fresh = mergeFreshEnrichment(
+          changesetResult,
+          sessionArtifacts,
+          sessionDetails,
+        );
         const enrichment = fresh ? bindEnrichment(current, fresh) : null;
         if (enrichment) {
           enrichments.set(sessionUri, enrichment);

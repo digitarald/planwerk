@@ -28,6 +28,7 @@ import {
   Split,
   Cpu,
   Bot,
+  RotateCcw,
 } from "lucide-react";
 
 import { PendingInputCard } from "./pending-input-card";
@@ -46,6 +47,7 @@ import {
   RuntimeStatus,
   GateStatus,
   type GateRunView,
+  type SessionDetails,
   isGateRunStale,
 } from "@/lib/types";
 import type { ChangesetReview } from "@/lib/types";
@@ -485,6 +487,16 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   const hostUrl = useConnectionStore((s) => s.hostUrl);
   const [message, setMessage] = useState("");
   const [sendState, setSendState] = useState<"idle" | "sending" | "error">("idle");
+  const [detailsResult, setDetailsResult] = useState<{
+    cardId: string;
+    state: "ready" | "error";
+    details?: SessionDetails;
+    error?: string;
+  } | null>(null);
+  const [resumeState, setResumeState] = useState<
+    "idle" | "resuming" | "error"
+  >("idle");
+  const [resumeError, setResumeError] = useState("");
   const [dismissingPeer, setDismissingPeer] = useState<string | null>(null);
   const [statusHistory, setStatusHistory] = useState<StatusEntry[]>(
     card.statusHistory ?? []
@@ -514,6 +526,60 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
       cancelled = true;
     };
   }, [card.id, latestStatusKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!hostUrl) {
+      return;
+    }
+
+    fetch("/api/ahp/sessions/details", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hostUrl, sessionUri: card.id }),
+    })
+      .then(async (response) => {
+        const data = (await response.json().catch(() => null)) as
+          | { details?: SessionDetails; error?: string }
+          | null;
+        if (!response.ok || !data?.details) {
+          throw new Error(data?.error || "Failed to read session details");
+        }
+        return data.details;
+      })
+      .then((details) => {
+        if (cancelled) return;
+        setDetailsResult({
+          cardId: card.id,
+          state: "ready",
+          details,
+        });
+        reconcileCard(card.id, {
+          lastAgentMessage: details.lastAgentMessage,
+          runtimeError: details.runtimeError,
+        });
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setDetailsResult({
+          cardId: card.id,
+          state: "error",
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to read session details",
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    card.id,
+    hostUrl,
+    reconcileCard,
+  ]);
 
   // Real gate verdicts for this card — the modal is the judgment surface where
   // the user inspects *why* gates passed/failed and how fresh those verdicts are.
@@ -595,6 +661,69 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
     }
   };
 
+  const handleResume = async () => {
+    const currentDetails =
+      detailsResult?.cardId === card.id
+        ? detailsResult.details
+        : undefined;
+    const runtimeError =
+      currentDetails?.runtimeError ?? card.runtimeError;
+    if (
+      !hostUrl ||
+      !runtimeError?.resumable ||
+      !runtimeError.chatUri ||
+      !runtimeError.turnId ||
+      resumeState === "resuming"
+    ) {
+      return;
+    }
+
+    setResumeState("resuming");
+    setResumeError("");
+    try {
+      const response = await fetch("/api/ahp/sessions/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          hostUrl,
+          sessionUri: card.id,
+          chatUri: runtimeError.chatUri,
+          turnId: runtimeError.turnId,
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as
+        | { details?: SessionDetails; error?: string }
+        | null;
+      if (data?.details) {
+        setDetailsResult({
+          cardId: card.id,
+          state: "ready",
+          details: data.details,
+        });
+        reconcileCard(card.id, {
+          lastAgentMessage: data.details.lastAgentMessage,
+          runtimeError: data.details.runtimeError,
+        });
+      }
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to resume the session");
+      }
+      addFeedItem({
+        type: "intervention",
+        message: `Resumed the failed turn in "${card.title}".`,
+        cardId: card.id,
+        cardTitle: card.title,
+        projectName: card.project?.name,
+      });
+      setResumeState("idle");
+    } catch (error) {
+      setResumeError(
+        error instanceof Error ? error.message : "Failed to resume the session",
+      );
+      setResumeState("error");
+    }
+  };
+
   const artifacts = card.artifacts ?? [];
   const fileChanges = card.fileChanges ?? [];
   const planArtifact = artifacts.find(
@@ -611,6 +740,26 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
     (entry) => !isGenericStatus(entry.message)
   );
   const showCurrentActivity = card.activity && !isGenericStatus(card.activity);
+  const currentDetailsResult =
+    detailsResult?.cardId === card.id ? detailsResult : undefined;
+  const needsAuthoritativeDetails = Boolean(hostUrl);
+  const detailsState =
+    currentDetailsResult?.state ??
+    (needsAuthoritativeDetails ? "loading" : "idle");
+  const detailsError = currentDetailsResult?.error ?? "";
+  const sessionDetails =
+    currentDetailsResult?.details ?? {
+      lastAgentMessage: card.lastAgentMessage,
+      runtimeError: card.runtimeError,
+    };
+  const effectiveLastAgentMessage =
+    detailsState === "ready"
+      ? sessionDetails.lastAgentMessage
+      : sessionDetails.lastAgentMessage ?? card.lastAgentMessage;
+  const effectiveRuntimeError =
+    detailsState === "ready"
+      ? sessionDetails.runtimeError
+      : sessionDetails.runtimeError ?? card.runtimeError;
   const [filesExpanded, setFilesExpanded] = useState(fileChanges.length <= 12);
   const [reviewingFileIds, setReviewingFileIds] = useState<Set<string>>(new Set());
   const changesetReview = card.changesetReview;
@@ -812,6 +961,124 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
           {/* Left pane */}
           <ScrollArea className="min-h-0">
             <div className="flex flex-col gap-5 p-6">
+              {effectiveRuntimeError && (
+                <section
+                  aria-live="polite"
+                  className="rounded-lg border border-destructive/35 bg-destructive/[0.035] p-4"
+                >
+                  <div className="flex items-start gap-3">
+                    <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <SectionLabel className="mb-0 text-destructive">
+                          Runtime error
+                        </SectionLabel>
+                        {effectiveRuntimeError.resumable &&
+                          effectiveRuntimeError.chatUri &&
+                          effectiveRuntimeError.turnId && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="destructive"
+                              onClick={handleResume}
+                              disabled={resumeState === "resuming"}
+                            >
+                              <RotateCcw
+                                className={cn(
+                                  "h-3.5 w-3.5",
+                                  resumeState === "resuming" && "animate-spin",
+                                )}
+                              />
+                              {resumeState === "resuming" ? "Resuming" : "Resume turn"}
+                            </Button>
+                          )}
+                      </div>
+                      <p className="mt-2 max-w-[75ch] text-[13px] leading-relaxed text-foreground">
+                        {effectiveRuntimeError.message}
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                        <span>{effectiveRuntimeError.errorType}</span>
+                        {effectiveRuntimeError.startedAt && (
+                          <span>
+                            {new Date(effectiveRuntimeError.startedAt).toLocaleString()}
+                          </span>
+                        )}
+                        <span>
+                          {effectiveRuntimeError.source === "turn"
+                            ? "Agent turn failed"
+                            : "Session creation failed"}
+                        </span>
+                      </div>
+                      {effectiveRuntimeError.stack && (
+                        <details className="mt-3">
+                          <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
+                            Technical details
+                          </summary>
+                          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 font-mono text-[11px] leading-relaxed text-foreground/80">
+                            {effectiveRuntimeError.stack}
+                          </pre>
+                        </details>
+                      )}
+                      {resumeState === "error" && (
+                        <p className="mt-3 text-xs font-medium text-destructive">
+                          {resumeError}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {card.runtime === "error" &&
+                !effectiveRuntimeError &&
+                detailsState === "loading" && (
+                  <section
+                    aria-live="polite"
+                    className="rounded-lg border border-destructive/25 bg-destructive/[0.025] p-4"
+                  >
+                    <div className="flex items-center gap-3 text-sm text-muted-foreground">
+                      <Loader2 className="h-4 w-4 animate-spin text-destructive" />
+                      Reading the failed turn from the agent host...
+                    </div>
+                  </section>
+                )}
+
+              {card.runtime === "error" &&
+                !effectiveRuntimeError &&
+                detailsState === "error" && (
+                  <section className="rounded-lg border border-destructive/35 bg-destructive/[0.035] p-4">
+                    <div className="flex items-start gap-3">
+                      <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+                      <div>
+                        <SectionLabel className="mb-1 text-destructive">
+                          Error details unavailable
+                        </SectionLabel>
+                        <p className="text-[13px] leading-relaxed text-foreground/80">
+                          {detailsError}
+                        </p>
+                      </div>
+                    </div>
+                  </section>
+                )}
+
+              {card.runtime === "error" &&
+                !effectiveRuntimeError &&
+                detailsState === "ready" && (
+                  <section className="rounded-lg border border-border bg-muted/20 p-4">
+                    <div className="flex items-start gap-3">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-pw-warning" />
+                      <div>
+                        <SectionLabel className="mb-1">
+                          Error details unavailable
+                        </SectionLabel>
+                        <p className="text-[13px] leading-relaxed text-foreground/80">
+                          The agent host reports an error but did not expose a detailed failure for the latest turn.
+                        </p>
+                      </div>
+                    </div>
+                  </section>
+                )}
+
               {/* Current Activity — always visible */}
               {showCurrentActivity && (
                 <section>
@@ -950,7 +1217,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
               )}
 
               {/* Last Agent Message (only when not awaiting input — input section shows it inline) */}
-              {card.lastAgentMessage && !card.pendingInput && (
+              {effectiveLastAgentMessage && !card.pendingInput && (
                 <section>
                   <SectionLabel>
                     Last Response
@@ -961,12 +1228,49 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                         remarkPlugins={[remarkGfm]}
                         components={markdownComponents}
                       >
-                        {card.lastAgentMessage}
+                        {effectiveLastAgentMessage}
                       </ReactMarkdown>
                     </article>
                   </div>
                 </section>
               )}
+
+              {!effectiveLastAgentMessage &&
+                !card.pendingInput &&
+                card.runtime !== "error" &&
+                detailsState === "loading" && (
+                  <section aria-live="polite">
+                    <SectionLabel>Last response</SectionLabel>
+                    <div className="space-y-2 rounded-lg border border-border/70 bg-muted/15 p-4">
+                      <div className="h-3 w-4/5 animate-pulse rounded bg-muted" />
+                      <div className="h-3 w-3/5 animate-pulse rounded bg-muted" />
+                    </div>
+                  </section>
+                )}
+
+              {!effectiveLastAgentMessage &&
+                !card.pendingInput &&
+                card.runtime !== "error" &&
+                detailsState === "ready" && (
+                  <section>
+                    <SectionLabel>Last response</SectionLabel>
+                    <p className="text-[13px] leading-relaxed text-muted-foreground">
+                      The agent host did not expose a final response for this session.
+                    </p>
+                  </section>
+                )}
+
+              {!effectiveLastAgentMessage &&
+                !card.pendingInput &&
+                card.runtime !== "error" &&
+                detailsState === "error" && (
+                  <section>
+                    <SectionLabel>Last response unavailable</SectionLabel>
+                    <p className="text-[13px] leading-relaxed text-destructive">
+                      {detailsError}
+                    </p>
+                  </section>
+                )}
 
               {/* Coherence — board-level conflicts with other in-flight sessions */}
               {card.coherence && card.coherence.conflictsWith.length > 0 && (
@@ -1125,7 +1429,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                     Awaiting Input
                   </SectionLabel>
                   {/* Show last agent message as context when available */}
-                  {card.lastAgentMessage && card.pendingInput?.kind !== "toolAuthentication" && (
+                  {effectiveLastAgentMessage && card.pendingInput?.kind !== "toolAuthentication" && (
                     <div className="mb-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5">
                       <p className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">
                         Agent
@@ -1135,9 +1439,9 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                           remarkPlugins={[remarkGfm]}
                           components={markdownComponents}
                         >
-                          {card.lastAgentMessage.length > 500
-                            ? card.lastAgentMessage.slice(0, 500) + "…"
-                            : card.lastAgentMessage}
+                          {effectiveLastAgentMessage.length > 500
+                            ? effectiveLastAgentMessage.slice(0, 500) + "…"
+                            : effectiveLastAgentMessage}
                         </ReactMarkdown>
                       </article>
                     </div>

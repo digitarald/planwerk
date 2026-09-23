@@ -157,6 +157,22 @@ export interface ChangesetReview {
   }>;
 }
 
+export interface SessionRuntimeError {
+  source: "turn" | "creation";
+  errorType: string;
+  message: string;
+  stack?: string;
+  chatUri?: string;
+  turnId?: string;
+  startedAt?: string;
+  resumable: boolean;
+}
+
+export interface SessionDetails {
+  lastAgentMessage?: string;
+  runtimeError?: SessionRuntimeError;
+}
+
 export interface KanbanCard {
   id: string;
   title: string;
@@ -202,6 +218,8 @@ export interface KanbanCard {
   recentActivity?: ActivityEntry[];
   pendingInput?: PendingInput;
   lastAgentMessage?: string;
+  /** Authoritative AHP creation/turn error details, when the host exposed them. */
+  runtimeError?: SessionRuntimeError;
   fileChanges?: FileChange[];
   /** Informational AHP changeset review progress; never affects SDLC state. */
   changesetReview?: ChangesetReview;

@@ -248,6 +248,13 @@ function projectRuntimeError(
   }
   const revision = digest({
     activity: card.activity,
+    runtimeError: card.runtimeError
+      ? {
+          errorType: card.runtimeError.errorType,
+          message: card.runtimeError.message,
+          turnId: card.runtimeError.turnId,
+        }
+      : undefined,
   });
   return {
     type: "upsert",
@@ -261,7 +268,10 @@ function projectRuntimeError(
         sourceRevision: revision,
         sourceModifiedAt: new Date(card.modifiedAt).toISOString(),
         recommendation: "",
-        reason: card.activity || "The agent host reports a runtime error.",
+        reason:
+          card.runtimeError?.message ||
+          card.activity ||
+          "The agent host reports a runtime error.",
         alternativeActions: [
           {
             id: "inspect-session",

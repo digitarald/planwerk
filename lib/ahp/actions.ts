@@ -4,6 +4,7 @@ import type {
   ChatInputAnswerChangedAction,
   ChatInputCompletedAction,
   ChatInputAnswer,
+  ChatTurnResumeAction,
   ChatToolCallConfirmedAction,
   ChatToolCallApprovedAction,
   ChatToolCallDeniedAction,
@@ -50,6 +51,14 @@ export function chatQueuedMessage(id: string, text: string): ChatPendingMessageS
     kind: "queued" as ChatPendingMessageSetAction["kind"],
     id,
     message: userMessage(text),
+  };
+}
+
+/** Resume the latest errored turn after its identity and resumability are re-read. */
+export function chatTurnResume(turnId: string): ChatTurnResumeAction {
+  return {
+    type: "chat/turnResume" as ChatTurnResumeAction["type"],
+    turnId,
   };
 }
 
