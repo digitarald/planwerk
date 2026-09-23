@@ -2,7 +2,10 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type { ConnectionErrorCode } from "@/lib/ahp/connection-error";
-import { isSupportedAhpEndpoint } from "@/lib/ahp/endpoint-config";
+import {
+  isSupportedAhpEndpoint,
+  migratePersistedAhpEndpoint,
+} from "@/lib/ahp/endpoint-config";
 
 export type ConnectionStatus = "connected" | "reconnecting" | "disconnected";
 
@@ -78,8 +81,16 @@ export const useConnectionStore = create<ConnectionState>()(
     }),
     {
       name: "planwerk-connection",
-      version: 1,
-      migrate: () => ({ hostUrl: null }),
+      version: 2,
+      migrate: (persistedState) => {
+        const hostUrl =
+          persistedState
+          && typeof persistedState === "object"
+          && "hostUrl" in persistedState
+            ? migratePersistedAhpEndpoint(persistedState.hostUrl)
+            : null;
+        return { hostUrl };
+      },
       partialize: (state) => ({
         hostUrl: state.hostUrl,
       }),

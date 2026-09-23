@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 
 import { useBoardStore } from "@/lib/store/board-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
+import { useInboxStore } from "@/lib/store/inbox-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import type { GateStatus, KanbanCard, Phase } from "@/lib/types";
 
@@ -16,12 +17,33 @@ async function hydratePersistedPhases(
 ): Promise<void> {
   if (cards.length === 0) return;
   try {
-    const ids = cards.map((c) => c.id).join(",");
-    const res = await fetch(`/api/gates/phases?cardIds=${encodeURIComponent(ids)}`);
-    if (!res.ok) return;
-    const { states } = (await res.json()) as {
-      states: Record<string, { phase: Phase; gateStatus: GateStatus }>;
-    };
+    const states: Record<
+      string,
+      { phase: Phase; gateStatus: GateStatus }
+    > = {};
+    const batchSize = 40;
+    const requests: Promise<Response>[] = [];
+    for (let index = 0; index < cards.length; index += batchSize) {
+      const ids = cards
+        .slice(index, index + batchSize)
+        .map((card) => card.id)
+        .join(",");
+      requests.push(
+        fetch(`/api/gates/phases?cardIds=${encodeURIComponent(ids)}`),
+      );
+    }
+    for (const res of await Promise.all(requests)) {
+      if (!res.ok) {
+        console.warn(
+          `[gates:hydrate] phase request failed with ${res.status}`,
+        );
+        continue;
+      }
+      const batch = (await res.json()) as {
+        states: Record<string, { phase: Phase; gateStatus: GateStatus }>;
+      };
+      Object.assign(states, batch.states);
+    }
     for (const card of cards) {
       const persisted = states[card.id];
       if (persisted && persisted.phase !== card.phase) {
@@ -33,8 +55,11 @@ async function hydratePersistedPhases(
         });
       }
     }
-  } catch {
-    // Best-effort hydration; live SSE remains the source going forward.
+  } catch (error) {
+    console.warn(
+      "[gates:hydrate] phase hydration failed:",
+      error instanceof Error ? error.message : error,
+    );
   }
 }
 
@@ -161,6 +186,14 @@ export function useLiveSessions() {
           }
         } else if (data.type === "cardRemoved") {
           removeCard(data.cardId);
+        } else if (data.type === "inboxAdded" || data.type === "inboxChanged") {
+          if (data.item) {
+            useInboxStore.getState().reconcileItem(data.item);
+          }
+        } else if (data.type === "inboxRemoved") {
+          if (data.itemId !== undefined) {
+            useInboxStore.getState().removeItem(String(data.itemId));
+          }
         } else if (data.type === "heartbeat") {
           // Heartbeat action from the autonomous loop
           const action = data.action;
@@ -286,15 +319,8 @@ function formatHeartbeatAction(action: HeartbeatActionData): { type: "interventi
         message: `Plan review needs attention: ${action.reason ?? "configured gate execution or feedback delivery failed."}`,
       };
     case "risk-assessment-required":
-      return {
-        type: "alert",
-        message: action.reason ?? "Risk assessment is missing or stale; reassess before automation can continue.",
-      };
     case "source-revision-required":
-      return {
-        type: "alert",
-        message: action.reason ?? "Current source revision is unavailable; automation is blocked.",
-      };
+      return null;
     case "stale-gate-invalidated":
       return {
         type: "intervention",
@@ -320,6 +346,8 @@ function formatHeartbeatAction(action: HeartbeatActionData): { type: "interventi
         type: "alert",
         message: `WIP limit exceeded in ${(action as HeartbeatActionData & { phase?: string }).phase}: ${(action as HeartbeatActionData & { count?: number }).count}/${(action as HeartbeatActionData & { limit?: number }).limit} cards.`,
       };
+    case "wip-cleared":
+      return null;
     default:
       return null;
   }

@@ -6,6 +6,7 @@ import {
   Check,
   CheckCircle2,
   Lightbulb,
+  RadioTower,
   RefreshCw,
   Shield,
   ShieldAlert,
@@ -16,40 +17,16 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBoardStore } from "@/lib/store/board-store";
-import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
+import {
+  useOrchestratorStore,
+  type FeedItem as FeedItemData,
+  type FeedItemType,
+} from "@/lib/store/orchestrator-store";
 import type { KanbanCard } from "@/lib/types";
 
-type FeedItemType =
-  | "intervention"
-  | "alert"
-  | "transition"
-  | "suggestion"
-  | "triage"
-  | "user"
-  | "response"
-  | "heartbeat"
-  | "tool-action"
-  | "approval-required";
-
-interface FeedItemProps {
-  id: string;
-  type: FeedItemType;
-  message: string;
-  timestamp: number;
-  cardId?: string;
-  cardTitle?: string;
-  projectName?: string;
-  isStreaming?: boolean;
-  toolName?: string;
-  approval?: {
-    decisionCapability: string;
-    toolName: string;
-    riskLevel: string;
-    action: Record<string, unknown>;
-    facts: Record<string, unknown>;
-    expiresAtMs: number;
-  };
-  decisionPending?: boolean;
+interface FeedItemProps extends FeedItemData {
+  duplicateCount?: number;
+  duplicateContexts?: string[];
 }
 
 const typeConfig: Record<FeedItemType, { icon: typeof RefreshCw; color: string; label: string }> = {
@@ -62,6 +39,7 @@ const typeConfig: Record<FeedItemType, { icon: typeof RefreshCw; color: string; 
   response: { icon: Bot, color: "text-muted-foreground", label: "Orchestrator" },
   heartbeat: { icon: RefreshCw, color: "text-muted-foreground/70", label: "Heartbeat" },
   "tool-action": { icon: Wrench, color: "text-muted-foreground", label: "Tool action" },
+  setting: { icon: RadioTower, color: "text-muted-foreground", label: "Coordinator setting" },
   "approval-required": {
     icon: ShieldAlert,
     color: "text-amber-600",
@@ -161,6 +139,8 @@ export function FeedItem({
   toolName,
   approval,
   decisionPending,
+  duplicateCount = 0,
+  duplicateContexts = [],
 }: FeedItemProps) {
   const config = typeConfig[type];
   const Icon = config.icon;
@@ -208,6 +188,21 @@ export function FeedItem({
           {toolName && (
             <span className="truncate font-mono" title={toolName}>
               {toolName}
+            </span>
+          )}
+          {duplicateCount > 0 && (
+            <span
+              className="ml-auto shrink-0 rounded bg-muted px-1 py-px text-[9px] font-medium tabular-nums text-muted-foreground"
+              aria-label={`${duplicateCount} similar event${duplicateCount === 1 ? "" : "s"} collapsed`}
+              title={[
+                `${duplicateCount} similar event${duplicateCount === 1 ? "" : "s"} collapsed`,
+                ...duplicateContexts.slice(1, 8),
+                duplicateContexts.length > 8
+                  ? `and ${duplicateContexts.length - 8} more`
+                  : "",
+              ].filter(Boolean).join("\n")}
+            >
+              +{duplicateCount}
             </span>
           )}
         </div>

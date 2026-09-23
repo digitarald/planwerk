@@ -24,6 +24,14 @@ import {
 import { startHeartbeat, stopHeartbeat, isHeartbeatRunning, type HeartbeatAction } from "@/lib/orchestrator/heartbeat";
 import { isCardInAnyAutomationScope, parseWorkspaceScope } from "@/lib/automation-scope";
 import { validateLocalEventStreamRequest } from "@/lib/http/local-mutation";
+import {
+  projectArchivedSessionToInbox,
+  projectCardToInbox,
+  projectHeartbeatToInbox,
+  projectRemovedSessionToInbox,
+} from "@/lib/inbox/service";
+import { inboxEventMatchesHost, inboxEvents } from "@/lib/inbox/events";
+import type { InboxStreamEvent } from "@/lib/inbox/types";
 import { KanbanCard, type Phase, type RiskLevel } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -34,6 +42,7 @@ type CardStreamEvent =
   | { type: "cardChanged"; card: KanbanCard; triage?: TriageEvent }
   | { type: "cardRemoved"; cardId: string }
   | { type: "heartbeat"; action: HeartbeatAction }
+  | InboxStreamEvent
   | ConnectionError;
 
 interface TriageEvent {
@@ -224,7 +233,7 @@ function getAutomationHosts() {
 function reprojectCard(
   hostUrl: string,
   cardId: string,
-): KanbanCard | undefined {
+): { previous: KanbanCard; refreshed: KanbanCard } | undefined {
   const partition = hostStreams.get(hostUrl);
   const existing = partition?.cards.find((card) => card.id === cardId);
   if (!partition || !existing) return undefined;
@@ -247,7 +256,17 @@ function reprojectCard(
     ...partition.cards.filter((card) => card.id !== cardId),
     refreshed,
   ];
-  return refreshed;
+  return { previous: existing, refreshed };
+}
+
+function reportInboxProjectionError(
+  source: string,
+  error: unknown,
+): void {
+  console.error(
+    `[inbox:projector] ${source} failed:`,
+    error instanceof Error ? error.message : error,
+  );
 }
 
 function deliverHeartbeatAction(
@@ -255,11 +274,40 @@ function deliverHeartbeatAction(
   action: HeartbeatAction,
 ): void {
   hostStreams.broadcast(hostUrl, { type: "heartbeat", action });
-  if (!("cardId" in action)) return;
 
-  const refreshed = reprojectCard(hostUrl, action.cardId);
-  if (refreshed) {
-    hostStreams.broadcast(hostUrl, { type: "cardChanged", card: refreshed });
+  const reprojection = "cardId" in action
+    ? reprojectCard(hostUrl, action.cardId)
+    : undefined;
+  try {
+    if (
+      action.type === "phase-advanced" &&
+      (action.to === "review" || action.to === "ship") &&
+      reprojection
+    ) {
+      projectCardToInbox(
+        hostUrl,
+        reprojection.refreshed,
+        reprojection.previous,
+      );
+    } else {
+      projectHeartbeatToInbox(hostUrl, action, reprojection?.refreshed);
+      if (reprojection) {
+        projectCardToInbox(
+          hostUrl,
+          reprojection.refreshed,
+          reprojection.previous,
+        );
+      }
+    }
+  } catch (error) {
+    reportInboxProjectionError(`heartbeat ${action.type}`, error);
+  }
+
+  if (reprojection) {
+    hostStreams.broadcast(hostUrl, {
+      type: "cardChanged",
+      card: reprojection.refreshed,
+    });
   }
 }
 
@@ -332,6 +380,32 @@ function startHostBridge(partition: HostPartition): void {
             scopes,
           );
           if (!hostStreams.isCurrent(partition)) return;
+          try {
+            if (
+              event.type === "sessionRemoved" &&
+              event.reason === "archived" &&
+              event.session
+            ) {
+              projectArchivedSessionToInbox(partition.hostUrl, event.session);
+            } else if (event.type === "sessionRemoved") {
+              projectRemovedSessionToInbox(partition.hostUrl, event.resource);
+            } else if (projected.type === "init") {
+              for (const card of projected.cards) {
+                projectCardToInbox(partition.hostUrl, card);
+              }
+            } else if (projected.type === "cardChanged") {
+              const previousCard = partition.cards.find(
+                (card) => card.id === projected.card.id,
+              );
+              projectCardToInbox(
+                partition.hostUrl,
+                projected.card,
+                previousCard,
+              );
+            }
+          } catch (error) {
+            reportInboxProjectionError(event.type, error);
+          }
           if (
             !hostStreams.applyIfCurrent(
               partition,
@@ -376,10 +450,12 @@ function createRemoteStream(
   const encoder = new TextEncoder();
   const streamId = nextStreamId++;
   let closed = false;
+  let unsubscribeInbox: (() => void) | undefined;
 
   function closeStream(): void {
     if (closed) return;
     closed = true;
+    unsubscribeInbox?.();
     const { activeHostCount } = hostStreams.unsubscribe(hostUrl, streamId);
     if (activeHostCount === 0) void stopHeartbeat();
   }
@@ -402,6 +478,11 @@ function createRemoteStream(
         hostUrl,
         subscriber,
       );
+      unsubscribeInbox = inboxEvents.subscribe((event) => {
+        if (inboxEventMatchesHost(event, hostUrl)) {
+          subscriber.send(event);
+        }
+      });
 
       if (firstForHost) {
         try {

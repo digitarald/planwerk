@@ -183,14 +183,14 @@ export interface PeerChatReviewStart {
 }
 
 /**
- * Start a configured review command in a peer chat of the session that owns a
- * pending input request. Chats in the session share its workspace,
- * customizations, and plan artifact, so Planwerk does not copy plan content.
+ * Start a configured review command in a disposable peer chat. When a request
+ * ID is supplied, confirm that the pending input still belongs to the session
+ * before dispatching the review.
  */
 export async function startPeerChatReview(
   hostUrl: string,
   sessionUri: string,
-  requestId: string,
+  requestId: string | undefined,
   message: string,
   options?: {
     signal?: AbortSignal;
@@ -226,8 +226,10 @@ export async function startPeerChatReview(
         };
       }
 
-      const input = findChatInput(sessionState.inputNeeded, requestId);
-      if (!input) {
+      const input = requestId
+        ? findChatInput(sessionState.inputNeeded, requestId)
+        : undefined;
+      if (requestId && !input) {
         return { success: false, reason: "The pending plan request is stale." };
       }
 
@@ -253,7 +255,7 @@ export async function startPeerChatReview(
       if (!result.success) return result;
       debug(
         "Started peer-chat review",
-        { sessionUri, requestChat: input.chat, reviewChatUri, turnId },
+        { sessionUri, requestChat: input?.chat, reviewChatUri, turnId },
       );
       return result;
     } catch (error) {

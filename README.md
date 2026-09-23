@@ -4,20 +4,34 @@
 
 AI agents write 4x more code — but most of that speed gets eaten by the verification work humans still do by hand. Review queues are overflowing, sessions get babysat one at a time, and there's no single place to see what every agent is actually doing.
 
-**Planwerk is a kanban board for the agentic SDLC.** Each agent session becomes a card flowing through `Define → Plan → Build → Review → Ship`. Quality gates block every phase transition, an AI orchestrator manages the work autonomously, and you direct from a single board instead of micromanaging each session.
+**Planwerk is an inbox and kanban board for the agentic SDLC.** The inbox tells you
+what deserves attention next; the board shows where every session is in
+`Define → Plan → Build → Review → Ship`. Quality gates block every phase
+transition, and a coordinator works at the authority level you choose: observe,
+verify independently, or coordinate sessions after gates pass.
 
 ## Why it's different
 
 - **A management surface, not an IDE.** See progress, decisions, and blockers — no code in the UI.
 - **Gates are external and enforced.** The agent that wrote the code never grades its own work. A different reviewer — sometimes a different model — verifies it.
-- **Autonomous but accountable.** The orchestrator monitors, intervenes, and enforces, but logs every decision so you can override with a full audit trail.
+- **Autonomous by choice, accountable always.** Observe is the safe default. Verify adds checks and independent reviews. Coordinate may interact with sessions and advance phases, with every policy change and action logged.
 - **Risk-proportional.** A typo fix gets auto-merged; a security change gets adversarial review, multiple reviewers, and human sign-off.
 
 ## How it works
 
-Cards are live agent sessions. A persistent orchestrator ("CTO agent") detects stuck sessions, assigns risk levels, manages WIP, and escalates to you only when judgment is needed. Before leaving Build, deterministic checks and an independent implementation review establish that the code builds, is correct, and is architecturally sound. Review then compares the final implementation and gate evidence with the original intent in `plan.md`, producing a required sibling `review.md` that records validation, divergences, unresolved risks, and the ship recommendation.
+Cards are live agent sessions. A persistent coordinator detects stuck sessions, assigns risk levels, and surfaces WIP or coherence issues in **Observe** mode. **Verify** may also run configured checks and report-only independent reviews. **Coordinate** adds permission to answer or guide managed sessions and advance phases after gates pass. The board default can be overridden per session; explicit human actions remain available in every mode.
 
-A conversational sidebar lets you command the orchestrator in plain language — *"start a task for rate limiting,"* *"why is auth stuck?"*, *"pause all sessions."*
+Before leaving Build, deterministic checks and an independent implementation review establish that the code builds, is correct, and is architecturally sound. Review then compares the final implementation and gate evidence with the original intent in `plan.md`, producing a required sibling `review.md` that records validation, divergences, unresolved risks, and the ship recommendation.
+
+Meaningful handoffs land in a durable inbox. A revision-bound Chief of Staff
+pass turns the source facts into one concise, situation-aware note and chooses
+the most useful real action to put first. It can frame an outcome, decision,
+risk, unblocker, or no-action update without filling in a rigid template.
+Read state stays separate from unresolved action, so looking at a blocker never
+makes it disappear. Inbox, split, and board views are always one click apart.
+
+The coordinator drawer accepts plain-language commands — *"start a task for rate
+limiting,"* *"why is auth stuck?"*, *"pause all sessions."*
 
 Planwerk manages the AI execution layer between "task defined" and "PR merged," integrating with GitHub Issues, Projects, and PRs rather than replacing them.
 

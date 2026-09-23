@@ -25,6 +25,8 @@ const REASONING_ORDER: ReasoningEffort[] = [
   "xhigh",
   "max",
 ];
+const PREFERRED_MODEL = "gpt-6-luna";
+const PREFERRED_REASONING_EFFORT: ReasoningEffort = "xhigh";
 
 function enabledModels(models: ModelInfo[]): ModelInfo[] {
   return models.filter((model) => model.policy?.state !== "disabled");
@@ -34,6 +36,9 @@ function selectReasoningEffort(model: ModelInfo): ReasoningEffort | undefined {
   if (!model.capabilities.supports.reasoningEffort) return undefined;
   const supported = model.supportedReasoningEfforts;
   if (!supported?.length) return undefined;
+  if (supported.includes(PREFERRED_REASONING_EFFORT)) {
+    return PREFERRED_REASONING_EFFORT;
+  }
   return [...supported].sort(
     (left, right) =>
       REASONING_ORDER.indexOf(right) - REASONING_ORDER.indexOf(left)
@@ -53,10 +58,12 @@ export async function selectOrchestratorModel(
     role: OrchestratorModelRole;
     risk?: "low" | "medium" | "high";
     override?: string;
+    overrideName?: string;
   }
 ): Promise<OrchestratorModelSelection> {
   const models = enabledModels(await client.listModels());
   const override = options.override ?? process.env.ORCHESTRATOR_MODEL;
+  const overrideName = options.overrideName ?? "ORCHESTRATOR_MODEL";
   const highStakes =
     options.risk === "high" ||
     options.role === "review" ||
@@ -66,12 +73,12 @@ export async function selectOrchestratorModel(
     const selected = models.find((model) => model.id === override);
     if (!selected) {
       throw new Error(
-        `ORCHESTRATOR_MODEL "${override}" is unavailable or disabled`
+        `${overrideName} "${override}" is unavailable or disabled`
       );
     }
     if (highStakes && !selected.capabilities.supports.reasoningEffort) {
       throw new Error(
-        `ORCHESTRATOR_MODEL "${override}" lacks reasoning capability required for ${options.role}`
+        `${overrideName} "${override}" lacks reasoning capability required for ${options.role}`
       );
     }
     return {
@@ -94,7 +101,9 @@ export async function selectOrchestratorModel(
     );
   }
 
-  const selected = [...candidates].sort(compareModels)[0];
+  const selected =
+    candidates.find((model) => model.id === PREFERRED_MODEL) ??
+    [...candidates].sort(compareModels)[0];
   return {
     model: selected.id,
     reasoningEffort: selectReasoningEffort(selected),

@@ -19,6 +19,7 @@ import {
 } from "@/lib/orchestrator/gate-engine";
 import { getAuthoritativeCardRisk } from "@/lib/orchestrator/risk-store";
 import { riskAutomationPolicy } from "@/lib/orchestrator/risk-authority";
+import { isCardAutomationEligible } from "@/lib/orchestrator/automation-eligibility";
 import { getReviewRunsForCard, type ReviewRun } from "@/lib/orchestrator/review-executor";
 import { buildCoherenceSummary } from "@/lib/orchestrator/coherence-engine";
 import {
@@ -215,8 +216,8 @@ export function enrichSessionToCard(
       card.workingDirectory
     );
   }
-  if (!riskPolicy.current) {
-    card.gateBlocker = `${riskPolicy.reason} Reassess risk before automation can continue.`;
+  if (!riskPolicy.current && isCardAutomationEligible(card)) {
+    card.gateBlocker = `${riskPolicy.reason} Automatic reassessment is pending.`;
     if (card.attention !== "error" && card.attention !== "needs-human") {
       card.attention = "stale";
     }

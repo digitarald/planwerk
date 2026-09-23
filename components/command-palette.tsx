@@ -12,7 +12,7 @@ import {
   CommandSeparator,
 } from "@/components/ui/command"
 import { useShallow } from "zustand/react/shallow"
-import { Plus, Columns3, Zap, ArrowRight, Sparkles } from "lucide-react"
+import { Plus, Columns3, Zap, ArrowRight, Sparkles, Inbox, PanelTop } from "lucide-react"
 import { useBoardStore, selectFilteredCards } from "@/lib/store/board-store"
 import { useUIStore } from "@/lib/store/ui-store"
 import { COLUMNS } from "@/lib/types"
@@ -22,6 +22,8 @@ export function CommandPalette() {
   const cards = useBoardStore(useShallow(selectFilteredCards))
   const setDetailCard = useBoardStore((s) => s.setDetailCard)
   const openWelcome = useUIStore((s) => s.openWelcome)
+  const setWorkspaceMode = useUIStore((s) => s.setWorkspaceMode)
+  const openCoordinator = useUIStore((s) => s.openCoordinator)
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -36,13 +38,14 @@ export function CommandPalette() {
 
   const focusChatInput = useCallback(() => {
     setOpen(false)
+    openCoordinator()
     setTimeout(() => {
       const input = document.querySelector(
         '[placeholder="Ask or instruct..."]'
       ) as HTMLInputElement | null
       input?.focus()
     }, 100)
-  }, [])
+  }, [openCoordinator])
 
   const expandCard = useCallback(
     (cardId: string) => {
@@ -54,9 +57,12 @@ export function CommandPalette() {
 
   const scrollToColumn = useCallback((columnId: string) => {
     setOpen(false)
-    const columnEl = document.querySelector(`[data-column-id="${columnId}"]`)
-    columnEl?.scrollIntoView({ behavior: "smooth", inline: "start" })
-  }, [])
+    setWorkspaceMode("board")
+    setTimeout(() => {
+      const columnEl = document.querySelector(`[data-column-id="${columnId}"]`)
+      columnEl?.scrollIntoView({ behavior: "smooth", inline: "start" })
+    }, 100)
+  }, [setWorkspaceMode])
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
@@ -66,6 +72,30 @@ export function CommandPalette() {
           <CommandEmpty>No results found.</CommandEmpty>
 
           <CommandGroup heading="Actions">
+            <CommandItem
+              onSelect={() => {
+                setOpen(false)
+                setWorkspaceMode("inbox")
+              }}
+            >
+              <Inbox className="mr-2 h-4 w-4" />
+              <span>Open inbox</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                Human handoffs
+              </span>
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                setOpen(false)
+                setWorkspaceMode("split")
+              }}
+            >
+              <PanelTop className="mr-2 h-4 w-4" />
+              <span>Open split view</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                Inbox + board
+              </span>
+            </CommandItem>
             <CommandItem onSelect={() => scrollToColumn("define")}>
               <Plus className="mr-2 h-4 w-4" />
               <span>New task</span>

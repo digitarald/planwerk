@@ -2,52 +2,51 @@
 
 import { useEffect, useRef } from "react";
 
-import { useBoardStore } from "@/lib/store/board-store";
+import { useInboxStore } from "@/lib/store/inbox-store";
 
 export function useDesktopNotifications() {
-  const cards = useBoardStore((s) => s.cards);
-  const prevAttentionRef = useRef<Set<string>>(new Set());
+  const items = useInboxStore((s) => s.items);
+  const unreadCount = useInboxStore((s) => s.counts.unread);
+  const previousUrgentRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    // Don't request immediately — wait until we actually need to notify
-  }, []);
-
-  useEffect(() => {
-    const count = cards.filter((c) => c.attention !== "none").length;
-    document.title = count > 0 ? `(${count}) Planwerk` : "Planwerk";
-  }, [cards]);
+    document.title = unreadCount > 0 ? `(${unreadCount}) Planwerk` : "Planwerk";
+  }, [unreadCount]);
 
   useEffect(() => {
     if (!("Notification" in window)) return;
     if (Notification.permission === "denied") return;
 
-    if (Notification.permission === "default") {
-      Notification.requestPermission();
+    const urgentItems = items.filter(
+      (item) =>
+        item.workflowState === "open"
+        && item.readAt === null
+        && item.category !== "read"
+        && item.priorityBand <= 2,
+    );
+    const currentUrgent = new Set(urgentItems.map((item) => item.id));
+
+    if (urgentItems.length === 0) {
+      previousUrgentRef.current = currentUrgent;
       return;
     }
 
-    const currentAttention = new Set(cards.filter((c) => c.attention !== "none").map((c) => c.id));
+    if (Notification.permission === "default") {
+      void Notification.requestPermission();
+      previousUrgentRef.current = currentUrgent;
+      return;
+    }
 
-    for (const id of currentAttention) {
-      if (!prevAttentionRef.current.has(id)) {
-        const card = cards.find((c) => c.id === id);
-        if (card) {
-          const typeLabel =
-            card.attention === "needs-human"
-              ? "needs your input"
-              : card.attention === "error"
-                ? "has an error"
-                : "needs attention";
-
-          new Notification(`Planwerk: ${card.title}`, {
-            body: `Session ${typeLabel}`,
+    for (const item of urgentItems) {
+      if (!previousUrgentRef.current.has(item.id)) {
+          new Notification(`Planwerk: ${item.title}`, {
+            body: item.briefing.recommendation,
             icon: "/favicon.ico",
-            tag: card.id,
+            tag: `inbox:${item.id}`,
           });
-        }
       }
     }
 
-    prevAttentionRef.current = currentAttention;
-  }, [cards]);
+    previousUrgentRef.current = currentUrgent;
+  }, [items]);
 }

@@ -1116,10 +1116,16 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         } else if (event.type === "sessionRemoved") {
           debug("sessionRemoved:", event.params.session);
           stopWorkerObserver(event.params.session);
+          const existing = sessions.get(event.params.session);
           sessions.delete(event.params.session);
           removeSessionCache(hostUrl, event.params.session);
           clearPendingInput(event.params.session);
-          onEvent({ type: "sessionRemoved", resource: event.params.session });
+          onEvent({
+            type: "sessionRemoved",
+            resource: event.params.session,
+            session: existing,
+            reason: "removed",
+          });
         } else if (event.type === "sessionSummaryChanged") {
           const { session: sessionUri, changes } = event.params;
           const existing = sessions.get(sessionUri);
@@ -1162,7 +1168,12 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
                 sessions.delete(sessionUri);
                 enrichments.delete(sessionUri);
                 removeSessionCache(hostUrl, sessionUri);
-                onEvent({ type: "sessionRemoved", resource: sessionUri });
+                onEvent({
+                  type: "sessionRemoved",
+                  resource: sessionUri,
+                  session: existing,
+                  reason: "archived",
+                });
               }
               continue;
             }

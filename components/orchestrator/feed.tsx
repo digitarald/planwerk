@@ -1,23 +1,36 @@
 "use client";
 
+import { useMemo } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { FeedItem } from "@/components/orchestrator/feed-item";
 import { ChatInput } from "@/components/orchestrator/chat-input";
 import { HealthBar } from "@/components/orchestrator/health-bar";
+import { BoardCoordinatorModeControl } from "@/components/orchestrator/coordinator-mode-control";
 import { ConnectionDot } from "@/components/connection/connection-dot";
 import { Separator } from "@/components/ui/separator";
 import { useShallow } from "zustand/react/shallow";
 import { useBoardStore, selectSessionCounts } from "@/lib/store/board-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
+import { groupDuplicateFeedItems } from "@/lib/orchestrator/feed-grouping";
 import { Activity, Trash2 } from "lucide-react";
 
 export function OrchestratorFeed() {
   const feedItems = useOrchestratorStore((s) => s.feedItems);
   const monitoringStatus = useOrchestratorStore((s) => s.monitoringStatus);
   const clearFeed = useOrchestratorStore((s) => s.clearFeed);
+  const cards = useBoardStore((s) => s.cards);
   const { total, active, idle, errors, needsInput } = useBoardStore(
     useShallow(selectSessionCounts)
   );
+  const groupedFeedItems = useMemo(() => {
+    const interactiveCards = new Set(
+      cards.flatMap((card) => card.pendingInput ? [card.id] : []),
+    );
+    return groupDuplicateFeedItems(
+      feedItems,
+      (item) => Boolean(item.cardId && interactiveCards.has(item.cardId)),
+    );
+  }, [cards, feedItems]);
   const hasClearableItems = feedItems.some(
     (item) => !item.isStreaming && !item.approval && !item.decisionPending
   );
@@ -58,6 +71,7 @@ export function OrchestratorFeed() {
             </span>
           )}
         </div>
+        <BoardCoordinatorModeControl />
       </div>
 
       <Separator />
@@ -71,7 +85,9 @@ export function OrchestratorFeed() {
                 : "Connect to VS Code to see activity."}
             </p>
           ) : (
-            feedItems.map((item) => <FeedItem key={item.id} {...item} />)
+            groupedFeedItems.map((item) => (
+              <FeedItem key={item.id} {...item} />
+            ))
           )}
         </div>
       </ScrollArea>

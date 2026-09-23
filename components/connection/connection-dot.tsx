@@ -37,7 +37,9 @@ export function ConnectionDot() {
           <div>
             <div className={cn("h-2 w-2 rounded-full", config.color)} />
           </div>
-          <span className="text-xs text-muted-foreground">{config.label}</span>
+          <span className="hidden text-xs text-muted-foreground min-[520px]:inline">
+            {config.label}
+          </span>
         </TooltipTrigger>
         <TooltipContent className="max-w-64">
           <p>{tooltip}</p>

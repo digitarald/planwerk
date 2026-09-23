@@ -27,13 +27,32 @@ interface CardState {
 }
 ```
 
-### 2. Orchestrator Is Conversational (Not Just a Feed)
+### 2. Coordinator Authority Is Explicit
+
+The persistent coordinator has three server-enforced modes:
+
+- `observe` (default): monitor facts, persist risk, and surface WIP, coherence, and blocker signals.
+- `verify`: add configured commands, artifact checks, and report-only independent reviewer chats.
+- `coordinate`: add primary-session interaction and autonomous gated phase advancement.
+
+The board stores one default and optional host/session-scoped overrides in SQLite. The
+effective mode is resolved for each card on every heartbeat tick, so a downgrade takes
+effect without restarting the event stream. Already-running checks or reviewer turns may
+finish and be recorded, but the new mode gates every downstream iteration, session write,
+and phase mutation. Project config and risk policy remain additional constraints: a mode
+can remove authority but never bypass or enable a disabled protection.
+
+Mode governs unsolicited background work. Explicit human commands, pending-input answers,
+and manual gated transitions remain available and keep their existing approval and audit
+paths.
+
+### 3. Orchestrator Is Conversational (Not Just a Feed)
 
 The left sidebar is both a live decision log AND the primary input for managing the board. You read what the CTO is doing AND talk to it in the same surface. This eliminates context-switching between monitoring and control.
 
 User can say: "Start a task for rate limiting", "Why is auth stuck?", "Override the review gate", "Pause all sessions".
 
-### 3. Quality Gates Are First-Class Records
+### 4. Quality Gates Are First-Class Records
 
 Gate results are `GateRun` records in SQLite — not derived from AHP tool-call history. This gives:
 - Audit trail (who/what/when)
@@ -42,7 +61,7 @@ Gate results are `GateRun` records in SQLite — not derived from AHP tool-call 
 
 Tool-call history is a *hint* to avoid redundant runs, not proof of gate passage.
 
-### 4. Skill-Based Reviews via Sub-Agents
+### 5. Skill-Based Reviews via Sub-Agents
 
 Reviews are injected as skills that agents can invoke. Dual-invocation model:
 1. **Agent-initiated** — Agent calls the review skill during its session (token-efficient)
@@ -58,7 +77,7 @@ and reviewer selection falls back to high-risk policy. Reassessment is explicit
 and commits through a facts-snapshot compare-and-set, so an assessment can never
 be attached to facts that changed while the model was running.
 
-### 5. Convention-Based Config (Zero-Config Default)
+### 6. Convention-Based Config (Zero-Config Default)
 
 Planwerk reads `.github/planwerk.yml` for explicit config, but also extracts from:
 - `package.json` scripts (lint, test, typecheck, build)
@@ -67,7 +86,7 @@ Planwerk reads `.github/planwerk.yml` for explicit config, but also extracts fro
 
 Extracted commands are suggestions; user approves on first run.
 
-### 6. Local Node.js App (Not Serverless)
+### 7. Local Node.js App (Not Serverless)
 
 Intentional architectural choice:
 - `better-sqlite3` requires stable Node process
@@ -77,11 +96,11 @@ Intentional architectural choice:
 
 Think of it as a desktop app using Next.js for its UI layer.
 
-### 7. DnD Is Gate-Aware (Not Free Movement)
+### 8. DnD Is Gate-Aware (Not Free Movement)
 
 Dragging a card forward logs a "manual override" to the orchestrator feed and marks the card with a warning. Moving backward is always allowed (rework). This preserves the gate enforcement model while still giving users escape hatches.
 
-### 8. Coherence Is a Horizontal Gate (Board-Scoped)
+### 9. Coherence Is a Horizontal Gate (Board-Scoped)
 
 Every other gate is **vertical** — a single card advancing its own pipeline, checked only against itself (`canAdvancePhase(cardId, …)`). The **Coherence Gate** is **horizontal**: a check *across* concurrent cards. When two in-flight cards (phase `build`/`review`) edit overlapping code, an external reviewer judges whether their changes cohere or clash.
 
@@ -106,8 +125,8 @@ Config: `coherence.{enabled, module_depth, block_high_risk_ship}` in `planwerk.y
 ┌────────────────────────────────────────────────────────────┐
 │                    Next.js App (App Router)                  │
 ├──────────────────┬─────────────────────────────────────────┤
-│  Orchestrator    │  Board + Card Detail Modal                │
-│  Live Feed       │  (single view, no routing)               │
+│  Coordinator     │  Inbox / Split / Board workspace         │
+│  Drawer          │  + Card Detail Modal                     │
 ├──────────────────┴─────────────────────────────────────────┤
 │  Client State (Zustand + SSE sync)                          │
 ├────────────────────────────────────────────────────────────┤
@@ -151,17 +170,18 @@ Config: `coherence.{enabled, module_depth, block_high_risk_ship}` in `planwerk.y
 
 | # | Feature | Description |
 |---|---------|-------------|
-| F1 | App Shell | Fixed desktop layout, title bar, sidebar + main |
+| F1 | App Shell | Fixed desktop layout with Inbox, Split, and Board workspace modes plus coordinator drawer |
 | F2 | Kanban Board | 5 columns, DnD, WIP limits, compact cards |
 | F3 | Card Detail | Modal detail view: gate pipeline, plan/review artifacts, files, metadata, inject message |
-| F4 | Orchestrator Feed | Conversational sidebar — read decisions + give commands |
-| F5 | Real-Time Connection | SSE bridge, connection status, auto-reconnect |
-| F6 | Project Config | `.github/planwerk.yml`, convention extraction |
-| F7 | Gate Engine | GateRun records, SQLite persistence, stale detection |
-| F8 | Notifications | Card pulses, column badges, title bar count, desktop notifs |
-| F9 | Work Creation | + button, Cmd+K, orchestrator chat |
-| F10 | AHP Connection | Onboarding, local/remote host selection, saved connection, reconnect |
-| F11 | Workspace Filter | Dropdown in TitleBar to filter board by AHP project; derived selector, stale-filter auto-reset |
+| F4 | Agent Inbox | Durable ranked handoffs with revision-bound, free-form Chief of Staff notes; context-specific primary and secondary actions; unread/open/snoozed/done lifecycle; and audit history |
+| F5 | Orchestrator Feed | On-demand coordinator drawer — inspect activity and give commands |
+| F6 | Real-Time Connection | SSE bridge, connection status, auto-reconnect |
+| F7 | Project Config | `.github/planwerk.yml`, convention extraction |
+| F8 | Gate Engine | GateRun records, SQLite persistence, stale detection |
+| F9 | Notifications | Urgent inbox notifications, attention indicators, and title bar unread count |
+| F10 | Work Creation | + button, Cmd+K, orchestrator chat |
+| F11 | AHP Connection | Onboarding, local/remote host selection, saved connection, reconnect |
+| F12 | Workspace Filter | Title bar filter shared by Inbox and Board; derived selector, stale-filter auto-reset |
 
 ---
 
@@ -178,6 +198,7 @@ Config: `coherence.{enabled, module_depth, block_high_risk_ship}` in `planwerk.y
 | `/api/orchestrator/chat` | POST | Handle user messages to CTO |
 | `/api/orchestrator/chat` | DELETE | Explicitly delete the persisted CTO conversation |
 | `/api/orchestrator/approvals` | GET/POST | Show non-authorizing approval metadata; decide with a one-time capability |
+| `/api/orchestrator/mode` | GET/POST | Read or update the board default and per-session coordinator modes |
 | `/api/orchestrator/status` | GET | Board health + orchestrator state |
 | `/api/orchestrator/review` | GET/POST | Trigger/query skill-based reviews |
 
@@ -285,7 +306,7 @@ planwerk/
 │   └── api/
 │       ├── ahp/{events,sessions,sessions/message,sessions/input}/
 │       ├── gates/{run,status}/
-│       └── orchestrator/{chat,review,status}/
+│       └── orchestrator/{chat,mode,review,status}/
 ├── components/
 │   ├── app-shell.tsx
 │   ├── title-bar.tsx
@@ -299,7 +320,7 @@ planwerk/
 │   └── ui/ (shadcn on Base UI)
 ├── lib/
 │   ├── ahp/{types,protocol,map-session,enrich-card,changeset-enricher,client-bridge,client-operation,session-messenger,actions,connection-error,plan-artifact,telemetry-logs,telemetry-transport}.ts
-│   ├── orchestrator/{orchestrator-agent,heartbeat,gate-engine,skills,skill-config,risk-assessor,risk-store,review-executor,verdict-extractor,triage,auto-answerer,board-context,tool-executor}.ts
+│   ├── orchestrator/{orchestrator-agent,heartbeat,coordinator-mode,coordinator-mode-store,gate-engine,skills,skill-config,risk-assessor,risk-store,review-executor,verdict-extractor,triage,auto-answerer,board-context,tool-executor}.ts
 │   ├── store/{board-store,connection-store,orchestrator-store}.ts
 │   ├── db/{schema,session-cache}.ts
 │   ├── hooks/{use-live-sessions,use-notifications,use-persistent-state}.ts

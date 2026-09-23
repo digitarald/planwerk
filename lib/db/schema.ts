@@ -4,10 +4,12 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { ensureCtoContinuitySchema } from "./cto-continuity-schema";
+import { ensureCoordinatorModeSchema } from "./coordinator-mode-schema";
 import { ensureSdkObservabilitySchema } from "./sdk-observability-schema";
 import { ensureReviewChatCleanupSchema } from "./review-chat-cleanup-schema";
 import { ensureCardRiskSchema } from "./card-risk-schema";
 import { ensureReviewRunSchema } from "./review-run-schema";
+import { ensureInboxSchema } from "./inbox-schema";
 import { runSchemaMigration, tableColumns } from "./schema-migration";
 import {
   ensureWorkLeaseSchema,
@@ -166,6 +168,7 @@ export function getDb(): Database.Database {
 
     ensureSdkObservabilitySchema(db);
     ensureCtoContinuitySchema(db);
+    ensureCoordinatorModeSchema(db);
 
     runSchemaMigration(db, () => {
       const gateRunsColumns = tableColumns(db!, "gate_runs");
@@ -189,6 +192,7 @@ export function getDb(): Database.Database {
     recoverExpiredWork(db);
 
     ensureCardRiskSchema(db);
+    ensureInboxSchema(db);
 
     db.exec(`
       UPDATE card_phases SET phase = 'review' WHERE phase = 'verify';

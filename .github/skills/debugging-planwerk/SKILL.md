@@ -55,7 +55,8 @@ out-of-band; the running app holds a write connection.
 
 Tables: `card_phases`, `card_risk`, `card_status_history`, `coherence_conflicts`,
 `cto_sdk_sessions`, `cto_session_leases`, `gate_configs`, `gate_runs`,
-`heartbeat_log`, `review_chat_cleanups`, `review_runs`, `session_cache`.
+`heartbeat_log`, `inbox_items`, `inbox_item_actions`, `review_chat_cleanups`,
+`review_runs`, `session_cache`.
 
 ```bash
 node -e '
@@ -66,6 +67,36 @@ for (const r of db.prepare("SELECT name FROM sqlite_master WHERE type = ?").all(
 Good first queries: `card_phases` (persisted column), `heartbeat_log`
 (what the orchestrator did/decided, newest `id` first), `gate_runs` / `review_runs`
 (gate outcomes + staleness), `card_risk` (triage verdict driving gate intensity).
+The active inbox is intentionally not a history table: unpinned completion notices
+expire after one hour, while pending input, approvals, errors, failed gates, and
+conflicts remain source-resolved. `inbox_item_actions` distinguishes explicit human
+resolution from automatic projection cleanup; the Done view should contain only the
+former.
+Completion is valid only while the source session remains idle or archived. A later
+running, input-needed, or error snapshot source-resolves the item and emits
+`inboxRemoved`, even when another client steered the session. Final chat enrichment may
+arrive after the idle transition; `projectExistingCompletionRefresh` updates an existing
+open completion from `lastAgentMessage` without replaying every historical idle session.
+Every projected upsert also queues a non-blocking Copilot SDK Chief of Staff synthesis.
+The model authors one free-form inbox note plus delivery metadata (headline, attention,
+and executable action intents); it never determines phase, runtime, gates, or inbox
+lifecycle. Generation is keyed to a digest of bounded source evidence and applies only
+while the same source revision and request remain open. Late results are discarded.
+The synthesis request digest intentionally excludes volatile card telemetry such as
+runtime attention and recent activity. It changes only with the task identity, source
+revision, or deterministic source note. Inbox completion/readiness revisions likewise
+fall back to a digest of user-relevant outcome evidence rather than `modifiedAt`, so
+host residency or polling churn cannot repeatedly paraphrase an unchanged result.
+Board-level WIP-limit violations remain coordinator telemetry and are intentionally not
+projected into the human inbox because they do not identify a specific handoff. A breach
+emits once when the phase crosses above its configured limit and clears when the phase
+returns to capacity. If a WIP row appears in `inbox_items`, inspect
+`purgeNonActionableInboxItems`; host-scoped keys have the form
+`host:<encoded-host>:orchestrator:wip:<phase>`.
+Inspect `briefing_json.synthesis` for `pending`, `generated`, or `failed`, the request
+digest, model, and generation time. `INBOX_BRIEFING_MODEL` optionally pins this workload;
+otherwise it uses the normal triage model policy. A failed call leaves the deterministic
+source note visible and is retried only after the cooldown or when source evidence changes.
 In rolling-worker deployments, active work is lease-fenced rather than reset merely
 because another process opened the database. Inspect `gate_runs.owner_id` /
 `lease_expires_at_ms`, `review_runs.start_owner_id` /
@@ -88,8 +119,13 @@ Both restoration and deletion use session-, token-, lease-owner-fenced CAS.
 `card_risk.risk_digest` must be non-null and match the digest derived from the
 current `session_cache` row plus `card_phases` row. Missing, null-digest, or
 mismatched assessments are intentionally non-authoritative: heartbeat logs one
-`risk-assessment-required` blocker and waits for explicit reassessment, while
-gate/reviewer reads use high-risk policy. The canonical reader is
+`risk-assessment-required` blocker only when authoritative facts are unavailable
+or reassessment fails, while gate/reviewer reads use high-risk policy. Observe
+mode automatically reassesses missing, unbound, or stale risk for automation-
+eligible cards; incomplete facts resolve deterministically to high risk without
+an SDK call. Ship, archived, and idle Define cards are not automation-eligible
+and must not show a risk blocker. The shared eligibility predicate is
+`lib/orchestrator/automation-eligibility.ts`; the canonical risk reader is
 `lib/orchestrator/risk-authority.ts`.
 SDK failures and invalid model output use `risk-classifier.ts`; incomplete
 counts-only facts and sensitive auth/security/permissions/schema/migration or
@@ -140,6 +176,15 @@ catalogue-only for cold sessions. It reads live session state only for sessions
 already `InProgress`/`InputNeeded`, after a relevant host event, or while carrying
 out an explicit user/orchestrator action. A cold cache, missing enrichment, or a
 new host URL must never fan out subscriptions across the session catalogue.
+
+Cold cards without a current authoritative gate revision are parked by the
+heartbeat: they do not enter automation, coherence, or WIP counts. Missing
+enrichment and revision facts are retryable system conditions, not human work;
+`source-revision-required` and `risk-assessment-required` may be recorded in
+`heartbeat_log` for diagnosis but must not appear in `inbox_items` or the
+coordinator feed. If the inbox floods with those diagnostics or WIP counts
+include cold catalogue entries, inspect the heartbeat candidate filter around
+`resolveAuthoritativeGateRevision` before changing AHP subscription behavior.
 
 The smoke harness intentionally performs a live read of its selected session and
 can therefore restore that session. Do not run it across production sessions when
@@ -231,6 +276,23 @@ prefixed by subsystem: `[ahp:bridge]`, `[ahp:conn]`, `[ahp:changeset]`, `[ahp:pl
 Set **`AHP_DEBUG=1`** to unlock verbose `debug()` output across the AHP layer
 (`client-bridge`, `changeset-enricher`, `plan-artifact`, `enrich-card`,
 `session-messenger`) and the heartbeat — invaluable for enrichment / input-fetch traces.
+
+The browser persists the last logical host in the `planwerk-connection` local-storage
+entry and reconnects during Zustand hydration. A startup line such as
+`[ahp:sse] remote stream → ws://localhost:<ephemeral>?tkn=...` means old browser state
+restored a rotated editor endpoint instead of `vscode-local://desktop`. Current versions
+migrate legacy loopback token URLs to desktop discovery. During mixed-version debugging,
+click **VS Code (local)** or remove `planwerk-connection` from local storage.
+
+The global coordinator-mode hydration request sends only `hostUrl`; the server returns
+all overrides for that host and the client computes effective defaults for visible cards.
+If a large board reports `Coordinator mode request failed (431)`, inspect whether an
+older client is still putting every card ID in the query string.
+Persisted phase hydration still sends card IDs to `/api/gates/phases`, but
+`lib/hooks/use-live-sessions.ts` bounds those requests to batches of 40 and merges
+the returned state maps. A `431` from that route means batching regressed or a
+different request has started serializing the full catalogue into one URL; do
+not address it by increasing server header limits.
 
 If the browser reports that it could not open the Planwerk event stream before an
 `init` event, inspect the `/api/ahp/events` HTTP response before debugging AHP. Native

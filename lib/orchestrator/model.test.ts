@@ -56,6 +56,37 @@ test("model policy uses only runtime-discovered enabled models", async () => {
   );
 });
 
+test("model policy prefers gpt-6-luna with xhigh reasoning", async () => {
+  const client = {
+    listModels: async () => [
+      model("larger", {
+        context: 1_500,
+        reasoning: true,
+        efforts: ["high", "xhigh", "max"],
+      }),
+      model("gpt-6-luna", {
+        context: 1_000,
+        reasoning: true,
+        efforts: ["high", "xhigh", "max"],
+      }),
+    ],
+  };
+
+  assert.deepEqual(
+    await selectOrchestratorModel(client, {
+      role: "conversation",
+      override: "",
+    }),
+    {
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      role: "conversation",
+      highStakes: false,
+      source: "policy",
+    }
+  );
+});
+
 test("explicit override is validated for availability and high-stakes capability", async () => {
   const client = {
     listModels: async () => [
@@ -71,8 +102,9 @@ test("explicit override is validated for availability and high-stakes capability
     selectOrchestratorModel(client, {
       role: "conversation",
       override: "missing",
+      overrideName: "INBOX_BRIEFING_MODEL",
     }),
-    /unavailable or disabled/
+    /INBOX_BRIEFING_MODEL "missing" is unavailable or disabled/
   );
   await assert.rejects(
     selectOrchestratorModel(client, {

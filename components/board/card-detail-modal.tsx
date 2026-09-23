@@ -50,6 +50,7 @@ import {
 } from "@/lib/types";
 import type { ChangesetReview } from "@/lib/types";
 import { GatePipeline } from "@/components/gates/gate-pipeline";
+import { SessionCoordinatorModeControl } from "@/components/orchestrator/coordinator-mode-control";
 import { useGateRuns } from "@/lib/hooks/use-gate-runs";
 import { cn } from "@/lib/utils";
 import { isGenericStatus } from "@/lib/utils/status-placeholders";
@@ -774,6 +775,12 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                   {card.filesChanged} files
                 </span>
               )}
+            </div>
+            <div className="mt-2.5">
+              <SessionCoordinatorModeControl
+                cardId={card.id}
+                cardTitle={card.title}
+              />
             </div>
             <div className="mt-3">
               <GatePipeline

@@ -12,6 +12,7 @@ export type FeedItemType =
   | "response"
   | "heartbeat"
   | "tool-action"
+  | "setting"
   | "approval-required";
 
 export interface PendingCtoApproval {

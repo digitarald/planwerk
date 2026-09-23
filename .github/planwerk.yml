@@ -156,7 +156,10 @@ coherence:
   module_depth: 2            # dir segments (repo-relative) compared for module-tier overlap
   block_high_risk_ship: true # hard-block ship when a high-risk card is in a conflict
 
-# Orchestrator behavior
+# Orchestrator behavior. The board/session Coordinator mode is a persisted
+# capability ceiling over these project settings: Observe starts none of this
+# work, Verify permits checks and report-only reviews, and Coordinate additionally
+# permits session interaction and gated phase advancement.
 orchestrator:
   heartbeat_interval: 30s
   stale_threshold: 10m

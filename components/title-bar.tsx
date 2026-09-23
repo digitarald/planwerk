@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import Image from "next/image";
-import { Eye, EyeOff, FolderOpen } from "lucide-react";
+import { Bot, Columns3, Eye, EyeOff, FolderOpen, ListTree, PanelTop } from "lucide-react";
 
 import { ConnectionDot } from "@/components/connection/connection-dot";
 import {
@@ -13,6 +13,13 @@ import {
   selectArchivedCount,
   UNASSIGNED_WORKSPACE,
 } from "@/lib/store/board-store";
+import {
+  filterInboxItemsByWorkspace,
+  inboxCountsFor,
+  useInboxStore,
+} from "@/lib/store/inbox-store";
+import { useConnectionStore } from "@/lib/store/connection-store";
+import { useUIStore, type WorkspaceMode } from "@/lib/store/ui-store";
 import { ATTENTION_META, highestAttention } from "@/lib/utils/attention";
 import { cn } from "@/lib/utils";
 
@@ -30,21 +37,34 @@ export function TitleBar() {
   const hideDone = useBoardStore((s) => s.hideDone);
   const toggleHideDone = useBoardStore((s) => s.toggleHideDone);
   const archivedCount = useBoardStore(selectArchivedCount);
+  const inboxItems = useInboxStore((s) => s.items);
+  const serverInboxCounts = useInboxStore((s) => s.counts);
+  const inboxCounts = workspaceFilters.size === 0
+    ? serverInboxCounts
+    : inboxCountsFor(
+        filterInboxItemsByWorkspace(inboxItems, cards, workspaceFilters),
+      );
+  const workspaceMode = useUIStore((s) => s.workspaceMode);
+  const setWorkspaceMode = useUIStore((s) => s.setWorkspaceMode);
+  const openCoordinator = useUIStore((s) => s.openCoordinator);
+  const connectionStatus = useConnectionStore((s) => s.status);
 
   const isFiltered = workspaceFilters.size > 0;
 
   return (
-    <header className="flex h-10 shrink-0 items-center border-b border-border/60 bg-background px-4 shadow-elevation-xs relative z-sticky">
-      <div className="flex items-center gap-2">
-        <Image src="/logo-light-64.png" alt="Planwerk" width={28} height={28} className="dark:hidden" />
-        <Image src="/logo-dark-64.png" alt="Planwerk" width={28} height={28} className="hidden dark:block" />
-        <span className="text-sm font-semibold">Planwerk</span>
+    <header className="relative z-sticky flex h-11 shrink-0 items-center border-b border-border/60 bg-background px-3 shadow-elevation-xs sm:px-4">
+      <div className="flex shrink-0 items-center gap-2.5">
+        <Image src="/logo-light-64.png" alt="Planwerk" width={24} height={24} className="dark:hidden" />
+        <Image src="/logo-dark-64.png" alt="Planwerk" width={24} height={24} className="hidden dark:block" />
+        <span className="hidden text-[15px] font-semibold tracking-[-0.01em] min-[520px]:inline">
+          Planwerk
+        </span>
         {attentionCount > 0 && topAttention !== "none" && (() => {
           const { Icon, pill, label } = ATTENTION_META[topAttention];
           return (
             <span
               className={cn(
-                "ml-2 inline-flex h-5 items-center gap-1 rounded-full px-1.5 text-[11px] font-bold tabular-nums shadow-elevation-xs",
+                "inline-flex h-5 items-center gap-1 rounded-full px-1.5 text-[10px] font-bold tabular-nums shadow-elevation-xs min-[520px]:ml-1",
                 pill
               )}
               title={`${attentionCount} ${attentionCount === 1 ? "session needs" : "sessions need"} attention (${label})`}
@@ -55,6 +75,8 @@ export function TitleBar() {
           );
         })()}
       </div>
+
+      <WorkspaceModeControl value={workspaceMode} onChange={setWorkspaceMode} />
 
       {/* Workspace chip bar */}
       {workspaces.length > 0 && (
@@ -68,7 +90,19 @@ export function TitleBar() {
         />
       )}
 
-      <div className="ml-auto flex shrink-0 items-center gap-3">
+      <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-3">
+        {connectionStatus === "connected" && inboxCounts.unread > 0 && (
+          <button
+            type="button"
+            onClick={() => setWorkspaceMode("inbox")}
+            aria-label={`${inboxCounts.unread} new item${inboxCounts.unread === 1 ? "" : "s"}`}
+            className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-[10px] font-semibold text-primary hover:bg-primary/15"
+            title={`${inboxCounts.unread} new item${inboxCounts.unread === 1 ? "" : "s"}`}
+          >
+            <ListTree className="h-3 w-3" />
+            {inboxCounts.unread}
+          </button>
+        )}
         {archivedCount > 0 && (
           <button
             onClick={toggleHideDone}
@@ -86,9 +120,65 @@ export function TitleBar() {
             <span className="tabular-nums">{archivedCount}</span>
           </button>
         )}
+        <button
+          type="button"
+          onClick={openCoordinator}
+          className="hidden h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground min-[520px]:inline-flex"
+          aria-label="Open coordinator"
+          title="Open coordinator"
+        >
+          <Bot className="h-3.5 w-3.5" />
+          <span className="hidden xl:inline">Coordinator</span>
+        </button>
         <ConnectionDot />
       </div>
     </header>
+  );
+}
+
+const workspaceModes: Array<{
+  id: WorkspaceMode;
+  label: string;
+  icon: typeof ListTree;
+}> = [
+  { id: "inbox", label: "Feed", icon: ListTree },
+  { id: "split", label: "Split", icon: PanelTop },
+  { id: "board", label: "Board", icon: Columns3 },
+];
+
+function WorkspaceModeControl({
+  value,
+  onChange,
+}: {
+  value: WorkspaceMode;
+  onChange: (mode: WorkspaceMode) => void;
+}) {
+  return (
+    <div
+      className="ml-3 flex shrink-0 items-center rounded-lg border border-border/70 bg-muted/40 p-0.5 sm:ml-5"
+      role="group"
+      aria-label="Workspace view"
+    >
+      {workspaceModes.map(({ id, label, icon: Icon }) => (
+        <button
+          key={id}
+          type="button"
+          aria-pressed={value === id}
+          aria-label={`${label} view`}
+          title={`${label} view`}
+          onClick={() => onChange(id)}
+          className={cn(
+            "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium transition-colors duration-150 active:scale-[0.97] motion-reduce:transform-none",
+            value === id
+              ? "bg-background text-foreground shadow-elevation-xs"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <Icon className="h-3.5 w-3.5" />
+          <span className="hidden lg:inline">{label}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -140,7 +230,7 @@ function WorkspaceChipBar({
   const showFade = isOverflowing && !isExpanded;
 
   return (
-    <div className="relative ml-6 flex min-w-0 flex-1 items-center">
+    <div className="relative ml-6 hidden min-w-0 flex-1 items-center min-[800px]:flex">
       <nav
         ref={navRef}
         aria-label="Filter by workspace"

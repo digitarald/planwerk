@@ -39,7 +39,7 @@ This is why Planwerk avoids the throughput-only trap that critics of pure factor
 
 **Gates are external and enforced.** The agent that wrote the code never grades its own work. A different reviewer — sometimes a different model — does the verification. Gates are system-enforced because agents optimizing for "done" will find the cheapest path to green if you let them.
 
-**Autonomous but accountable.** The orchestrator monitors, intervenes, and enforces — but logs every decision. Humans override with full audit trail.
+**Autonomy is an explicit grant.** The coordinator observes by default. Operators can grant verification authority or full coordination board-wide and override it per session. Every grant and autonomous action is visible and auditable.
 
 **Risk-proportional.** A typo fix gets auto-merged. A security change gets adversarial review, multiple reviewers, and human sign-off. Match effort to cost of being wrong.
 
@@ -55,7 +55,13 @@ This is why Planwerk avoids the throughput-only trap that critics of pure factor
 Define → Plan → Build → Review → Ship
 ```
 
-Each card is a live agent session. The orchestrator ("CTO agent") runs persistently — detecting stuck sessions, assigning risk levels, managing WIP, and escalating to humans only when judgment is needed.
+Each card is a live agent session. The coordinator runs persistently at one of three authority levels:
+
+- **Observe** labels risk and surfaces blockers without starting work or touching sessions.
+- **Verify** also runs configured checks and report-only independent reviews, but does not respond to or advance managed sessions.
+- **Coordinate** may interact with sessions and advance phases after the existing risk, gate, WIP, and approval policies allow it.
+
+Observe is the safe board default. Individual sessions may inherit that default or carry an explicit override. These levels govern unsolicited background autonomy only; a human can still answer input, request work, or initiate a gated phase move in any mode.
 
 **Quality gates** block every phase transition. Before leaving Build, deterministic checks (lint, test, typecheck, build) and an independent implementation reviewer establish correctness and architectural soundness with maker-checker separation. Failed implementation reviews feed back into Build — the agent fixes and re-attempts until pass or escalation.
 

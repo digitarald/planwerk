@@ -10,11 +10,15 @@ import {
   PendingInput,
   normalizeChangesetRef,
 } from "@/lib/types";
-import { loadConfig } from "./skill-config";
+import { loadConfig, type SkillConfig } from "./skill-config";
 import { getActiveReviewRuns, getLatestReviewRun, startReview, processReviewResult, getRequiredReviewSkills, isReviewResultReady, shouldStartReview } from "./review-executor";
 import { canAdvancePhase, setCardPhase, getNextPhase, startGateRun, getGateRunsForCard, completeGateRun, executeGateCommand } from "./gate-engine";
 import { isRetryableGateFailure } from "./gate-command";
-import { getAuthoritativeCardRisk } from "./risk-store";
+import {
+  getAuthoritativeCardRisk,
+  getAuthoritativeRiskSnapshot,
+  persistAuthoritativeRisk,
+} from "./risk-store";
 import { riskAutomationPolicy } from "./risk-authority";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
 import { answerInput, disposePeerChat, submitPlanFeedback } from "@/lib/ahp/session-messenger";
@@ -29,6 +33,15 @@ import {
   SerializedGenerationScheduler,
   type SchedulerGeneration,
 } from "./generation-scheduler";
+import {
+  coordinatorModeAllows,
+  coordinatorReviewPolicy,
+  type CoordinatorMode,
+} from "./coordinator-mode";
+import { getEffectiveCoordinatorMode } from "./coordinator-mode-store";
+import { isCardAutomationEligible } from "./automation-eligibility";
+import { assessRisk } from "./risk-assessor";
+import { reassessAndPersistRisk } from "./risk-reassessment";
 
 /**
  * Heartbeat action types emitted to the orchestrator feed.
@@ -49,11 +62,13 @@ export type HeartbeatAction =
   | { type: "plan-review-passed"; cardId: string }
   | { type: "plan-feedback-delivered"; cardId: string }
   | { type: "plan-review-failed"; cardId: string; reason: string }
+  | { type: "risk-assessed"; cardId: string; level: RiskLevel }
   | { type: "risk-assessment-required"; cardId: string; reason: string }
   | { type: "source-revision-required"; cardId: string; reason: string }
   | { type: "coherence-conflict"; cardId: string; otherCardId: string; summary: string }
   | { type: "coherence-cleared"; cardId: string; otherCardId: string }
-  | { type: "coherence-blocked"; cardId: string; reason: string };
+  | { type: "coherence-blocked"; cardId: string; reason: string }
+  | { type: "wip-cleared"; phase: Phase };
 
 export interface HeartbeatTickResult {
   actions: HeartbeatAction[];
@@ -265,16 +280,27 @@ async function runTick(
   // skipped, but a brand-new session's plan-approval (and other input requests)
   // can appear while planwerk still has the card in `define`, so include
   // define cards that are waiting on input.
-  const activeCards = cards.filter(
-    (c) =>
-      !c.isArchived &&
-      c.phase !== "ship" &&
-      (c.phase !== "define" || c.runtime === "input-needed")
-  );
+  const activeCards = cards
+    .filter(isCardAutomationEligible)
+    .filter((card) => {
+      if (card.phase === "define") return card.runtime === "input-needed";
+      return resolveAuthoritativeGateRevision(
+        getDb(),
+        card.id,
+        card.phase,
+        hostUrl,
+      ).ok;
+    });
 
   for (const card of activeCards) {
     try {
-      const cardActions = await processCard(hostUrl, card, config, cards, state);
+      const cardActions = await processCard(
+        hostUrl,
+        card,
+        config,
+        activeCards,
+        state,
+      );
       actions.push(...cardActions);
     } catch (err) {
       const msg = `${card.id}: ${err instanceof Error ? err.message : String(err)}`;
@@ -309,7 +335,7 @@ async function runTick(
     }
   }
 
-  // WIP violation detection (board-level, only emit on state change)
+  // WIP violation detection (board-level, emitted on threshold crossings)
   const wipLimits = config.wipLimits;
   const phaseCount: Record<string, number> = {};
   for (const card of activeCards) {
@@ -318,13 +344,21 @@ async function runTick(
   for (const [phase, limit] of Object.entries(wipLimits)) {
     const count = phaseCount[phase] ?? 0;
     const lastCount = state.lastWipViolations.get(phase);
-    if (count > limit && lastCount !== count) {
+    if (count > limit && lastCount === undefined) {
       state.lastWipViolations.set(phase, count);
       const action: HeartbeatAction = { type: "wip-violation", phase: phase as Phase, count, limit };
       emit(hostUrl, action);
       actions.push(action);
-    } else if (count <= limit) {
+    } else if (count > limit) {
+      state.lastWipViolations.set(phase, count);
+    } else if (count <= limit && lastCount !== undefined) {
       state.lastWipViolations.delete(phase);
+      const action: HeartbeatAction = {
+        type: "wip-cleared",
+        phase: phase as Phase,
+      };
+      emit(hostUrl, action);
+      actions.push(action);
     }
   }
 
@@ -332,7 +366,16 @@ async function runTick(
   // run here; the LLM review is kicked fire-and-forget so it never blocks the tick.
   if (config.coherence.enabled) {
     try {
-      const escalatable = syncCoherence(cards, config.coherence);
+      const escalatable = syncCoherence(activeCards, config.coherence).filter((row) =>
+        coordinatorModeAllows(
+          getEffectiveCoordinatorMode(hostUrl, row.cardA),
+          "verify",
+        ) &&
+        coordinatorModeAllows(
+          getEffectiveCoordinatorMode(hostUrl, row.cardB),
+          "verify",
+        )
+      );
       if (escalatable.length > 0) {
         const ctxById = buildCoherenceCtx(cards);
         // Fire-and-forget: reviewer runs off-tick; verdicts are emitted when ready.
@@ -417,6 +460,91 @@ function kickReviewJudgment(
   );
 }
 
+function reviewSkillForMode<T extends { autoFix: boolean }>(
+  skill: T,
+  coordinatorMode: CoordinatorMode,
+): T {
+  return coordinatorReviewPolicy(coordinatorMode).allowEdits
+    ? skill
+    : { ...skill, autoFix: false };
+}
+
+function reviewDispatchOptions(
+  coordinatorMode: CoordinatorMode,
+  pendingRequestId?: string,
+): {
+  independent: boolean;
+  pendingRequestId?: string;
+} {
+  return {
+    independent: coordinatorReviewPolicy(coordinatorMode).independent,
+    ...(pendingRequestId ? { pendingRequestId } : {}),
+  };
+}
+
+function startReviewForMode(
+  hostUrl: string,
+  sessionUri: string,
+  cardId: string,
+  skill: SkillConfig,
+  transition: string,
+  riskLevel: RiskLevel,
+  changesetRef: string | undefined,
+  coordinatorMode: CoordinatorMode,
+  pendingRequestId?: string,
+) {
+  return startReview(
+    hostUrl,
+    sessionUri,
+    cardId,
+    reviewSkillForMode(skill, coordinatorMode),
+    transition,
+    riskLevel,
+    changesetRef,
+    reviewDispatchOptions(coordinatorMode, pendingRequestId),
+  );
+}
+
+async function completeReadyReviewsAfterDowngrade(
+  hostUrl: string,
+  card: KanbanCard,
+  changesetRef: string | undefined,
+): Promise<HeartbeatAction[]> {
+  const actions: HeartbeatAction[] = [];
+  const activeReviews = getActiveReviewRuns(card.id).filter(
+    (review) =>
+      review.status === "injected" || review.status === "extracting",
+  );
+  for (const review of activeReviews) {
+    if (!(await isReviewResultReady(hostUrl, review))) continue;
+    const verdict = await processReviewResult(
+      hostUrl,
+      card.id,
+      review.id,
+      changesetRef,
+      card.workingDirectory,
+    );
+    if (verdict?.action === "passed") {
+      const action: HeartbeatAction = {
+        type: "review-passed",
+        cardId: card.id,
+        skillId: review.skillId,
+      };
+      emit(hostUrl, action);
+      actions.push(action);
+    } else if (verdict?.action === "escalated") {
+      const action: HeartbeatAction = {
+        type: "escalated",
+        cardId: card.id,
+        reason: verdict.summary,
+      };
+      emit(hostUrl, action);
+      actions.push(action);
+    }
+  }
+  return actions;
+}
+
 async function processCard(
   hostUrl: string,
   card: KanbanCard,
@@ -425,7 +553,37 @@ async function processCard(
   state: HeartbeatState,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
-  const authoritativeRisk = getAuthoritativeCardRisk(card.id, hostUrl);
+  const coordinatorMode = getEffectiveCoordinatorMode(hostUrl, card.id);
+  const mayVerify = coordinatorModeAllows(coordinatorMode, "verify");
+  const mayInteract = coordinatorModeAllows(coordinatorMode, "interact");
+  let authoritativeRisk = getAuthoritativeCardRisk(card.id, hostUrl);
+  let riskAssessmentError: string | null = null;
+  if (authoritativeRisk.status !== "current") {
+    const snapshot = getAuthoritativeRiskSnapshot(hostUrl, card.id);
+    if (snapshot) {
+      try {
+        const assessment = await reassessAndPersistRisk(
+          card.id,
+          snapshot,
+          assessRisk,
+          persistAuthoritativeRisk,
+        );
+        authoritativeRisk = getAuthoritativeCardRisk(card.id, hostUrl);
+        if (authoritativeRisk.status === "current") {
+          const action: HeartbeatAction = {
+            type: "risk-assessed",
+            cardId: card.id,
+            level: assessment.level,
+          };
+          emit(hostUrl, action);
+          actions.push(action);
+        }
+      } catch (error) {
+        riskAssessmentError =
+          error instanceof Error ? error.message : String(error);
+      }
+    }
+  }
   const riskPolicy = riskAutomationPolicy(authoritativeRisk);
   if (!riskPolicy.current || authoritativeRisk.status !== "current") {
     const blockerKey = [
@@ -440,7 +598,9 @@ async function processCard(
       const action: HeartbeatAction = {
         type: "risk-assessment-required",
         cardId: card.id,
-        reason: `${riskPolicy.reason} Reassess risk before automation can continue.`,
+        reason: riskAssessmentError
+          ? `Automatic risk assessment failed: ${riskAssessmentError}. Automation will retry.`
+          : `${riskPolicy.reason} Automation will retry when authoritative facts are available.`,
       };
       emit(hostUrl, action);
       actions.push(action);
@@ -453,16 +613,7 @@ async function processCard(
     ? resolveAuthoritativeGateRevision(getDb(), card.id, card.phase, hostUrl)
     : null;
   if (revision && !revision.ok) {
-    if (state.revisionBlockers.get(card.id) !== revision.reason) {
-      state.revisionBlockers.set(card.id, revision.reason);
-      const action: HeartbeatAction = {
-        type: "source-revision-required",
-        cardId: card.id,
-        reason: `${revision.reason}; automation is blocked until current facts are available.`,
-      };
-      emit(hostUrl, action);
-      actions.push(action);
-    }
+    state.revisionBlockers.set(card.id, revision.reason);
     return actions;
   }
   state.revisionBlockers.delete(card.id);
@@ -470,11 +621,21 @@ async function processCard(
     ? revision.changesetRef
     : undefined;
 
+  if (!mayVerify) {
+    actions.push(
+      ...(await completeReadyReviewsAfterDowngrade(
+        hostUrl,
+        card,
+        authoritativeChangesetRef,
+      )),
+    );
+  }
+
   // Only process idle cards — running cards are doing work
   if (card.runtime !== "idle") {
     if (card.runtime === "input-needed") {
       const planApproval = detectPlanApproval(card.pendingInput);
-      if (planApproval) {
+      if (planApproval && mayVerify) {
         // Plan-approval inputs are handled by the plan-approval pipeline:
         // auto-approve low risk, force a rubber-duck on un-reviewed medium+ plans.
         const planActions = await runPlanApprovalPipeline(
@@ -487,9 +648,10 @@ async function processCard(
           authoritativeChangesetRef!,
           authoritativeRisk.currentDigest,
           state,
+          coordinatorMode,
         );
         actions.push(...planActions);
-      } else if (shouldAutoAnswer(hostUrl, card)) {
+      } else if (mayInteract && shouldAutoAnswer(hostUrl, card)) {
         // Regular clarifying question — auto-answer below the risk threshold.
         const result = await autoAnswer(hostUrl, card);
         if (result.answered) {
@@ -498,7 +660,11 @@ async function processCard(
           actions.push(action);
         }
       }
-    } else if (card.runtime === "running" && card.phase === "plan") {
+    } else if (
+      mayVerify &&
+      card.runtime === "running" &&
+      card.phase === "plan"
+    ) {
       // Opt-in: a plan card that's been heads-down coding never idles, so the
       // idle-only plan-review gate would never run. When enabled, inject it via
       // a queued message so the gate still grades before any advance. Key on the
@@ -510,6 +676,7 @@ async function processCard(
         authoritativeChangesetRef,
         config,
         state,
+        coordinatorMode,
       );
       actions.push(...busyActions);
     }
@@ -518,7 +685,7 @@ async function processCard(
 
   const phase = card.phase;
   // Build phase pipeline: deterministic gates → review skills → auto-advance
-  if (phase === "build") {
+  if (phase === "build" && mayVerify) {
     const buildActions = await runBuildPipeline(
       hostUrl,
       card,
@@ -527,18 +694,26 @@ async function processCard(
       config,
       allCards,
       state,
+      coordinatorMode,
     );
     actions.push(...buildActions);
   }
 
   // Plan phase: check for plan review gates
-  if (phase === "plan") {
-    const planActions = await runPlanPipeline(hostUrl, card, riskLevel, authoritativeChangesetRef, allCards);
+  if (phase === "plan" && mayVerify) {
+    const planActions = await runPlanPipeline(
+      hostUrl,
+      card,
+      riskLevel,
+      authoritativeChangesetRef,
+      allCards,
+      coordinatorMode,
+    );
     actions.push(...planActions);
   }
 
   // Review phase: check for review skills
-  if (phase === "review") {
+  if (phase === "review" && mayVerify) {
     const reviewActions = await runReviewPipeline(
       hostUrl,
       card,
@@ -546,6 +721,7 @@ async function processCard(
       authoritativeChangesetRef,
       allCards,
       state,
+      coordinatorMode,
     );
     actions.push(...reviewActions);
   }
@@ -553,7 +729,11 @@ async function processCard(
   // Check for stuck sessions (beyond stale threshold)
   const staleThresholdMs = config.orchestrator.staleThreshold;
   const stuckSince = state.stuckSince.get(card.id);
-  if (stuckSince && Date.now() - stuckSince > staleThresholdMs) {
+  if (
+    mayInteract &&
+    stuckSince &&
+    Date.now() - stuckSince > staleThresholdMs
+  ) {
     const nudges = state.nudgeCount.get(card.id) ?? 0;
     if (nudges < 3) {
       const msg = buildNudgeMessage(card, nudges);
@@ -581,9 +761,11 @@ async function startPendingReviews(
   card: KanbanCard,
   transition: string,
   riskLevel: RiskLevel,
-  changesetRef?: string
+  changesetRef: string | undefined,
+  coordinatorMode: CoordinatorMode,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
+  if (!coordinatorModeAllows(coordinatorMode, "verify")) return actions;
   const skills = getRequiredReviewSkills(
     transition,
     riskLevel,
@@ -592,14 +774,15 @@ async function startPendingReviews(
     (skill) => shouldStartReview(card.id, skill.id, transition, changesetRef)
   );
   for (const skill of skills) {
-    const { success } = await startReview(
+    const { success } = await startReviewForMode(
       hostUrl,
       card.id,
       card.id,
       skill,
       transition,
       riskLevel,
-      changesetRef
+      changesetRef,
+      coordinatorMode,
     );
     if (success) {
       const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: 1 };
@@ -621,6 +804,7 @@ async function runBuildPipeline(
   config: ReturnType<typeof loadConfig>,
   allCards: KanbanCard[],
   state: HeartbeatState,
+  coordinatorMode: CoordinatorMode,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
   const transition = "build->review";
@@ -733,7 +917,14 @@ async function runBuildPipeline(
     const activeReviews = getActiveReviewRuns(card.id);
     if (activeReviews.length === 0) {
       // No active reviews — start any that aren't parked on a human escalation.
-      actions.push(...(await startPendingReviews(hostUrl, card, transition, riskLevel, changesetRef)));
+      actions.push(...(await startPendingReviews(
+        hostUrl,
+        card,
+        transition,
+        riskLevel,
+        changesetRef,
+        coordinatorMode,
+      )));
     } else {
       // Active reviews exist — handle based on status
       for (const review of activeReviews) {
@@ -755,14 +946,15 @@ async function runBuildPipeline(
           const skill = skills.find((s) => s.id === review.skillId);
           if (skill) {
             const sessionUri = card.id;
-            const { success } = await startReview(
+            const { success } = await startReviewForMode(
               hostUrl,
               sessionUri,
               card.id,
               skill,
               transition,
               riskLevel,
-              changesetRef
+              changesetRef,
+              coordinatorMode,
             );
             if (success) {
               const action: HeartbeatAction = {
@@ -782,7 +974,11 @@ async function runBuildPipeline(
   }
 
   // Step 3: All gates pass (including reviews) → auto-advance
-  if (gatesPassed && config.orchestrator.autoAdvancePhases) {
+  if (
+    gatesPassed &&
+    config.orchestrator.autoAdvancePhases &&
+    coordinatorModeAllows(coordinatorMode, "advance")
+  ) {
     const nextPhase = getNextPhase("build");
     if (nextPhase && canEnterPhase(nextPhase, allCards, config)) {
       state.pipelineStage.set(card.id, "advancing");
@@ -896,6 +1092,7 @@ async function runPlanApprovalPipeline(
   changesetRef: string,
   riskDigest: string,
   state: HeartbeatState,
+  coordinatorMode: CoordinatorMode,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
 
@@ -989,7 +1186,12 @@ async function runPlanApprovalPipeline(
     planRef,
   );
   if (allowed) {
-    if (policy.autoApprovePlan) await approvePlan();
+    if (
+      policy.autoApprovePlan &&
+      coordinatorModeAllows(coordinatorMode, "interact")
+    ) {
+      await approvePlan();
+    }
     return actions;
   }
 
@@ -1046,7 +1248,7 @@ async function runPlanApprovalPipeline(
     if (!config.orchestrator.autoInjectReviews) continue;
     if (!riskStillCurrent()) return actions;
 
-    const { success } = await startReview(
+    const { success } = await startReviewForMode(
       hostUrl,
       card.id,
       card.id,
@@ -1054,7 +1256,8 @@ async function runPlanApprovalPipeline(
       transition,
       riskLevel,
       planRef,
-      { pendingRequestId: input.requestId },
+      coordinatorMode,
+      input.requestId,
     );
     if (success) {
       const action: HeartbeatAction = {
@@ -1101,7 +1304,12 @@ async function runPlanApprovalPipeline(
       emit(hostUrl, action);
       actions.push(action);
     }
-    if (policy.autoApprovePlan) await approvePlan();
+    if (
+      policy.autoApprovePlan &&
+      coordinatorModeAllows(coordinatorMode, "interact")
+    ) {
+      await approvePlan();
+    }
     return actions;
   }
 
@@ -1116,6 +1324,8 @@ async function runPlanApprovalPipeline(
     }];
   });
   if (blocking.length === 0) return actions;
+
+  if (!coordinatorModeAllows(coordinatorMode, "interact")) return actions;
 
   const feedback = formatPlanGateFeedback(blocking);
   let result = await submitPlanFeedback(
@@ -1169,6 +1379,7 @@ async function maybeInjectBusyPlanReview(
   changesetRef: string | undefined,
   config: ReturnType<typeof loadConfig>,
   state: HeartbeatState,
+  coordinatorMode: CoordinatorMode,
 ): Promise<HeartbeatAction[]> {
   if (!config.orchestrator.injectReviewsWhileBusy) return [];
   if (!config.orchestrator.autoInjectReviews) return [];
@@ -1200,7 +1411,14 @@ async function maybeInjectBusyPlanReview(
 
   // startPendingReviews de-dups per changeset via shouldStartReview and emits
   // review-injected actions for anything it starts.
-  return startPendingReviews(hostUrl, card, "plan->build", riskLevel, changesetRef);
+  return startPendingReviews(
+    hostUrl,
+    card,
+    "plan->build",
+    riskLevel,
+    changesetRef,
+    coordinatorMode,
+  );
 }
 
 /**
@@ -1211,7 +1429,8 @@ async function runPlanPipeline(
   card: KanbanCard,
   riskLevel: RiskLevel,
   changesetRef: string | undefined,
-  allCards: KanbanCard[]
+  allCards: KanbanCard[],
+  coordinatorMode: CoordinatorMode,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
   const config = loadConfig(card.workingDirectory);
@@ -1227,7 +1446,11 @@ async function runPlanPipeline(
   );
 
   if (allowed) {
-    if (config.orchestrator.autoAdvancePhases && canEnterPhase("build", allCards, config)) {
+    if (
+      config.orchestrator.autoAdvancePhases &&
+      coordinatorModeAllows(coordinatorMode, "advance") &&
+      canEnterPhase("build", allCards, config)
+    ) {
       setCardPhase(card.id, "build");
       const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "plan", to: "build" };
       emit(hostUrl, action);
@@ -1242,7 +1465,14 @@ async function runPlanPipeline(
     const activeReviews = getActiveReviewRuns(card.id);
     if (activeReviews.length === 0) {
       // No active reviews — start any that aren't parked on a human escalation.
-      actions.push(...(await startPendingReviews(hostUrl, card, transition, riskLevel, changesetRef)));
+      actions.push(...(await startPendingReviews(
+        hostUrl,
+        card,
+        transition,
+        riskLevel,
+        changesetRef,
+        coordinatorMode,
+      )));
     } else {
       // Process active reviews (verdict extraction, re-iteration, escalation)
       for (const review of activeReviews) {
@@ -1263,7 +1493,16 @@ async function runPlanPipeline(
           const skill = skills.find((s) => s.id === review.skillId);
           if (skill) {
             const sessionUri = card.id;
-            const { success } = await startReview(hostUrl, sessionUri, card.id, skill, transition, riskLevel, changesetRef);
+            const { success } = await startReviewForMode(
+              hostUrl,
+              sessionUri,
+              card.id,
+              skill,
+              transition,
+              riskLevel,
+              changesetRef,
+              coordinatorMode,
+            );
             if (success) {
               const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: review.iteration + 1 };
               emit(hostUrl, action);
@@ -1284,6 +1523,7 @@ async function runReviewPipeline(
   changesetRef: string | undefined,
   allCards: KanbanCard[],
   state: HeartbeatState,
+  coordinatorMode: CoordinatorMode,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
   const config = loadConfig(card.workingDirectory);
@@ -1326,7 +1566,11 @@ async function runReviewPipeline(
     actions.push(action);
   }
   if (allowed) {
-    if (config.orchestrator.autoAdvancePhases && canEnterPhase("ship", allCards, config)) {
+    if (
+      config.orchestrator.autoAdvancePhases &&
+      coordinatorModeAllows(coordinatorMode, "advance") &&
+      canEnterPhase("ship", allCards, config)
+    ) {
       const { advanced, blockedBy } = advanceReviewToShip(card.id, config.coherence);
       if (advanced) {
         state.coherenceBlocked.delete(card.id);
@@ -1355,7 +1599,14 @@ async function runReviewPipeline(
     const activeReviews = getActiveReviewRuns(card.id);
     if (activeReviews.length === 0) {
       // No active reviews — start any that aren't parked on a human escalation.
-      actions.push(...(await startPendingReviews(hostUrl, card, transition, riskLevel, changesetRef)));
+      actions.push(...(await startPendingReviews(
+        hostUrl,
+        card,
+        transition,
+        riskLevel,
+        changesetRef,
+        coordinatorMode,
+      )));
     } else {
       // Process active reviews (verdict extraction, re-iteration, escalation)
       for (const review of activeReviews) {
@@ -1376,7 +1627,16 @@ async function runReviewPipeline(
           const skill = skills.find((s) => s.id === review.skillId);
           if (skill) {
             const sessionUri = card.id;
-            const { success } = await startReview(hostUrl, sessionUri, card.id, skill, transition, riskLevel, changesetRef);
+            const { success } = await startReviewForMode(
+              hostUrl,
+              sessionUri,
+              card.id,
+              skill,
+              transition,
+              riskLevel,
+              changesetRef,
+              coordinatorMode,
+            );
             if (success) {
               const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: review.iteration + 1 };
               emit(hostUrl, action);

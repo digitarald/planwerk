@@ -3,7 +3,6 @@
 import { DragDropContext, type DropResult } from "@hello-pangea/dnd";
 import { Archive, MonitorCheck } from "lucide-react";
 
-import { CardDetailModal } from "@/components/board/card-detail-modal";
 import { KanbanColumn } from "@/components/board/kanban-column";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import { useBoardStore } from "@/lib/store/board-store";
@@ -105,15 +104,6 @@ export function KanbanBoard() {
   const reconcileCard = useBoardStore((state) => state.reconcileCard);
   const addFeedItem = useOrchestratorStore((state) => state.addFeedItem);
   const diagnostics = useConnectionStore((state) => state.diagnostics);
-
-  // Subscribe to the actual card object (not just its id) so the open detail
-  // modal re-renders when live SSE updates mutate the card — e.g. a sent
-  // message starts a new turn and the runtime/activity/last response change.
-  const detailCard = useBoardStore((state) =>
-    state.detailCardId
-      ? state.cards.find((c) => c.id === state.detailCardId)
-      : undefined
-  );
 
   const handleDragEnd = (result: DropResult) => {
     if (!result.destination) return;
@@ -223,8 +213,6 @@ export function KanbanBoard() {
           ))}
         </div>
       </DragDropContext>
-
-      {detailCard && <CardDetailModal key={detailCard.id} card={detailCard} />}
     </div>
   );
 }

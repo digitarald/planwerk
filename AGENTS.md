@@ -16,7 +16,7 @@ Keep these invariants in mind for every change:
 
 - **Phase ≠ runtime status.** SDLC phase is persisted by Planwerk (SQLite); AHP runtime status (`idle`/`running`/`input-needed`/`error`) only updates card *facts*. Never let runtime status move a card between columns.
 - **Gates are external and enforced.** The agent that wrote the code never grades its own work — a different reviewer (sometimes a different model) verifies. Only the gate engine transitions phase forward.
-- **Autonomous but accountable.** The orchestrator ("CTO agent") monitors and intervenes, but every decision is logged for human override.
+- **Autonomy is explicit and server-enforced.** The coordinator observes by default; Verify may run report-only checks/reviews, and only Coordinate may interact with sessions or advance phases. Board defaults and per-session overrides are persisted and audited.
 - **Local Node.js app**, not serverless: long-lived AHP WebSocket, persistent orchestrator heartbeat, `better-sqlite3`. Next.js is just the UI layer.
 
 Deeper context lives in `zettelkasten/vision.md` and `zettelkasten/architecture-and-design.md`.

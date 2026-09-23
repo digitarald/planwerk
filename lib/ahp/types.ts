@@ -61,5 +61,10 @@ export function shouldShowSession(status: number, changesFiles?: number): boolea
 
 export type AHPEvent =
   | { type: "sessionAdded"; session: AHPSessionSummary }
-  | { type: "sessionRemoved"; resource: string }
+  | {
+      type: "sessionRemoved";
+      resource: string;
+      session?: AHPSessionSummary;
+      reason?: "removed" | "archived";
+    }
   | { type: "sessionSummaryChanged"; session: AHPSessionSummary };

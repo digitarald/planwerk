@@ -22,6 +22,10 @@ import {
 
 import { PendingInputCard } from "./pending-input-card";
 import {
+  CoordinatorModeContextMenu,
+  CoordinatorOverrideMarker,
+} from "@/components/orchestrator/coordinator-mode-control";
+import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -430,12 +434,17 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                       </span>
                     </>
                   )}
+                  <CoordinatorOverrideMarker cardId={card.id} />
                 </div>
               </div>
             </div>
 
             </ContextMenuTrigger>
             <ContextMenuContent>
+              <CoordinatorModeContextMenu
+                cardId={card.id}
+                cardTitle={card.title}
+              />
               {card.isArchived ? (
                 <ContextMenuItem
                   disabled={!hostUrl}

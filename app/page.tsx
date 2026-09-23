@@ -1,7 +1,7 @@
 "use client";
 
 import { AppShell } from "@/components/app-shell";
-import { KanbanBoard } from "@/components/board/kanban-board";
+import { AgentWorkspace } from "@/components/agent-workspace";
 import { CommandPalette } from "@/components/command-palette";
 import { Onboarding } from "@/components/connection/onboarding";
 import { LiveSessionProvider } from "@/components/live-session-provider";
@@ -24,7 +24,7 @@ export default function Home() {
     <NotificationProvider>
       <LiveSessionProvider>
         <AppShell>
-          {status === "reconnecting" ? <Onboarding /> : <KanbanBoard />}
+          {status === "reconnecting" ? <Onboarding /> : <AgentWorkspace />}
           {status === "connected" && (
             <>
               <CommandPalette />

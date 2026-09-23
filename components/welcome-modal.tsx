@@ -2,16 +2,11 @@
 
 import { useEffect } from "react";
 import {
-  ChevronRight,
   ArrowRight,
-  ClipboardList,
-  Hammer,
-  Lightbulb,
+  Columns3,
+  Inbox,
   Radio,
-  Rocket,
-  Search,
   ShieldCheck,
-  Sparkles,
   UserCheck,
 } from "lucide-react";
 
@@ -28,18 +23,12 @@ import { useUIStore } from "@/lib/store/ui-store";
 
 const WELCOME_SEEN_KEY = "planwerk:welcome-seen";
 
-const PHASES = [
-  { icon: Lightbulb, label: "Define", color: "var(--chart-1)" },
-  { icon: ClipboardList, label: "Plan", color: "var(--chart-3)" },
-  { icon: Hammer, label: "Build", color: "var(--chart-5)" },
-  { icon: Search, label: "Review", color: "var(--chart-4)" },
-  { icon: Rocket, label: "Ship", color: "var(--chart-2)" },
-];
+const PHASES = ["Define", "Plan", "Build", "Review", "Ship"];
 
 const PRINCIPLES = [
-  { icon: ShieldCheck, label: "Gates enforced" },
-  { icon: Radio, label: "Orchestrator on watch" },
-  { icon: UserCheck, label: "You approve" },
+  { icon: ShieldCheck, label: "Gates verify" },
+  { icon: Radio, label: "Coordinator observes" },
+  { icon: UserCheck, label: "You decide" },
 ];
 
 export function WelcomeModal() {
@@ -63,52 +52,60 @@ export function WelcomeModal() {
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-lg gap-0 overflow-hidden p-0">
-        <DialogHeader className="items-center gap-1.5 px-6 pt-7 pb-1 text-center">
-          <span className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.18em] text-primary">
-            <Sparkles className="h-3.5 w-3.5" />
+      <DialogContent className="max-h-[calc(100dvh-1rem)] gap-0 overflow-y-auto overscroll-contain p-0 sm:max-w-lg">
+        <DialogHeader className="items-start gap-2 px-6 pb-1 pt-7 text-left">
+          <span className="flex items-center gap-1.5 text-xs font-medium text-primary">
+            <Inbox className="h-3.5 w-3.5" />
             Welcome to Planwerk
           </span>
-          <DialogTitle className="text-xl leading-tight">
-            A kanban board for your AI agents
+          <DialogTitle className="max-w-sm text-pretty text-xl leading-tight">
+            See what needs you.
           </DialogTitle>
+          <p className="max-w-[54ch] text-sm leading-5 text-muted-foreground">
+            Planwerk puts decisions, reviews, and finished work in one queue.
+            The board tracks everything else.
+          </p>
         </DialogHeader>
 
-        {/* The concept, shown not told: a card flows left to right through phases */}
-        <div className="px-6 pt-5">
-          <ol className="flex items-start justify-between">
-            {PHASES.map(({ icon: Icon, label, color }, i) => (
-              <li key={label} className="contents">
-                <div className="flex flex-1 flex-col items-center gap-2">
-                  <span
-                    className="flex h-12 w-12 items-center justify-center rounded-2xl border"
-                    style={{
-                      color,
-                      backgroundColor: `color-mix(in oklch, ${color} 12%, transparent)`,
-                      borderColor: `color-mix(in oklch, ${color} 28%, transparent)`,
-                    }}
+        <div className="mt-5 border-y border-border/70 px-6">
+          <section className="flex gap-3 py-4">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Inbox className="h-4 w-4" />
+            </span>
+            <div>
+              <h3 className="text-sm font-semibold">Work the queue</h3>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                Open the next item, act, and move on. Plans and review notes
+                stay one click away.
+              </p>
+            </div>
+          </section>
+
+          <section className="flex gap-3 border-t border-border/70 py-4">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+              <Columns3 className="h-4 w-4" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-sm font-semibold">Track progress</h3>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                The board shows where work is. Gates, not runtime status, move
+                cards forward.
+              </p>
+              <ol className="mt-3 flex min-w-0 gap-1" aria-label="Delivery phases">
+                {PHASES.map((phase) => (
+                  <li
+                    key={phase}
+                    className="min-w-0 flex-1 rounded border border-border/70 bg-muted/45 px-1 py-1 text-center text-[10px] font-medium text-muted-foreground"
                   >
-                    <Icon className="h-5 w-5" />
-                  </span>
-                  <span className="text-xs font-medium">{label}</span>
-                </div>
-                {i < PHASES.length - 1 && (
-                  <ChevronRight
-                    aria-hidden
-                    className="mt-3.5 h-4 w-4 shrink-0 text-muted-foreground/40"
-                  />
-                )}
-              </li>
-            ))}
-          </ol>
-          <p className="mt-4 text-center text-sm text-muted-foreground">
-            Every agent session is a card that flows through these phases. Nothing
-            advances until the work is verified.
-          </p>
+                    <span className="block truncate">{phase}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          </section>
         </div>
 
-        {/* Principles as compact chips, not paragraphs */}
-        <div className="mt-5 flex flex-wrap justify-center gap-2 px-6">
+        <div className="mt-5 flex flex-wrap gap-2 px-6">
           {PRINCIPLES.map(({ icon: Icon, label }) => (
             <span
               key={label}

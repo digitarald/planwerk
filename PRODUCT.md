@@ -20,12 +20,14 @@ control, and dense-but-legible information matter more than hand-holding.
 
 ## Product Purpose
 
-Planwerk is the management surface for the agentic SDLC. Each AI agent session is
-a card flowing through `Define → Plan → Build → Review → Ship`. External,
+Planwerk is the management surface for the agentic SDLC. Its inbox ranks the
+decisions, reviews, and completed work that deserve a human next; its board shows
+each AI agent session flowing through `Define → Plan → Build → Review → Ship`. External,
 system-enforced quality gates block every phase transition, and a persistent
-orchestrator ("CTO agent") manages the work autonomously — detecting stuck
-sessions, assigning risk, managing WIP, and escalating to a human only when
-judgment is needed. It manages the AI execution layer between "task defined" and
+coordinator works at an operator-selected authority level: Observe labels risk
+and surfaces blockers, Verify adds checks and independent reviews, and Coordinate
+may interact with sessions and advance gated work. Observe is the board default,
+with explicit per-session overrides. It manages the AI execution layer between "task defined" and
 "PR merged," integrating with GitHub Issues, Projects, and PRs rather than
 replacing them.
 
@@ -61,12 +63,19 @@ precision, and never making the operator hunt for what changed.
   status (`idle` / `running` / `input-needed` / `error`) are different axes and
   must stay visually distinct. Never let a running indicator read as a column
   move, or vice versa.
-- **Attention over noise.** The board surfaces what needs a human and keeps
-  everything else quiet. Escalations, blockers, and input-needed states earn
-  emphasis; healthy autonomous progress recedes.
-- **Accountable by default.** Every autonomous action the orchestrator takes is
-  legible and overridable, with a visible audit trail. Trust comes from being
-  able to see and reverse a decision, not from hiding it.
+- **Attention over noise.** The inbox is a durable human-handoff queue, not a
+  notification feed. It separates unread from unresolved and uses a
+  revision-bound Chief of Staff pass to author the most useful framing for each
+  handoff: outcome, decision, risk, unblocker, recommendation, or no-action
+  update. The note is free-form rather than a filled template; only its
+  attention level and executable controls are structured. Source facts remain
+  available on demand, and a clearly identified source-note fallback is used
+  when synthesis is unavailable. The board remains the progress map; healthy
+  autonomous work recedes in both.
+- **Autonomy is granted, accountability is constant.** The coordinator observes by
+  default; verification and session-changing authority are explicit operator choices.
+  Every grant and autonomous action is legible and auditable. Trust comes from seeing
+  the boundary, the reason, and the result rather than hiding the machinery.
 - **Native to the developer's environment.** Fast, keyboard-first, VS Code-fluent.
   It should feel like the operator never left their tooling.
 

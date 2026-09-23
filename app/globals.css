@@ -30,6 +30,7 @@
   --color-destructive: var(--destructive);
   --color-pw-success: var(--pw-success);
   --color-pw-warning: var(--pw-warning);
+  --color-pw-warning-foreground: var(--pw-warning-foreground);
   --color-pw-info: var(--pw-info);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
@@ -104,6 +105,7 @@
   /* Planwerk-specific — VS Code 2026 Light */
   --pw-success: oklch(0.539 0.136 127.5);
   --pw-warning: oklch(0.68 0.139 93);
+  --pw-warning-foreground: oklch(0.38 0.084 82);
   --pw-info: oklch(0.529 0.174 254.9);
 
   /* Elevation shadows — oklch-tinted for warmth */
@@ -159,6 +161,7 @@
   /* Planwerk-specific — VS Code 2026 Dark */
   --pw-success: oklch(0.767 0.117 154.1);
   --pw-warning: oklch(0.74 0.152 92.8);
+  --pw-warning-foreground: oklch(0.86 0.09 92.8);
   --pw-info: oklch(0.63 0.103 230.9);
   --pw-board-bg: oklch(0.186 0.003 248);
   --pw-column-bg: oklch(0.217 0.002 247.9 / 0.4);
@@ -193,6 +196,7 @@
   .scrollbar-thin {
     scrollbar-width: thin;
   }
+
   .scrollbar-none {
     scrollbar-width: none;
     &::-webkit-scrollbar {

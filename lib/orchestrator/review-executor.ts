@@ -301,6 +301,7 @@ export async function startReview(
   changesetRef?: string,
   options?: {
     pendingRequestId?: string;
+    independent?: boolean;
     signal?: AbortSignal;
   },
 ): Promise<{
@@ -426,11 +427,13 @@ export async function startReview(
         );
       }
     };
-    const injection = options?.pendingRequestId
+    const usePeerChat =
+      options?.independent === true || Boolean(options?.pendingRequestId);
+    const injection = usePeerChat
       ? await startPeerChatReview(
           hostUrl,
           sessionUri,
-          options.pendingRequestId,
+          options?.pendingRequestId,
           prompt,
           { signal, beforeDispatch },
         )
@@ -456,7 +459,7 @@ export async function startReview(
         ownerId: startOwnerId,
         turnId: persistedTurnId,
         chatUri: chatUri ?? null,
-        disposablePeerChat: Boolean(options?.pendingRequestId),
+        disposablePeerChat: usePeerChat,
       });
       if (finalized.state === "orphaned") {
         return {
