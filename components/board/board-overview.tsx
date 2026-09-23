@@ -148,15 +148,17 @@ export function BoardPhaseStrip() {
         return (
           <span
             key={column.id}
-            className="flex min-w-0 flex-1 items-center gap-1.5 border-l border-border/60 px-2 first:border-l-0"
+            className="flex min-w-0 flex-1 items-center justify-center gap-1.5 border-l border-border/60 px-2 first:border-l-0"
           >
             <span className="truncate text-[10px] font-medium text-muted-foreground">
               {column.title}
             </span>
             <span
               className={cn(
-                "ml-auto text-[10px] font-semibold tabular-nums",
-                needsAttention ? "text-amber-700 dark:text-amber-400" : "text-foreground/70",
+                "inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full px-1 text-[9px] font-semibold tabular-nums",
+                needsAttention
+                  ? "bg-amber-500/10 text-amber-700 dark:bg-amber-400/10 dark:text-amber-400"
+                  : "bg-background/80 text-foreground/65 ring-1 ring-border/50",
               )}
             >
               {phaseCards.length}
