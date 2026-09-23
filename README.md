@@ -48,6 +48,13 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) and connect to your Agent Host Protocol endpoint to start managing sessions.
 
+### Dev container
+
+With Docker and the VS Code Dev Containers extension installed, run
+**Dev Containers: Reopen in Container**. The container installs the exact Node.js
+and npm versions declared by the project, installs dependencies, and forwards
+Planwerk on [http://localhost:3000](http://localhost:3000).
+
 Development and test builds can reconnect once with a newer exact protocol
 version reported by a VS Code Insiders host. Production builds remain pinned
 to AHP 0.9.0.

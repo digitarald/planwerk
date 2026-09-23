@@ -1,0 +1,48 @@
+{
+  "name": "Planwerk",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/node:2": {
+      "version": "24.17.0",
+      "npmVersion": "11.13.0",
+      "nodeGypDependencies": true
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "init": true,
+  "mounts": [
+    "type=volume,target=${containerWorkspaceFolder}/node_modules"
+  ],
+  "containerEnv": {
+    "NEXT_TELEMETRY_DISABLED": "1"
+  },
+  "forwardPorts": [
+    3000
+  ],
+  "portsAttributes": {
+    "3000": {
+      "label": "Planwerk",
+      "protocol": "http",
+      "onAutoForward": "notify"
+    }
+  },
+  "otherPortsAttributes": {
+    "onAutoForward": "silent"
+  },
+  "postCreateCommand": "sudo chown vscode:vscode node_modules && npm ci",
+  "waitFor": "postCreateCommand",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "bradlc.vscode-tailwindcss",
+        "dbaeumer.vscode-eslint"
+      ],
+      "settings": {
+        "typescript.tsdk": "node_modules/typescript/lib",
+        "typescript.enablePromptUseWorkspaceTsdk": true
+      }
+    }
+  }
+}
