@@ -6,6 +6,7 @@ import Image from "next/image";
 import { Bot, Columns3, Eye, EyeOff, FolderOpen, ListTree, PanelTop } from "lucide-react";
 
 import { ConnectionDot } from "@/components/connection/connection-dot";
+import { TooltipHint } from "@/components/ui/tooltip";
 import {
   useBoardStore,
   selectWorkspaces,
@@ -62,16 +63,16 @@ export function TitleBar() {
         {attentionCount > 0 && topAttention !== "none" && (() => {
           const { Icon, pill, label } = ATTENTION_META[topAttention];
           return (
-            <span
+            <TooltipHint
+              label={`${attentionCount} ${attentionCount === 1 ? "session needs" : "sessions need"} attention. Highest severity: ${label}. Open the Feed to review.`}
               className={cn(
                 "inline-flex h-5 items-center gap-1 rounded-full px-1.5 text-[10px] font-bold tabular-nums shadow-elevation-xs min-[520px]:ml-1",
                 pill
               )}
-              title={`${attentionCount} ${attentionCount === 1 ? "session needs" : "sessions need"} attention (${label})`}
             >
               <Icon className="h-3 w-3" />
               {attentionCount}
-            </span>
+            </TooltipHint>
           );
         })()}
       </div>
@@ -267,7 +268,9 @@ function WorkspaceChipBar({
               )}
             >
               {w.hasAttention && (
-                <span className="h-1.5 w-1.5 rounded-full bg-amber-500 motion-safe:animate-pulse" />
+                <TooltipHint label={`${w.name} has sessions that need attention`}>
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-500 motion-safe:animate-pulse" />
+                </TooltipHint>
               )}
               <span className="max-w-[120px] truncate">{w.name}</span>
               <span className="text-[10px] text-muted-foreground/60">{w.count}</span>

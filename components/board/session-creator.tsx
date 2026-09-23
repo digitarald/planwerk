@@ -5,6 +5,7 @@ import { Plus, X, Sparkles, Loader2, FolderGit2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useConnectionStore } from "@/lib/store/connection-store";
 import {
   useBoardStore,
@@ -174,16 +175,24 @@ export function SessionCreator({ compact = false }: SessionCreatorProps) {
             "Create task"
           )}
         </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          className="h-6 px-2 text-[10px]"
-          onClick={reset}
-          disabled={isCreating}
-        >
-          <X className="h-3 w-3" />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-6 px-2 text-[10px]"
+                onClick={reset}
+                disabled={isCreating}
+                aria-label="Cancel new task"
+              />
+            }
+          >
+            <X className="h-3 w-3" />
+          </TooltipTrigger>
+          <TooltipContent>Cancel new task</TooltipContent>
+        </Tooltip>
       </div>
 
       {error && <p className="text-[10px] text-destructive">{error}</p>}

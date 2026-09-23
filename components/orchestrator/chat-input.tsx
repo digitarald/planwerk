@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Loader2, Send } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
 import { useBoardStore } from "@/lib/store/board-store";
@@ -41,19 +42,27 @@ export function ChatInput() {
           rows={2}
           disabled={isProcessing}
         />
-        <Button
-          type="submit"
-          size="sm"
-          variant="ghost"
-          disabled={!value.trim() || isProcessing}
-          className="absolute bottom-1.5 right-1.5 h-6 w-6 p-0 text-muted-foreground hover:text-foreground disabled:opacity-30"
-        >
-          {isProcessing ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Send className="h-3.5 w-3.5" />
-          )}
-        </Button>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                type="submit"
+                size="sm"
+                variant="ghost"
+                disabled={!value.trim() || isProcessing}
+                className="absolute bottom-1.5 right-1.5 h-6 w-6 p-0 text-muted-foreground hover:text-foreground disabled:opacity-30"
+                aria-label={isProcessing ? "Sending message" : "Send message"}
+              />
+            }
+          >
+            {isProcessing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Send className="h-3.5 w-3.5" />
+            )}
+          </TooltipTrigger>
+          <TooltipContent>{isProcessing ? "Sending message" : "Send message"}</TooltipContent>
+        </Tooltip>
       </div>
     </form>
   );

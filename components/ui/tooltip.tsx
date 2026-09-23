@@ -1,6 +1,7 @@
 "use client"
 
 import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip"
+import type { ReactNode } from "react"
 
 import { cn } from "@/lib/utils"
 
@@ -63,4 +64,36 @@ function TooltipContent({
   )
 }
 
-export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider }
+function TooltipHint({
+  label,
+  children,
+  className,
+  contentClassName,
+  side = "top",
+}: {
+  label: ReactNode
+  children: ReactNode
+  className?: string
+  contentClassName?: string
+  side?: TooltipPrimitive.Positioner.Props["side"]
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            className={cn("inline-flex", className)}
+            aria-label={typeof label === "string" ? label : undefined}
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent side={side} className={contentClassName}>
+        {label}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+export { Tooltip, TooltipTrigger, TooltipContent, TooltipHint, TooltipProvider }

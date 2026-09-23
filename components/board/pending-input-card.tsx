@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Check, Loader2, X, Sparkles, Play, Eye, HelpCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/lib/store/connection-store";
 import type { PendingInput, PendingInputQuestion } from "@/lib/types";
@@ -209,18 +210,26 @@ function TextQuestion({
             }
           }}
         />
-        <Button
-          size="sm"
-          variant="default"
-          disabled={disabled || !value.trim()}
-          className="h-6 w-6 p-0 rounded-md"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (value.trim()) onSubmit(value.trim());
-          }}
-        >
-          <Check className="h-3 w-3" />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="sm"
+                variant="default"
+                disabled={disabled || !value.trim()}
+                className="h-6 w-6 p-0 rounded-md"
+                aria-label="Submit answer"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (value.trim()) onSubmit(value.trim());
+                }}
+              />
+            }
+          >
+            <Check className="h-3 w-3" />
+          </TooltipTrigger>
+          <TooltipContent>Submit answer</TooltipContent>
+        </Tooltip>
       </div>
     </div>
   );

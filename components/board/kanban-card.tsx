@@ -31,6 +31,7 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { TooltipHint } from "@/components/ui/tooltip";
 import { useBoardStore, selectShowWorkspaceTags } from "@/lib/store/board-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
@@ -70,18 +71,18 @@ function RiskIndicator({ level }: { level: RiskLevel }) {
   // levels stay as a lightweight icon.
   if (level === "high") {
     return (
-      <span
-        title={label}
+      <TooltipHint
+        label={`${label}: review this session before it advances`}
         className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
       >
         <ShieldAlert className="h-3 w-3" />
-      </span>
+      </TooltipHint>
     );
   }
   return (
-    <span title={label}>
+    <TooltipHint label={label}>
       <Shield className={cn("mt-0.5 h-3.5 w-3.5 shrink-0", color)} />
-    </span>
+    </TooltipHint>
   );
 }
 
@@ -111,22 +112,22 @@ const attentionEdge: Record<AttentionLevel, string> = {
 function RuntimeIndicator({ status }: { status: RuntimeStatus }) {
   switch (status) {
     case "running":
-      return <span title={RUNTIME_STATUS.running.hint}><Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" /></span>;
+      return <TooltipHint label={RUNTIME_STATUS.running.hint}><Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" /></TooltipHint>;
     case "idle":
-      return <span title={RUNTIME_STATUS.idle.hint}><CirclePause className="h-3 w-3 shrink-0 text-muted-foreground/40" /></span>;
+      return <TooltipHint label={RUNTIME_STATUS.idle.hint}><CirclePause className="h-3 w-3 shrink-0 text-muted-foreground/40" /></TooltipHint>;
     case "input-needed":
       return (
-        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" title={RUNTIME_STATUS["input-needed"].hint}>
+        <TooltipHint className="inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" label={RUNTIME_STATUS["input-needed"].hint}>
           <MessageCircleWarning className="h-2.5 w-2.5" />
           {RUNTIME_STATUS["input-needed"].label}
-        </span>
+        </TooltipHint>
       );
     case "error":
       return (
-        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400" title={RUNTIME_STATUS.error.hint}>
+        <TooltipHint className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-100 px-1 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400" label={RUNTIME_STATUS.error.hint}>
           <XCircle className="h-2.5 w-2.5" />
           {RUNTIME_STATUS.error.label}
-        </span>
+        </TooltipHint>
       );
   }
 }
@@ -173,15 +174,15 @@ function InputContext({ card }: { card: KanbanCardType }) {
 function GateIndicator({ status }: { status: GateStatus }) {
   switch (status) {
     case "passed":
-      return <span title={GATE_STATUS.passed.hint}><ShieldCheck className="h-3 w-3 shrink-0 text-emerald-500" /></span>;
+      return <TooltipHint label={GATE_STATUS.passed.hint}><ShieldCheck className="h-3 w-3 shrink-0 text-emerald-500" /></TooltipHint>;
     case "evaluating":
-      return <span title={GATE_STATUS.evaluating.hint}><Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary/70" /></span>;
+      return <TooltipHint label={GATE_STATUS.evaluating.hint}><Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary/70" /></TooltipHint>;
     case "failed":
       return (
-        <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold text-white" title={GATE_STATUS.failed.hint}>
+        <TooltipHint className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold text-white" label={GATE_STATUS.failed.hint}>
           <ShieldX className="h-3 w-3" />
           {GATE_STATUS.failed.label}
-        </span>
+        </TooltipHint>
       );
     case "pending":
       return null;
@@ -342,7 +343,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
             >
             <div className="flex items-start gap-1.5">
               {card.isArchived ? (
-                <span title="Completed"><CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" /></span>
+                <TooltipHint label="Completed session"><CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" /></TooltipHint>
               ) : (
                 <RiskIndicator level={card.risk} />
               )}
@@ -371,23 +372,23 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                   )}
                   <GateIndicator status={card.gateStatus} />
                   {card.gateStatus === "pending" && card.gateBlocker && (
-                    <span
+                    <TooltipHint
                       className="inline-flex min-w-0 shrink items-center gap-0.5 text-[9px] font-medium text-muted-foreground/80"
-                      title={blockedFromAdvancingHint(card.gateBlocker)}
+                      label={blockedFromAdvancingHint(card.gateBlocker)}
                     >
                       <ShieldAlert className="h-2.5 w-2.5 shrink-0" />
                       <span className="truncate">{card.gateBlocker}</span>
-                    </span>
+                    </TooltipHint>
                   )}
                   {card.coherence && card.coherence.conflictsWith.length > 0 && (
-                    <span
+                    <TooltipHint
                       className={cn(
                         "inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-medium",
                         card.coherence.blocking
                           ? "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
                           : "text-purple-500"
                       )}
-                      title={
+                      label={
                         card.coherence.blocking
                           ? "Ship blocked: coherence conflict with another session"
                           : "Coherence conflict with another session"
@@ -395,10 +396,10 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                     >
                       <Split className="h-3 w-3 shrink-0" />
                       {card.coherence.conflictsWith.length}
-                    </span>
+                    </TooltipHint>
                   )}
                   {card.manualOverride && (
-                    <span title="Manual override active"><AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" /></span>
+                    <TooltipHint label="Manual override active: this phase move bypassed normal gate verification"><AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" /></TooltipHint>
                   )}
                   {currentStatus && (
                     <p

@@ -5,6 +5,7 @@ import { useShallow } from "zustand/react/shallow";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { TooltipHint } from "@/components/ui/tooltip";
 import { useBoardStore, selectFilteredCards } from "@/lib/store/board-store";
 import { useInboxStore } from "@/lib/store/inbox-store";
 import { useUIStore } from "@/lib/store/ui-store";
@@ -15,13 +16,13 @@ import { cn } from "@/lib/utils";
 function RuntimeGlyph({ card }: { card: KanbanCard }) {
   switch (card.runtime) {
     case "running":
-      return <Loader2 className="h-3 w-3 animate-spin text-primary" aria-label="Running" />;
+      return <TooltipHint label="Agent is actively working"><Loader2 className="h-3 w-3 animate-spin text-primary" /></TooltipHint>;
     case "input-needed":
-      return <MessageCircleWarning className="h-3 w-3 text-amber-600" aria-label="Needs input" />;
+      return <TooltipHint label="Agent is waiting for your input"><MessageCircleWarning className="h-3 w-3 text-amber-600" /></TooltipHint>;
     case "error":
-      return <XCircle className="h-3 w-3 text-red-600" aria-label="Error" />;
+      return <TooltipHint label="Agent session has an error"><XCircle className="h-3 w-3 text-red-600" /></TooltipHint>;
     case "idle":
-      return <CirclePause className="h-3 w-3 text-muted-foreground/55" aria-label="Idle" />;
+      return <TooltipHint label="Agent is idle"><CirclePause className="h-3 w-3 text-muted-foreground/55" /></TooltipHint>;
   }
 }
 
@@ -98,10 +99,9 @@ export function BoardOverview() {
                             {card.title}
                           </span>
                           {attention && (
-                            <attention.Icon
-                              className={cn("h-3 w-3 shrink-0", attention.text)}
-                              aria-label={attention.label}
-                            />
+                            <TooltipHint label={`${attention.label}: this session needs review`}>
+                              <attention.Icon className={cn("h-3 w-3 shrink-0", attention.text)} />
+                            </TooltipHint>
                           )}
                         </button>
                       );

@@ -7,6 +7,7 @@ import { TriangleAlert } from "lucide-react";
 import { KanbanCard } from "@/components/board/kanban-card";
 import { SessionCreator } from "@/components/board/session-creator";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { TooltipHint } from "@/components/ui/tooltip";
 import { useBoardStore, selectFilteredCards } from "@/lib/store/board-store";
 import { Column } from "@/lib/types";
 import { ATTENTION_PRIORITY, ATTENTION_META } from "@/lib/utils/attention";
@@ -67,35 +68,37 @@ export function KanbanColumn({ column }: KanbanColumnProps) {
           {topAttention && (() => {
             const { Icon, pill, label } = ATTENTION_META[topAttention];
             return (
-              <span
+              <TooltipHint
                 className={cn(
                   "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums",
                   pill
                 )}
-                title={`${attentionCards.length} ${attentionCards.length === 1 ? "card needs" : "cards need"} attention (${label})`}
+                label={`${attentionCards.length} ${attentionCards.length === 1 ? "card needs" : "cards need"} attention. Highest severity: ${label}.`}
               >
                 <Icon className="h-3 w-3" />
                 {attentionCards.length}
-              </span>
+              </TooltipHint>
             );
           })()}
-          <span
+          <TooltipHint
             className={cn(
               "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium tabular-nums",
               isOverWip
                 ? "bg-amber-500 font-semibold text-white ring-2 ring-amber-500/25"
                 : "bg-muted text-muted-foreground"
             )}
-            title={
+            label={
               isOverWip
                 ? `Over WIP limit: ${cards.length} of ${column.wipLimit} — flow is backing up`
-                : undefined
+                : column.wipLimit
+                  ? `${cards.length} of ${column.wipLimit} work-in-progress slots used`
+                  : `${cards.length} active ${cards.length === 1 ? "session" : "sessions"}`
             }
           >
             {isOverWip && <TriangleAlert className="h-3 w-3" />}
             {cards.length}
             {column.wipLimit && `/${column.wipLimit}`}
-          </span>
+          </TooltipHint>
         </div>
       )}
 
