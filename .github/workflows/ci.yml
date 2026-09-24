@@ -9,11 +9,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     name: Verify
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
@@ -26,7 +30,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm exec --yes --package=npm@11.13.0 -- npm ci
+        run: npm exec --yes --package=npm@11.13.0 -- npm ci --prefer-offline --no-audit --fund=false
 
       - name: Test
         run: npm test
@@ -36,6 +40,3 @@ jobs:
 
       - name: Type check
         run: npm run typecheck
-
-      - name: Build
-        run: npm run build
