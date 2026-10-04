@@ -1,5 +1,7 @@
 import "server-only";
 
+import { assertDefaultChatWritable } from "./chat-facts";
+
 import {
   sessionReducer,
   type SessionAction,
@@ -58,13 +60,17 @@ const debug = (...args: unknown[]) => {
  */
 async function getSessionContext(
   client: AhpClient,
-  sessionUri: string
+  sessionUri: string,
+  requireWritable = false,
 ): Promise<{ chatUri: string | null; status: number; isInProgress: boolean }> {
   const sessionState = await readSessionState(client, sessionUri);
   const status = sessionState?.status ?? 0;
   const parsed = parseAHPStatus(status);
 
   const chatUri = sessionState?.defaultChat ?? null;
+  if (chatUri && requireWritable && sessionState) {
+    await assertDefaultChatWritable(client, sessionState);
+  }
 
   return { chatUri, status, isInProgress: parsed.isInProgress };
 }
@@ -94,7 +100,7 @@ export async function injectMessageWithClient(
 }> {
   throwIfAborted(signal);
   const { chatUri, isInProgress } = await awaitAbortableBoundary(
-    () => getSessionContext(client, sessionUri),
+    () => getSessionContext(client, sessionUri, true),
     signal,
   );
 

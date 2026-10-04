@@ -39,7 +39,7 @@ Planwerk manages the AI execution layer between "task defined" and "PR merged," 
 
 Planwerk requires Node.js 24.17.0 and npm. It runs locally and connects to an Agent
 Host Protocol endpoint, such as the one provided by VS Code. The app is built
-against AHP 0.9.0 and does not connect to older protocol versions.
+against AHP 1.0.0 and does not connect to older protocol versions.
 
 ```bash
 npm exec --yes --package=npm@11.13.0 -- npm ci
@@ -55,9 +55,8 @@ With Docker and the VS Code Dev Containers extension installed, run
 and npm versions declared by the project, installs dependencies, and forwards
 Planwerk on [http://localhost:3000](http://localhost:3000).
 
-Development and test builds can reconnect once with a newer exact protocol
-version reported by a VS Code Insiders host. Production builds remain pinned
-to AHP 0.9.0.
+All builds offer only AHP 1.0.0. Hosts must accept that version; Planwerk does
+not retry with older or untested protocol versions.
 
 > **Security:** Planwerk's default commands bind only to `127.0.0.1`. This is
 > required when using **VS Code (local)** because that endpoint can control the

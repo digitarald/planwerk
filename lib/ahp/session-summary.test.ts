@@ -46,3 +46,21 @@ test("leaves directories unchanged when a partial update omits them", () => {
   assert.deepEqual(mapped.workingDirectories, ["file:///repo-a", "file:///repo-b"]);
   assert.equal(mapped.workingDirectory, undefined);
 });
+
+test("preserves lightweight chat metadata, authoritative order, and unknown status", () => {
+  const chats = [
+    { resource: "ahp-chat:/b", title: "Reviewer", interactivity: "read-only", changes: { files: 2 } },
+    { resource: "ahp-chat:/a", title: "Lead", status: 33 },
+  ] as NonNullable<SessionSummary["chats"]>;
+  const mapped = mapSdkSessionSummary({ ...summary, chats, defaultChat: chats[1].resource });
+  assert.deepEqual(mapped.chats, chats);
+  assert.equal(mapped.chats?.[0].status, undefined);
+  assert.equal(mapped.defaultChat, "ahp-chat:/a");
+  applySdkSessionSummaryChanges(mapped, { title: "Renamed" });
+  assert.deepEqual(mapped.chats, chats);
+  applySdkSessionSummaryChanges(mapped, { chats: [...chats].reverse(), defaultChat: undefined });
+  assert.deepEqual(mapped.chats?.map((chat) => chat.resource), ["ahp-chat:/a", "ahp-chat:/b"]);
+  assert.equal(mapped.defaultChat, undefined);
+  applySdkSessionSummaryChanges(mapped, { chats: [] });
+  assert.deepEqual(mapped.chats, []);
+});

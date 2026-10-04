@@ -9,25 +9,25 @@ import {
 
 test("desktop socket selection prefers the largest catalog", () => {
   const selected = selectDesktopSocket([
-    { socketPath: "/tmp/new-empty.sock", modifiedAt: 30, sessionCount: 0, protocolVersion: "0.9.0" },
-    { socketPath: "/tmp/desktop.sock", modifiedAt: 10, sessionCount: 234, protocolVersion: "0.9.0" },
+    { socketPath: "/tmp/new-empty.sock", modifiedAt: 30, sessionCount: 0, protocolVersion: "1.0.0" },
+    { socketPath: "/tmp/desktop.sock", modifiedAt: 10, sessionCount: 234, protocolVersion: "1.0.0" },
   ]);
   assert.equal(selected?.socketPath, "/tmp/desktop.sock");
 });
 
 test("desktop socket selection has deterministic tie-breakers", () => {
   const selected = selectDesktopSocket([
-    { socketPath: "/tmp/z.sock", modifiedAt: 20, sessionCount: 5, protocolVersion: "0.9.0" },
-    { socketPath: "/tmp/b.sock", modifiedAt: 30, sessionCount: 5, protocolVersion: "0.9.0" },
-    { socketPath: "/tmp/a.sock", modifiedAt: 30, sessionCount: 5, protocolVersion: "0.9.0" },
+    { socketPath: "/tmp/z.sock", modifiedAt: 20, sessionCount: 5, protocolVersion: "1.0.0" },
+    { socketPath: "/tmp/b.sock", modifiedAt: 30, sessionCount: 5, protocolVersion: "1.0.0" },
+    { socketPath: "/tmp/a.sock", modifiedAt: 30, sessionCount: 5, protocolVersion: "1.0.0" },
   ]);
   assert.equal(selected?.socketPath, "/tmp/a.sock");
 });
 
 test("desktop incompatibility diagnostics aggregate and de-duplicate host versions", () => {
   assert.deepEqual(
-    aggregateIncompatibleProtocolVersions([undefined, ["0.8.0"], ["0.8.0", "0.9.0"]]),
-    ["0.8.0", "0.9.0"],
+    aggregateIncompatibleProtocolVersions([undefined, ["0.8.0"], ["0.8.0", "1.0.0"]]),
+    ["0.8.0", "1.0.0"],
   );
 });
 

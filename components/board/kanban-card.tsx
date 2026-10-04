@@ -365,6 +365,12 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                   <StatusTrailHistory entries={olderStatuses} />
                 )}
                 <WorkerProgress card={card} />
+                {(card.backgroundWork?.length ?? 0) > 0 && (
+                  <p className="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground" title={card.backgroundWork!.map(({ work }) => work.label).join(", ")}>
+                    <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
+                    {card.backgroundWork!.length} running in background
+                  </p>
+                )}
 
                 <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
                   {card.runtime !== "input-needed" && (

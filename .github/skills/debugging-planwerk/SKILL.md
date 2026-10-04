@@ -363,15 +363,19 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
   final-response/error projection, explicit detail reads, and verified resumable-turn
   recovery. Transcript extraction is independent of whether a changeset exists.
 - `lib/ahp/protocol.ts`, `lib/ahp/protocol-rpc.ts`, and `lib/ahp/initialize.ts` —
-  protocol negotiation. Planwerk is built against AHP 0.9.0 and never offers older
-  protocol versions. Development and test connections may reconnect once with exact,
-  strictly newer versions reported by an Insiders host; production remains fixed to
-  0.9.0. Unsupported-version errors preserve both host and client offers.
+  protocol negotiation. Every build offers only AHP 1.0.0 and rejects an unoffered
+  selection. There is no older-version fallback or newer-version retry.
+  Unsupported-version errors preserve both host and client offers.
 - `lib/ahp/changeset-review.ts` and `app/api/ahp/sessions/review/route.ts` — the
   official SDK mutation path for host-owned file review bits.
 - `lib/ahp/tool-safety.ts` — redacts `toolAuthentication` to a VS Code handoff and validates
   host-provided confirmation options/tool-safety state. Host tool safety is not Planwerk
   card risk and never advances a phase.
+- `lib/ahp/chat-facts.ts` — passive lightweight chat catalog projection, writable
+  default-chat checks, and live chat/background-work/static-changeset observation.
+  Cold sessions stay catalog-only; existing live observers survive idle and
+  input-needed states. Chat-scoped files are informational and never replace
+  session changeset gate evidence. Hidden/archived/removed chats release observers.
 - `lib/ahp/types.ts` — `AHPStatus` bits + `parseAHPStatus`.
 - `app/api/ahp/events/route.ts` — SSE bridge + triage entry point. Each connected board
   sends its selected workspace paths as `workspaceScope`; all automation is limited to

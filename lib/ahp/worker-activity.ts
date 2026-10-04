@@ -1,4 +1,4 @@
-import type { ChatSummary } from "@microsoft/agent-host-protocol";
+import type { ChatSummary, SessionChatSummary } from "@microsoft/agent-host-protocol";
 
 import type { RuntimeStatus, WorkerActivity } from "@/lib/types";
 
@@ -8,12 +8,11 @@ const AHP_STATUS = {
   InputNeeded: 24,
 } as const;
 
-export type WorkerChatSummary = Pick<
-  ChatSummary,
-  "resource" | "title" | "status" | "activity" | "origin"
->;
+export type WorkerChatSummary = SessionChatSummary & Pick<Partial<ChatSummary>, "activity">;
 
-export function workerRuntime(status: number): RuntimeStatus {
+export function workerRuntime(status: number | undefined): RuntimeStatus | "unknown" {
+  if (status === undefined) return "unknown";
+  if ((status & 64) !== 0) return "idle";
   if ((status & AHP_STATUS.Error) !== 0) return "error";
   if ((status & AHP_STATUS.InputNeeded) === AHP_STATUS.InputNeeded) return "input-needed";
   if ((status & AHP_STATUS.InProgress) !== 0) return "running";
@@ -29,13 +28,15 @@ export function isToolSpawnedWorker(chat: WorkerChatSummary): boolean {
 export function isWorkerActive(chat: WorkerChatSummary): boolean {
   return (
     isToolSpawnedWorker(chat)
+    && chat.status !== undefined
+    && (chat.status & 64) === 0
     && (chat.status & AHP_STATUS.InProgress) !== 0
     && (chat.status & AHP_STATUS.InputNeeded) !== AHP_STATUS.InputNeeded
   );
 }
 
 export function mapWorkerChat(chat: WorkerChatSummary, history: WorkerActivity["history"] = []): WorkerActivity | undefined {
-  if (!isToolSpawnedWorker(chat)) return undefined;
+  if (!isToolSpawnedWorker(chat) || chat.interactivity === "hidden") return undefined;
   return {
     id: chat.resource,
     title: chat.title,

@@ -60,3 +60,12 @@ test("workers pruned from the host catalog remain as inactive task history", () 
   assert.equal(retained[0].runtime, "idle");
   assert.deepEqual(retained[0].usage, current[0].usage);
 });
+
+test("hidden workers are omitted and missing status remains unknown", () => {
+  const unknown = { ...toolWorker, status: undefined };
+  assert.equal(workerRuntime(undefined), "unknown");
+  assert.equal(mapWorkerChats([unknown])[0].runtime, "unknown");
+  assert.equal(isWorkerActive(unknown), false);
+  assert.deepEqual(mapWorkerChats([{ ...toolWorker, interactivity: "hidden" as WorkerChatSummary["interactivity"] }]), []);
+  assert.equal(mapWorkerChats([{ ...toolWorker, status: 72 as WorkerChatSummary["status"] }])[0].runtime, "idle");
+});

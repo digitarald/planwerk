@@ -31,6 +31,8 @@ import {
   RotateCcw,
 } from "lucide-react";
 
+import { canSendToChat } from "@/lib/ahp/chat-facts";
+
 import { PendingInputCard } from "./pending-input-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -305,6 +307,50 @@ function workerTokenTotal(worker: NonNullable<KanbanCard["workers"]>[number]): n
   return total > 0 ? total : undefined;
 }
 
+function ChatFactsSection({ card }: { card: KanbanCard }) {
+  const chats = card.chats?.filter((chat) => chat.interactivity !== "hidden") ?? [];
+  const background = card.backgroundWork ?? [];
+  if (chats.length === 0 && background.length === 0) return null;
+  return (
+    <section className="space-y-3">
+      {chats.length > 0 && <div>
+        <SectionLabel>Chats</SectionLabel>
+        <div className="space-y-2">
+          {chats.map((chat) => <div key={chat.resource} className="rounded-lg border border-border/70 p-3 text-xs">
+            <div className="flex justify-between gap-2">
+              <span className="font-medium">{chat.title}</span>
+              <span className="text-muted-foreground">
+                {chat.resource === card.defaultChat && "Default · "}
+                {chat.interactivity === "read-only" ? "Read only" : chat.status === undefined ? "Status unknown" :
+                  (chat.status & 64) !== 0 ? "Archived" : (chat.status & 2) !== 0 ? "Error" : (chat.status & 24) === 24 ? "Needs input" : (chat.status & 8) !== 0 ? "Working" : "Idle"}
+              </span>
+            </div>
+            {chat.status !== undefined && <p className="mt-1 text-muted-foreground">{(chat.status & 32) !== 0 ? "Read" : "Unread"}</p>}
+            {chat.changes && <p className="mt-1 text-muted-foreground">
+              {chat.changes.files !== undefined && `${chat.changes.files} files · `}
+              {chat.changes.additions !== undefined && `+${chat.changes.additions} `}
+              {chat.changes.deletions !== undefined && `−${chat.changes.deletions}`}
+            </p>}
+            {card.chatDetails?.[chat.resource]?.changesets.map((changeset) => <div key={changeset.resource} className="mt-2">
+              <p className="text-muted-foreground">{changeset.label} · {changeset.status}{changeset.files && ` · ${changeset.files.length} files`}</p>
+              {changeset.files?.map((file) => <p key={file.id} className="mt-1 truncate text-muted-foreground" title={file.path}>
+                {file.path.split("/").pop()} <span className="tabular-nums">+{file.added} −{file.removed}</span>
+              </p>)}
+            </div>)}
+          </div>)}
+        </div>
+      </div>}
+      {background.length > 0 && <div>
+        <SectionLabel>Background work</SectionLabel>
+        {background.map(({ chat, work }) => <div key={`${chat}:${work.id}`} className="flex items-center gap-2 py-1 text-xs">
+          <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
+          <span>{work.label}</span><span className="text-muted-foreground">{work.kind === "shell" ? "Shell" : work.kind === "subagent" ? "Subagent" : "Background task"} · {new Date(work.startedAt).toLocaleTimeString()}</span>
+        </div>)}
+      </div>}
+    </section>
+  );
+}
+
 function WorkerActivitySection({ card }: { card: KanbanCard }) {
   const workers = card.workers;
   const [completedExpanded, setCompletedExpanded] = useState(false);
@@ -314,7 +360,7 @@ function WorkerActivitySection({ card }: { card: KanbanCard }) {
     (worker) => worker.isActive || worker.runtime !== "idle",
   );
   const activeWorkerCount = workers.filter((worker) => worker.isActive).length;
-  const attentionWorkerCount = foregroundWorkers.length - activeWorkerCount;
+  const attentionWorkerCount = foregroundWorkers.filter((worker) => worker.runtime === "input-needed" || worker.runtime === "error").length;
   const foregroundWorkerIds = new Set(foregroundWorkers.map((worker) => worker.id));
   const completedWorkers = workers.filter(
     (worker) => !worker.isActive && worker.runtime === "idle",
@@ -617,8 +663,12 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
     }
   };
 
+  const inputAllowed = canSendToChat(card.chats?.find((chat) => chat.resource === card.defaultChat))
+    && (!card.defaultChat || card.chats === undefined || card.chats.some((chat) => chat.resource === card.defaultChat));
+
   const handleInject = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!inputAllowed) return;
     const text = message.trim();
     if (!text || sendState === "sending") return;
     if (!hostUrl) {
@@ -1137,6 +1187,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                   </div>
                 </section>
               )}
+              <ChatFactsSection card={card} />
               <WorkerActivitySection key={card.id} card={card} />
 
               {/* Changed Files */}
@@ -1487,8 +1538,8 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="Send instructions to this session..."
-                    disabled={sendState === "sending"}
+                    placeholder={inputAllowed ? "Send instructions to this session..." : "This chat does not accept messages"}
+                    disabled={!inputAllowed || sendState === "sending"}
                     className="min-h-[3rem] resize-none pr-10 text-[13px]"
                     rows={2}
                   />
@@ -1496,7 +1547,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                     type="submit"
                     size="icon-sm"
                     variant="ghost"
-                    disabled={!message.trim() || sendState === "sending"}
+                    disabled={!inputAllowed || !message.trim() || sendState === "sending"}
                     className="absolute bottom-2 right-2"
                   >
                     {sendState === "sending" ? (

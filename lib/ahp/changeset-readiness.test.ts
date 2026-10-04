@@ -191,3 +191,20 @@ test("reduces incremental actions while waiting for terminal status", async () =
   assert.deepEqual(state?.files, []);
   await stream.close();
 });
+
+for (const outcome of ["ready", "error", "timeout"] as const) {
+  test(`waits for a recomputing changeset: ${outcome}`, async () => {
+    const refreshing = snapshot(READY);
+    (refreshing.state as ChangesetState).status = "recomputing" as ChangesetState["status"];
+    const events = outcome === "timeout" ? [] : [contentEvent("refreshed"), statusEvent(outcome)];
+    const { client, calls } = fakeClient([refreshing], [events]);
+    const state = await readReadyChangesetState(client, URI, 10);
+    if (outcome === "ready") {
+      assert.equal(state?.status, "ready");
+      assert.equal(state?.files[0]?.id, "refreshed");
+    } else {
+      assert.equal(state, undefined);
+    }
+    assert.deepEqual(calls, { subscribes: 1, unsubscribes: 1, closes: 1 });
+  });
+}

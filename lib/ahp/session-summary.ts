@@ -7,6 +7,8 @@ export function mapSdkSessionSummary(summary: SessionSummary): AHPSessionSummary
   const directories = projectSessionDirectories(summary);
   return {
     resource: summary.resource,
+    chats: summary.chats?.map((chat) => ({ ...chat })),
+    defaultChat: summary.defaultChat,
     provider: summary.provider,
     title: summary.title,
     status: summary.status,
@@ -32,6 +34,8 @@ export function applySdkSessionSummaryChanges(
   existing: AHPSessionSummary,
   changes: Partial<SessionSummary>,
 ): void {
+  if (changes.chats !== undefined) existing.chats = changes.chats.map((chat) => ({ ...chat }));
+  if (Object.hasOwn(changes, "defaultChat")) existing.defaultChat = changes.defaultChat;
   if (changes.title !== undefined) existing.title = changes.title;
   if (changes.status !== undefined) existing.status = changes.status;
   if (changes.activity !== undefined) existing.activity = changes.activity;

@@ -9,6 +9,8 @@ import type {
   SessionToolClientExecutionRequest,
 } from "@microsoft/agent-host-protocol";
 
+import { visibleChatCatalog } from "./chat-facts";
+
 import { AHPSessionSummary, AHPStatus, parseAHPStatus } from "./types";
 import type { ChangesetEnrichment } from "./changeset-enricher";
 import {
@@ -363,5 +365,9 @@ export function mapSessionToCard(
     changesetReview: enrichment?.changesetReview,
     isArchived,
     workers,
+    chats: visibleChatCatalog(session.chats),
+    defaultChat: session.defaultChat,
+    chatDetails: session.chatDetails,
+    backgroundWork: session.backgroundWork,
   };
 }

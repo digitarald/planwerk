@@ -1,3 +1,6 @@
+import type { SessionChatSummary } from "@microsoft/agent-host-protocol";
+import type { ChatDetails, SessionBackgroundWork } from "../types.ts";
+
 export interface AHPSessionSummary {
   resource: string;
   provider: string;
@@ -20,6 +23,10 @@ export interface AHPSessionSummary {
     deletions: number;
     files: number;
   };
+  chats?: SessionChatSummary[];
+  defaultChat?: string;
+  chatDetails?: Record<string, ChatDetails>;
+  backgroundWork?: SessionBackgroundWork[];
   annotations?: Array<{
     title: string;
     description?: string;

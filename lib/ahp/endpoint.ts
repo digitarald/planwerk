@@ -15,7 +15,7 @@ import { listAllSessions } from "./catalog.ts";
 import { LOCAL_DESKTOP_HOST } from "./endpoint-config.ts";
 import { discoverLocalEditorEndpoints } from "./local-endpoint-registry.ts";
 import {
-  initializeAhpClientWithForwardRetry,
+  connectInitializedClient,
   type InitializeAhpClientOptions,
 } from "./initialize.ts";
 import {
@@ -53,7 +53,6 @@ export interface ConnectedAhpClient {
   client: AhpClient;
   initialized: InitializeResult;
   diagnostics: AhpEndpointDiagnostics;
-  usedForwardCompatibility: boolean;
 }
 
 export interface ConnectAhpClientOptions extends InitializeAhpClientOptions {
@@ -198,7 +197,7 @@ async function probeDesktopSocket(
 ): Promise<DesktopSocketProbeOutcome> {
   let client: AhpClient | undefined;
   try {
-    const connection = await initializeAhpClientWithForwardRetry(async () => {
+    const connection = await connectInitializedClient(async () => {
       const transport = await LocalSocketWebSocketTransport.connect(
         candidate.socketPath,
         candidate.connectionToken,
@@ -358,7 +357,7 @@ export async function connectInitializedAhpClient(
     ...initializeOptions
   } = options;
   let endpoint: ConnectedAhpTransport | undefined;
-  const connection = await initializeAhpClientWithForwardRetry(async () => {
+  const connection = await connectInitializedClient(async () => {
     endpoint = await connectAhpTransport(hostUrl);
     const transport = wrapTransport
       ? wrapTransport(endpoint.transport)

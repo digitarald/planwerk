@@ -64,8 +64,8 @@ async function releaseChangesetSubscription(
 }
 
 /**
- * Read a ready changeset snapshot, briefly following a computing snapshot until
- * the host publishes its terminal status. A timeout or host error remains
+ * Read a ready changeset snapshot, briefly following computation or recomputation
+ * until the host publishes its terminal status. A timeout or host error remains
  * unknown rather than turning fallback counts into verified data.
  */
 export async function readReadyChangesetState(
@@ -78,7 +78,7 @@ export async function readReadyChangesetState(
 
   try {
     if (initialState?.status === "ready") return initialState;
-    if (initialState?.status !== "computing") return undefined;
+    if (initialState?.status !== "computing" && initialState?.status !== "recomputing") return undefined;
 
     return await waitForReadyChangesetState(
       initialState,

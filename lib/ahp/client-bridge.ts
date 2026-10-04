@@ -3,6 +3,7 @@ import {
   sessionReducer,
   type SessionAction,
   type UsageInfo,
+  type ChatState,
 } from "@microsoft/agent-host-protocol";
 import { createHash } from "node:crypto";
 
@@ -13,7 +14,7 @@ import { enrichFromChangeset, ChangesetEnrichment, hashPlanContent } from "./cha
 import { fetchCopilotCliArtifacts, clearPlanCache } from "./plan-artifact";
 import { extractModelFromConfig } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
-import { asChatState, asSessionState, readChatState, readSessionState } from "./snapshot";
+import { asChatState, asSessionState, readSessionState } from "./snapshot";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT, type CachedSession } from "@/lib/db/session-cache";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
@@ -34,6 +35,7 @@ import type {
   SessionDetails,
   WorkerActivity,
 } from "@/lib/types";
+import { observeChatFacts, shouldObserveChat, visibleBackgroundWork } from "./chat-facts";
 import { mapWorkerChats, retainInactiveWorkers, type WorkerChatSummary } from "./worker-activity";
 import { getWorkerActivityHistory, recordWorkerActivity } from "@/lib/orchestrator/worker-activity-store";
 import { readSessionDetailsForState } from "./session-details";
@@ -294,8 +296,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   const workerChatsBySession = new Map<string, WorkerChatSummary[]>();
   const workerObservers = new Map<string, { close: () => void }>();
   const workerUsageByChat = new Map<string, NonNullable<WorkerActivity["usage"]>>();
-  const workerCompletedUsageByChat = new Map<string, NonNullable<WorkerActivity["usage"]>>();
-  const workerUsageObservers = new Map<string, { sessionUri: string; close: () => void }>();
+  const liveChatStates = new Map<string, { sessionUri: string; state: ChatState }>();
+  const chatObservers = new Map<string, { sessionUri: string; close: () => void }>();
 
   let disposed = false;
   let client: AhpClient | null = null;
@@ -332,10 +334,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     workerChatsBySession.clear();
     for (const observer of workerObservers.values()) observer.close();
     workerObservers.clear();
-    for (const observer of workerUsageObservers.values()) observer.close();
-    workerUsageObservers.clear();
+    for (const observer of chatObservers.values()) observer.close();
+    chatObservers.clear();
     workerUsageByChat.clear();
-    workerCompletedUsageByChat.clear();
+    liveChatStates.clear();
     client?.shutdown().catch(() => {});
   }
 
@@ -713,147 +715,98 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     ]);
   }
 
-  function sameWorkerUsage(
-    left: WorkerActivity["usage"],
-    right: WorkerActivity["usage"],
-  ): boolean {
-    return (
-      left?.inputTokens === right?.inputTokens
-      && left?.outputTokens === right?.outputTokens
-      && left?.cacheReadTokens === right?.cacheReadTokens
-    );
+  function publishChatFacts(sessionUri: string) {
+    const session = sessions.get(sessionUri);
+    if (!session || disposed) return;
+    session.backgroundWork = [...liveChatStates.values()]
+      .filter((entry) => entry.sessionUri === sessionUri)
+      .flatMap(({ state }) => visibleBackgroundWork(state, session.chats).map((work) => ({ chat: state.resource, work })));
+    const previous = workersBySession.get(sessionUri) ?? [];
+    const workers = mapWorkerChats(workerChatsBySession.get(sessionUri) ?? session.chats ?? []).map((worker) => ({
+      ...worker,
+      usage: workerUsageByChat.get(worker.id),
+      history: previous.find((item) => item.id === worker.id)?.history ?? [],
+    }));
+    const hidden = new Set(session.chats?.filter((chat) => chat.interactivity === "hidden").map((chat) => chat.resource));
+    emitWorkers(sessionUri, retainInactiveWorkers(previous.filter((worker) => !hidden.has(worker.id)), workers));
   }
 
-  function updateWorkerUsage(
-    sessionUri: string,
-    workerId: string,
-    usage: NonNullable<WorkerActivity["usage"]>,
-  ) {
-    const previous = workerUsageByChat.get(workerId);
-    if (sameWorkerUsage(previous, usage)) return;
-    workerUsageByChat.set(workerId, usage);
-
-    const current = workersBySession.get(sessionUri);
-    if (!current?.some((worker) => worker.id === workerId)) return;
-    emitWorkers(
-      sessionUri,
-      current.map((worker) => (
-        worker.id === workerId ? { ...worker, usage } : worker
-      )),
-    );
-  }
-
-  function stopWorkerUsageObserver(workerId: string) {
-    const observer = workerUsageObservers.get(workerId);
+  function stopChatObserver(workerId: string) {
+    const observer = chatObservers.get(workerId);
     if (!observer) return;
-    workerUsageObservers.delete(workerId);
+    chatObservers.delete(workerId);
+    liveChatStates.delete(workerId);
     observer.close();
-    void client?.unsubscribe(workerId).catch(() => {});
   }
 
-  async function observeWorkerUsage(
-    sessionUri: string,
-    workerId: string,
-  ): Promise<WorkerActivity["usage"]> {
-    const existing = workerUsageObservers.get(workerId);
+  async function observeChat(sessionUri: string, workerId: string): Promise<WorkerActivity["usage"]> {
+    if (!client || disposed) return undefined;
+    const existing = chatObservers.get(workerId);
     if (existing?.sessionUri === sessionUri) return workerUsageByChat.get(workerId);
-    if (existing) stopWorkerUsageObserver(workerId);
-
-    const { result, subscription } = await client!.subscribe(workerId);
-    if (disposed) {
-      subscription.close();
-      void client!.unsubscribe(workerId).catch(() => {});
-      return undefined;
-    }
-
-    const initialChat = asChatState(result.snapshot);
-    const completedUsage = completedUsageFromChat(initialChat);
-    const initialUsage = usageFromChat(initialChat);
-    if (completedUsage) workerCompletedUsageByChat.set(workerId, completedUsage);
-    if (initialUsage) workerUsageByChat.set(workerId, initialUsage);
-    const observer = { sessionUri, close: () => subscription.close() };
-    workerUsageObservers.set(workerId, observer);
-
-    void (async () => {
-      try {
-        for await (const event of subscription) {
-          if (
-            disposed
-            || workerUsageObservers.get(workerId) !== observer
-            || event.type !== "action"
-          ) {
-            break;
-          }
-          const action = event.params.action as {
-            type?: string;
-            usage?: UsageInfo;
-          };
-          if (action.type === "chat/usage") {
-            const usage = sumWorkerUsage([
-              workerCompletedUsageByChat.get(workerId),
-              toWorkerUsage(action.usage),
-            ]);
-            if (usage) updateWorkerUsage(sessionUri, workerId, usage);
-          } else if (action.type === "chat/turnComplete") {
-            const usage = workerUsageByChat.get(workerId);
-            if (usage) workerCompletedUsageByChat.set(workerId, usage);
-          }
-        }
-      } catch (err) {
-        if (!disposed) {
-          debug("worker usage observer failed:", workerId, err instanceof Error ? err.message : err);
-        }
-      } finally {
-        if (workerUsageObservers.get(workerId) === observer) {
-          workerUsageObservers.delete(workerId);
-          void client?.unsubscribe(workerId).catch(() => {});
-        }
-      }
-    })();
-
-    return initialUsage;
+    if (existing) stopChatObserver(workerId);
+    const observer = observeChatFacts(client, workerId, (state, details) => {
+      if (disposed || chatObservers.get(workerId)?.close !== observer.close) return;
+      const session = sessions.get(sessionUri);
+      if (!session) return;
+      liveChatStates.set(workerId, { sessionUri, state });
+      const usage = usageFromChat(state);
+      if (usage) workerUsageByChat.set(workerId, usage);
+      session.chatDetails = { ...session.chatDetails, [workerId]: details };
+      const chats = workerChatsBySession.get(sessionUri) ?? [];
+      const next = chats.map((chat) => chat.resource === workerId ? {
+        ...chat, status: state.status, activity: state.activity,
+        interactivity: chat.interactivity ?? state.interactivity,
+        changes: chat.changes ?? state.changes,
+      } : chat);
+      workerChatsBySession.set(sessionUri, next);
+      session.chats = next;
+      publishChatFacts(sessionUri);
+    }, (error) => debug("chat observer failed:", workerId, error instanceof Error ? error.message : error), () => {
+      if (chatObservers.get(workerId)?.close !== observer.close) return;
+      chatObservers.delete(workerId);
+      liveChatStates.delete(workerId);
+      const session = sessions.get(sessionUri);
+      if (session?.chatDetails) delete session.chatDetails[workerId];
+      publishChatFacts(sessionUri);
+    });
+    chatObservers.set(workerId, { sessionUri, close: observer.close });
+    await observer.ready;
+    return workerUsageByChat.get(workerId);
   }
 
   async function applyWorkerChats(sessionUri: string, chats: readonly WorkerChatSummary[]) {
     const workers = mapWorkerChats(chats);
-    const currentWorkerIds = new Set(workers.map((worker) => worker.id));
-    for (const [workerId, observer] of workerUsageObservers) {
-      if (observer.sessionUri === sessionUri && !currentWorkerIds.has(workerId)) {
-        stopWorkerUsageObserver(workerId);
+    const visibleIds = new Set(chats.filter((chat) => chat.interactivity !== "hidden" && (chat.status === undefined || (chat.status & AHPStatus.IsArchived) === 0)).map((chat) => chat.resource));
+    for (const [chatId, observer] of chatObservers) {
+      if (observer.sessionUri === sessionUri && !visibleIds.has(chatId)) {
+        stopChatObserver(chatId);
+        const session = sessions.get(sessionUri);
+        if (session?.chatDetails) delete session.chatDetails[chatId];
       }
     }
-
-    await Promise.all(workers.map(async (worker) => {
-      try {
-        if (worker.isActive) {
-          await observeWorkerUsage(sessionUri, worker.id);
-        } else {
-          const wasObserved = workerUsageObservers.has(worker.id);
-          stopWorkerUsageObserver(worker.id);
-          if (wasObserved || !workerUsageByChat.has(worker.id)) {
-            const chat = await readChatState(client!, worker.id);
-            const completedUsage = completedUsageFromChat(chat);
-            const usage = usageFromChat(chat);
-            if (completedUsage) workerCompletedUsageByChat.set(worker.id, completedUsage);
-            if (usage) workerUsageByChat.set(worker.id, usage);
-          }
-        }
-        worker.usage = workerUsageByChat.get(worker.id);
-      } catch (err) {
-        debug("worker usage read failed:", worker.id, err instanceof Error ? err.message : err);
-      }
-    }));
+    // Cold catalogue entries stay passive. Already-observed chats remain live
+    // through idle/input-needed transitions so background work can finish.
+    const session = sessions.get(sessionUri);
+    await Promise.all(chats.filter((chat) => session && shouldObserveChat(
+      chat, session.status, session.defaultChat, chatObservers.has(chat.resource),
+    )).map((chat) => observeChat(sessionUri, chat.resource)));
+    if (disposed || !sessions.has(sessionUri)) return;
+    for (const worker of workers) worker.usage = workerUsageByChat.get(worker.id);
     for (const worker of workers) {
       recordWorkerActivity(sessionUri, worker.id, worker.activity);
       worker.history = getWorkerActivityHistory(sessionUri, worker.id);
     }
-    emitWorkers(sessionUri, retainInactiveWorkers(workersBySession.get(sessionUri), workers));
+    const hidden = new Set(chats.filter((chat) => chat.interactivity === "hidden").map((chat) => chat.resource));
+    emitWorkers(sessionUri, retainInactiveWorkers((workersBySession.get(sessionUri) ?? []).filter((worker) => !hidden.has(worker.id)), workers));
+    publishChatFacts(sessionUri);
   }
 
   function stopWorkerObserver(sessionUri: string) {
-    for (const [workerId, observer] of workerUsageObservers) {
-      if (observer.sessionUri === sessionUri) stopWorkerUsageObserver(workerId);
+    for (const [workerId, observer] of chatObservers) {
+      if (observer.sessionUri === sessionUri) stopChatObserver(workerId);
     }
+    const session = sessions.get(sessionUri);
+    if (session) { session.backgroundWork = []; session.chatDetails = {}; }
     const observer = workerObservers.get(sessionUri);
     if (!observer) return;
     workerObservers.delete(sessionUri);
@@ -865,58 +818,70 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     if (
       disposed
       || !client
-      || (status & AHPStatus.InProgress) === 0
-      || (status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded
       || (status & AHPStatus.IsArchived) !== 0
     ) {
       stopWorkerObserver(sessionUri);
       return;
     }
-    if (workerObservers.has(sessionUri)) return;
+    const session = sessions.get(sessionUri);
+    if (session?.chats !== undefined) {
+      const live = workerChatsBySession.get(sessionUri) ?? [];
+      workerChatsBySession.set(sessionUri, session.chats.map((chat) => ({ ...live.find((item) => item.resource === chat.resource), ...chat })));
+      await applyWorkerChats(sessionUri, workerChatsBySession.get(sessionUri)!);
+    }
+    const current = sessions.get(sessionUri);
+    if (disposed || !current || (current.status & AHPStatus.IsArchived) !== 0) {
+      stopWorkerObserver(sessionUri);
+      return;
+    }
+    // AHP 1.0 publishes an authoritative ordered catalogue on the root channel.
+    // When routing is also known, no parent-session subscription is needed.
+    if (
+      workerObservers.has(sessionUri)
+      || !shouldReadLiveSessionState(current.status)
+      || (current.chats !== undefined && current.defaultChat !== undefined)
+    ) return;
 
+    const pendingObserver = { close: () => {} };
+    workerObservers.set(sessionUri, pendingObserver);
     try {
       const { result, subscription } = await client.subscribe(sessionUri);
-      if (disposed) {
+      if (disposed || workerObservers.get(sessionUri) !== pendingObserver) {
         subscription.close();
         void client.unsubscribe(sessionUri).catch(() => {});
         return;
       }
       const initial = asSessionState(result.snapshot);
       if (!initial) {
+        workerObservers.delete(sessionUri);
         subscription.close();
         void client.unsubscribe(sessionUri).catch(() => {});
         return;
       }
 
       workerObservers.set(sessionUri, subscription);
+      const currentSession = sessions.get(sessionUri);
+      if (currentSession) {
+        currentSession.defaultChat = initial.defaultChat;
+        currentSession.chats = initial.chats;
+      }
       workerChatsBySession.set(sessionUri, [...initial.chats]);
       await applyWorkerChats(sessionUri, initial.chats);
 
+      let sessionState = initial;
       void (async () => {
         try {
           for await (const event of subscription) {
-            if (disposed || !workerObservers.has(sessionUri) || event.type !== "action") break;
-            const action = event.params.action as {
-              type?: string;
-              summary?: WorkerChatSummary;
-              chat?: string;
-              changes?: Partial<WorkerChatSummary>;
-            };
-            const current = workerChatsBySession.get(sessionUri) ?? [];
-            if (action.type === "session/chatAdded" && action.summary) {
-              const next = [...current.filter((chat) => chat.resource !== action.summary!.resource), action.summary];
-              workerChatsBySession.set(sessionUri, next);
-              await applyWorkerChats(sessionUri, next);
-            } else if (action.type === "session/chatUpdated" && action.chat && action.changes) {
-              const next = current.map((chat) =>
-                chat.resource === action.chat ? { ...chat, ...action.changes } : chat
-              );
-              workerChatsBySession.set(sessionUri, next);
-              await applyWorkerChats(sessionUri, next);
-            } else if (action.type === "session/chatRemoved" && action.chat) {
-              const next = current.filter((chat) => chat.resource !== action.chat);
-              workerChatsBySession.set(sessionUri, next);
-              await applyWorkerChats(sessionUri, next);
+            if (disposed || workerObservers.get(sessionUri) !== subscription) break;
+            if (event.type !== "action") continue;
+            sessionState = sessionReducer(sessionState, event.params.action as SessionAction);
+            if (["session/chatAdded", "session/chatUpdated", "session/chatRemoved", "session/chatsReordered", "session/defaultChatChanged"].includes(event.params.action.type)) {
+              const session = sessions.get(sessionUri);
+              if (!session) break;
+              session.chats = sessionState.chats;
+              session.defaultChat = sessionState.defaultChat;
+              workerChatsBySession.set(sessionUri, sessionState.chats);
+              await applyWorkerChats(sessionUri, sessionState.chats);
             }
           }
         } catch (err) {
@@ -931,6 +896,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         }
       })();
     } catch (err) {
+      if (workerObservers.get(sessionUri) === pendingObserver) workerObservers.delete(sessionUri);
       debug("worker activity read failed:", sessionUri, err instanceof Error ? err.message : err);
     }
   }

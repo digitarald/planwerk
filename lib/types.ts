@@ -1,3 +1,5 @@
+import type { BackgroundWork, SessionChatSummary } from "@microsoft/agent-host-protocol";
+
 export type Phase = "define" | "plan" | "build" | "review" | "ship";
 export type RuntimeStatus = "idle" | "running" | "input-needed" | "error";
 export type GateStatus = "pending" | "evaluating" | "passed" | "failed";
@@ -35,12 +37,29 @@ export interface StatusEntry {
   timestamp: number;
 }
 
-/** A tool-spawned worker chat attached to a parent task. Its state is purely
- * observational: it never participates in phase, gate, or attention logic. */
+/** File facts scoped to one advertised chat changeset; never gate evidence. */
+export interface ChatChangesetFacts {
+  resource: string;
+  label: string;
+  changeKind: string;
+  status: string;
+  files?: FileChange[];
+}
+
+export interface ChatDetails {
+  changesets: ChatChangesetFacts[];
+}
+
+export interface SessionBackgroundWork {
+  chat: string;
+  work: BackgroundWork;
+}
+
+/** Observed worker chat facts never participate in phase or gate logic. */
 export interface WorkerActivity {
   id: string;
   title: string;
-  runtime: RuntimeStatus;
+  runtime: RuntimeStatus | "unknown";
   activity?: string;
   isActive: boolean;
   history: StatusEntry[];
@@ -227,6 +246,10 @@ export interface KanbanCard {
   reviewFindings?: ReviewFinding[];
   /** Tool-spawned worker chat activity, sourced from the AHP session catalog. */
   workers?: WorkerActivity[];
+  chats?: SessionChatSummary[];
+  defaultChat?: string;
+  chatDetails?: Record<string, ChatDetails>;
+  backgroundWork?: SessionBackgroundWork[];
   /** Recent status lines (oldest→newest), for the fading progress trail. */
   statusHistory?: StatusEntry[];
   /** Board-level coherence: other in-flight cards this one clashes with. Set from

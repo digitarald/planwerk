@@ -1,3 +1,5 @@
+import { PROTOCOL_VERSION } from "@microsoft/agent-host-protocol";
+
 const EXACT_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 type ParsedProtocolVersion = readonly [major: number, minor: number, patch: number];
@@ -13,15 +15,6 @@ function parseExactProtocolVersion(version: string): ParsedProtocolVersion | und
 
 function compareParsedVersions(a: ParsedProtocolVersion, b: ParsedProtocolVersion): number {
   return (a[0] - b[0]) || (a[1] - b[1]) || (a[2] - b[2]);
-}
-
-function compareExactProtocolVersions(a: string, b: string): number {
-  const parsedA = parseExactProtocolVersion(a);
-  const parsedB = parseExactProtocolVersion(b);
-  if (!parsedA || !parsedB) {
-    throw new Error(`Invalid exact AHP protocol version: ${!parsedA ? a : b}`);
-  }
-  return compareParsedVersions(parsedA, parsedB);
 }
 
 export function classifyProtocolMismatch(
@@ -98,39 +91,6 @@ export function assertNegotiatedProtocolVersion(
   });
 }
 
-/**
- * Production speaks only the SDK version Planwerk is built and tested against.
- * Development can make one explicit forward-compatibility retry through
- * {@link forwardRetryProtocolVersions}.
- */
+/** Offer only the AHP 1.0 baseline Planwerk is built and tested against. */
 export const BASE_PROTOCOL_VERSION = PROTOCOL_VERSION;
 export const OFFERED_PROTOCOL_VERSIONS = Object.freeze([BASE_PROTOCOL_VERSION]);
-
-export function forwardRetryProtocolVersions(
-  error: ProtocolCompatibilityError,
-  allowForwardCompatibility: boolean,
-): string[] | undefined {
-  if (
-    !allowForwardCompatibility
-    || error.failure !== "no-overlap"
-    || error.relation !== "host-newer"
-  ) {
-    return undefined;
-  }
-
-  const versions = [...new Set(error.hostSupportedVersions)];
-  if (
-    versions.length === 0
-    || versions.some((version) => {
-      const parsed = parseExactProtocolVersion(version);
-      return !parsed || compareExactProtocolVersions(version, BASE_PROTOCOL_VERSION) <= 0;
-    })
-  ) {
-    return undefined;
-  }
-
-  return versions
-    .sort((a, b) => compareExactProtocolVersions(b, a))
-    .concat(BASE_PROTOCOL_VERSION);
-}
-import { PROTOCOL_VERSION } from "@microsoft/agent-host-protocol";

@@ -107,7 +107,7 @@ async function loadSnapshotReaders(): Promise<SnapshotReaders> {
 }
 
 async function connect(hostUrl: string): Promise<{ client: AhpClient; protocolVersion: string }> {
-  const { client, initialized, diagnostics, usedForwardCompatibility } =
+  const { client, initialized, diagnostics } =
     await connectInitializedAhpClient(hostUrl, {
       clientId: randomUUID(),
     });
@@ -115,7 +115,7 @@ async function connect(hostUrl: string): Promise<{ client: AhpClient; protocolVe
   log(
     `connected via ${diagnostics.transport} (${diagnostics.resolvedTarget}); `
     + `${diagnostics.candidateCount} local candidate(s) considered`
-    + `${usedForwardCompatibility ? "; accepted newer development protocol" : ""}.`,
+    + ".",
   );
   return { client, protocolVersion: initialized.protocolVersion };
 }
