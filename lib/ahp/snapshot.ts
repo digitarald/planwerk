@@ -7,6 +7,8 @@ import type {
   SessionState,
   Snapshot,
 } from "@microsoft/agent-host-protocol";
+import { listAllSessions } from "./catalog";
+import { shouldReadLiveSessionState } from "./session-read-policy";
 
 /**
  * Typed access to AHP channel snapshots.
@@ -60,7 +62,8 @@ export async function readRootState(client: AhpClient): Promise<RootState | unde
 /**
  * One-shot read of a session channel: subscribe, capture the snapshot, then close the
  * local iterator and release the server-side subscription. Use when you need the current
- * {@link SessionState} without an ongoing stream.
+ * {@link SessionState} without an ongoing stream. This can restore/resume a cold
+ * provider and mutate its activity timestamp; it is NOT a passive read.
  */
 export async function readSessionState(
   client: AhpClient,
@@ -70,6 +73,36 @@ export async function readSessionState(
   void subscription.close();
   await client.unsubscribe(sessionUri).catch(() => {});
   return asSessionState(result.snapshot);
+}
+
+/** Background reads must first establish activity from the passive catalog. */
+export async function readActiveSessionState(
+  client: AhpClient,
+  sessionUri: string,
+): Promise<SessionState | undefined> {
+  const summary = (await listAllSessions(client)).find((item) => item.resource === sessionUri);
+  if (!summary || !shouldReadLiveSessionState(summary.status)) {
+    throw new Error("Live session read deferred: session is inactive, archived, or unavailable");
+  }
+  return readSessionState(client, sessionUri);
+}
+
+/** Keep residency owned until dependent chat/changeset reads have finished. */
+export async function withSessionState<T>(
+  client: AhpClient,
+  sessionUri: string,
+  operation: (state: SessionState | undefined) => Promise<T>,
+): Promise<T> {
+  const { result, subscription } = await client.subscribe(sessionUri);
+  try {
+    return await operation(asSessionState(result.snapshot));
+  } finally {
+    try {
+      await subscription.close();
+    } finally {
+      await client.unsubscribe(sessionUri);
+    }
+  }
 }
 
 /**

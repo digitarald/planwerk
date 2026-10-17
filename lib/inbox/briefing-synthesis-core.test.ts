@@ -5,9 +5,10 @@ import type { InboxItem } from "./types.ts";
 import {
   applySynthesizedBriefing,
   briefingSynthesisSystemPrompt,
+  briefingResponseSchema,
   buildBriefingSynthesisPrompt,
   canApplySynthesizedBriefing,
-  parseSynthesizedBriefing,
+  normalizeSynthesizedBriefing,
   synthesisRequestId,
   type InboxSynthesisEvidence,
 } from "./briefing-synthesis-core.ts";
@@ -100,14 +101,14 @@ test("authoring prompt omits internal routing metadata", () => {
 });
 
 test("parses free briefing prose with executable action metadata", () => {
-  const parsed = parseSynthesizedBriefing(JSON.stringify({
+  const parsed = normalizeSynthesizedBriefing({
     headline: "The PR queue is clear",
     message:
       "Every remaining PR has been reviewed and the workflow checks passed. Nothing needs your attention unless you want to inspect the final queue.",
     attention: "routine",
     primaryAction: { intent: "resolve", label: "Clear" },
     secondaryActions: [{ intent: "open-session", label: "See result" }],
-  }), "completion");
+  }, "completion");
 
   assert.deepEqual(parsed, {
     headline: "The PR queue is clear",
@@ -119,13 +120,13 @@ test("parses free briefing prose with executable action metadata", () => {
   });
 
   assert.deepEqual(
-    parseSynthesizedBriefing(JSON.stringify({
+    normalizeSynthesizedBriefing({
       headline: "Nothing needs your attention",
       message: "The research is complete and produced no follow-up work.",
       attention: "routine",
       primaryAction: { intent: "resolve", label: "Clear" },
       secondaryActions: [],
-    }), "completion"),
+    }, "completion"),
     {
       headline: "Nothing needs your attention",
       message: "The research is complete and produced no follow-up work.",
@@ -135,31 +136,28 @@ test("parses free briefing prose with executable action metadata", () => {
     },
   );
   assert.equal(
-    parseSynthesizedBriefing(JSON.stringify({
+    normalizeSynthesizedBriefing({
       headline: "Looks good",
       message: "Ship it.",
       attention: "routine",
       primaryAction: { intent: "approve", label: "Approve" },
       secondaryActions: [],
-    }), "completion"),
+    }, "completion"),
     null,
   );
 });
 
 test("normalizes presentational markdown and tolerates unusable optional actions", () => {
-  const parsed = parseSynthesizedBriefing(`Here is the note:
-\`\`\`json
-{
+  const parsed = normalizeSynthesizedBriefing({
   "headline": "**The queue is clear**",
-  "message": "Review [issue #372](https://example.test/372), then rotate \`COPILOT_TOKEN\`.",
+  "message": "Review [issue #372](https://example.test/372), then rotate `COPILOT_TOKEN`.",
   "attention": "soon",
   "primaryAction": {"intent": "review", "label": "Review issue #372 in detail because it matters"},
   "secondaryActions": [
     {"intent": "approve", "label": "Invalid for a completion"},
     {"intent": "open-session", "label": "Open source"}
   ]
-}
-\`\`\``, "completion");
+}, "completion");
 
   assert.equal(parsed?.headline, "The queue is clear");
   assert.equal(
@@ -173,9 +171,34 @@ test("normalizes presentational markdown and tolerates unusable optional actions
   }]);
 });
 
+test("SDK briefing schema restricts actions to the event and requires a complete envelope", () => {
+  const value = {
+    headline: "Build is over capacity",
+    message: "Review active work.",
+    attention: "now",
+    primaryAction: { intent: "inspect", label: "Review build lane" },
+    secondaryActions: [{ intent: "resolve", label: "Clear update" }],
+  };
+  const schema = briefingResponseSchema("review-escalation", "wip-violation");
+  assert.deepEqual(schema.parse(value), value);
+  assert.equal(schema.toJSONSchema().additionalProperties, false);
+  for (const invalid of [
+    { ...value, primaryAction: { intent: "approve", label: "Approve" } },
+    { ...value, secondaryActions: [{ intent: "open-session", label: "Open" }] },
+    { ...value, secondaryActions: Array(3).fill(value.secondaryActions[0]) },
+    { ...value, headline: " " },
+    { ...value, message: 5 },
+    { ...value, attention: "urgent" },
+    { ...value, secondaryActions: undefined },
+  ]) {
+    assert.equal(schema.safeParse(invalid).success, false);
+  }
+  assert.equal(normalizeSynthesizedBriefing(JSON.stringify(value), "completion"), null);
+});
+
 test("WIP briefings only offer controls with distinct effects", () => {
   assert.deepEqual(
-    parseSynthesizedBriefing(JSON.stringify({
+    normalizeSynthesizedBriefing({
       headline: "Build is over capacity",
       message: "Nine active cards are competing for three build slots.",
       attention: "now",
@@ -184,7 +207,7 @@ test("WIP briefings only offer controls with distinct effects", () => {
         { intent: "open-session", label: "Open a session" },
         { intent: "resolve", label: "Clear update" },
       ],
-    }), "review-escalation", "wip-violation"),
+    }, "review-escalation", "wip-violation"),
     {
       headline: "Build is over capacity",
       message: "Nine active cards are competing for three build slots.",
@@ -217,18 +240,18 @@ test("generated copy preserves source identity and records its action choice", (
   assert.equal(draft.title, "The PR queue is clear");
   assert.equal(draft.briefing.recommendedAction?.intent, "resolve");
   assert.equal(draft.briefing.synthesis?.status, "generated");
-  assert.equal(draft.briefing.synthesis?.version, "cos-note-v9");
+  assert.equal(draft.briefing.synthesis?.version, "cos-note-v10");
 });
 
 test("primary action cannot claim a source fix through an inbox-only resolve", () => {
   assert.equal(
-    parseSynthesizedBriefing(JSON.stringify({
+    normalizeSynthesizedBriefing({
       headline: "Build WIP is over the limit",
       message: "Review active build work and defer low-priority cards.",
       attention: "now",
       primaryAction: { intent: "resolve", label: "Reduce build WIP" },
       secondaryActions: [],
-    }), "review-escalation"),
+    }, "review-escalation"),
     null,
   );
 

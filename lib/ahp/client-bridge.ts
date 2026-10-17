@@ -1,4 +1,4 @@
-import { AhpClient } from "@microsoft/agent-host-protocol/client";
+import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import {
   sessionReducer,
   type SessionAction,
@@ -7,14 +7,14 @@ import {
 } from "@microsoft/agent-host-protocol";
 import { createHash } from "node:crypto";
 
-import { AHPSessionSummary, AHPEvent, AHPStatus, shouldShowSession } from "./types";
-import { classifyError, ConnectionError } from "./connection-error";
+import { type AHPSessionSummary, type AHPEvent, AHPStatus, shouldShowSession } from "./types";
+import { classifyError, type ConnectionError } from "./connection-error";
 import { classifyAhpError } from "./rpc-error";
-import { enrichFromChangeset, ChangesetEnrichment, hashPlanContent } from "./changeset-enricher";
+import { enrichFromChangeset, type ChangesetEnrichment, hashPlanContent } from "./changeset-enricher";
 import { fetchCopilotCliArtifacts, clearPlanCache } from "./plan-artifact";
 import { extractModelFromConfig } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
-import { asChatState, asSessionState, readSessionState } from "./snapshot";
+import { asChatState, asSessionState, withSessionState } from "./snapshot";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT, type CachedSession } from "@/lib/db/session-cache";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
@@ -25,6 +25,8 @@ import {
   mapSdkSessionSummary,
 } from "./session-summary";
 import {
+  isSessionCompletion,
+  shouldEnrichSessionOnChange,
   shouldEnrichSessionOnStartup,
   shouldReadLiveSessionState,
 } from "./session-read-policy";
@@ -123,6 +125,8 @@ function summarySourceRevision(summary: AHPSessionSummary): string {
   if (explicit) return explicit;
   if (!summary.resource || !summary.modifiedAt) return "";
 
+  // A conservative freshness fence, NOT proof that content changed and never
+  // permission to subscribe. Timestamp churn must only invalidate these facts.
   const changes = summary.changes;
   return createHash("sha256")
     .update(JSON.stringify({
@@ -298,6 +302,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   const workerUsageByChat = new Map<string, NonNullable<WorkerActivity["usage"]>>();
   const liveChatStates = new Map<string, { sessionUri: string; state: ChatState }>();
   const chatObservers = new Map<string, { sessionUri: string; close: () => void }>();
+  const readsController = new AbortController();
 
   let disposed = false;
   let client: AhpClient | null = null;
@@ -328,6 +333,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   function dispose() {
     if (disposed) return;
     disposed = true;
+    readsController.abort();
     clearPlanCache();
     pendingInputs.clear();
     workersBySession.clear();
@@ -350,12 +356,22 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
    */
   // Track sessions that changed while enrichment was in-flight
   const dirtyEnrichments = new Set<string>();
+  const completionReads = new Map<string, number>();
+  const enrichmentVersions = new Map<string, number>();
 
   function triggerEnrichment(sessionUri: string) {
     if (disposed || !client) return;
 
     const session = sessions.get(sessionUri);
     if (!session) return;
+    const eligible = () => {
+      const current = sessions.get(sessionUri);
+      return !disposed && current !== undefined
+        && (current.status & AHPStatus.IsArchived) === 0
+        && (shouldReadLiveSessionState(current.status)
+          || completionReads.get(sessionUri) === current.status);
+    };
+    if (!eligible()) return;
 
     // If already in-flight, mark dirty for re-enrichment after completion
     if (pendingEnrichments.has(sessionUri)) {
@@ -364,7 +380,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }
 
     pendingEnrichments.add(sessionUri);
-    const sourceRevisionAtStart = summarySourceRevision(session);
+    let sourceAtStart = riskFactsSourceBinding(session);
+    let versionAtStart = enrichmentVersions.get(sessionUri);
 
     // A refresh is an unknown state until it completes. Clear both in-memory and
     // persisted facts before any asynchronous read so a failed or pending refresh
@@ -379,41 +396,29 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       workers: workersBySession.get(sessionUri),
     });
 
-    const hasFileChanges = (session.changes?.files ?? 0) > 0;
-
     // Read SessionState once. A session subscribe may restore/provider-resume
     // the session, and parallel model + changeset reads previously subscribed
     // to the same channel twice.
     withAHPClient(hostUrl, async (detailClient) => {
-      const sessionStatePromise = readSessionState(detailClient, sessionUri);
-      const changesetPromise = hasFileChanges
-        ? sessionStatePromise.then((state) =>
-            enrichFromChangeset(detailClient, sessionUri, state)
-          )
-        : Promise.resolve(null);
-      const detailsPromise = sessionStatePromise.then((state) =>
-        state
-          ? readSessionDetailsForState(detailClient, state)
-          : ({} satisfies SessionDetails)
-      );
-      const artifactPromise = fetchCopilotCliArtifacts(
-        detailClient,
-        sessionUri,
-        session.modifiedAt,
-      );
-      const modelPromise: Promise<string | undefined> = session.model
-        ? Promise.resolve(session.model)
-        : sessionStatePromise
-            .then((state) => extractModelFromConfig(state?.config))
-            .catch(() => undefined);
-      return Promise.all([
-        changesetPromise,
-        artifactPromise,
-        modelPromise,
-        detailsPromise,
-      ]);
-    })
-      .then(([changesetResult, sessionArtifacts, model, sessionDetails]) => {
+      // Connection acquisition is asynchronous. Recheck queued work immediately
+      // before subscribing, and consume completion permission exactly once.
+      if (!eligible()) return undefined;
+      completionReads.delete(sessionUri);
+      sourceAtStart = riskFactsSourceBinding(session);
+      versionAtStart = enrichmentVersions.get(sessionUri);
+      return withSessionState(detailClient, sessionUri, async (state) => {
+        if (!state) throw new Error("The agent host did not return session state");
+        return Promise.all([
+          (session.changes?.files ?? 0) > 0 ? enrichFromChangeset(detailClient, sessionUri, state) : null,
+          fetchCopilotCliArtifacts(detailClient, sessionUri, session.modifiedAt),
+          session.model ?? extractModelFromConfig(state.config),
+          readSessionDetailsForState(detailClient, state),
+        ]);
+      });
+    }, readsController.signal)
+      .then((result) => {
+        if (!result) return;
+        const [changesetResult, sessionArtifacts, model, sessionDetails] = result;
         if (disposed || !sessions.has(sessionUri)) return;
 
         if (model) {
@@ -421,9 +426,15 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           if (current && !current.model) current.model = model;
         }
         const current = sessions.get(sessionUri);
-        if (!current) return;
-        if (summarySourceRevision(current) !== sourceRevisionAtStart) {
-          dirtyEnrichments.add(sessionUri);
+        if (!current || (current.status & AHPStatus.IsArchived) !== 0) return;
+        const currentSource = riskFactsSourceBinding(current);
+        if (
+          currentSource.sourceRevision !== sourceAtStart.sourceRevision
+          || currentSource.planVersion !== sourceAtStart.planVersion
+          || enrichmentVersions.get(sessionUri) !== versionAtStart
+        ) {
+          // Only a meaningful event may queue another read. In particular, a
+          // subscribe-induced timestamp must not sustain a read/write loop.
           return;
         }
 
@@ -448,6 +459,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         });
       })
       .catch((err) => {
+        if (disposed) return;
         const current = sessions.get(sessionUri);
         if (current) persistSessionSummary(current, CLEAR_ENRICHMENT);
         warn(
@@ -474,7 +486,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   const dirtyInputFetches = new Set<string>();
 
   function fetchInputOnce(sessionUri: string) {
-    if (disposed || !client) return;
+    if (disposed || !client || !stillInputNeeded(sessionUri)) return;
 
     // If already in-flight, mark dirty for re-fetch after completion
     if (pendingInputFetches.has(sessionUri)) {
@@ -504,7 +516,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
   const stillInputNeeded = (sessionUri: string): boolean => {
     const s = sessions.get(sessionUri);
-    return Boolean(s) && (s!.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
+    return s !== undefined && shouldReadLiveSessionState(s.status)
+      && (s.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
   };
 
   /**
@@ -521,6 +534,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
     try {
       await withAHPClient(hostUrl, async (detailClient) => {
+        if (disposed || !stillInputNeeded(sessionUri)) return;
         let sub: Awaited<ReturnType<typeof detailClient.subscribe>>;
         try {
           sub = await detailClient.subscribe(sessionUri);
@@ -577,7 +591,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           await subscription.close();
           await detailClient.unsubscribe(sessionUri).catch(() => {});
         }
-      });
+      }, readsController.signal);
     } catch (err) {
       warn("fetchInput: failed", sessionUri, err instanceof Error ? err.message : err);
       emitNoPendingInput(sessionUri);
@@ -743,6 +757,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     if (!client || disposed) return undefined;
     const existing = chatObservers.get(workerId);
     if (existing?.sessionUri === sessionUri) return workerUsageByChat.get(workerId);
+    const session = sessions.get(sessionUri);
+    if (!session || !shouldReadLiveSessionState(session.status)) return undefined;
     if (existing) stopChatObserver(workerId);
     const observer = observeChatFacts(client, workerId, (state, details) => {
       if (disposed || chatObservers.get(workerId)?.close !== observer.close) return;
@@ -989,23 +1005,16 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       const cached = cacheByUri.get(mapped.resource);
       const unchangedSummary =
         cached && sessionSignature(cached.summary) === sessionSignature(mapped);
-      const cachedHasPlan = Boolean(
-        cached?.enrichment?.planContentHash
-        || cached?.enrichment?.planContent
-        || cached?.enrichment?.artifacts.some((artifact) => artifact.type === "plan"),
-      );
       const planVersionChanged = Boolean(
         cached
-        && cachedHasPlan
         && cached.summary.modifiedAt !== mapped.modifiedAt,
       );
       const unchanged = Boolean(unchangedSummary && !planVersionChanged);
       let hasCurrentCachedEnrichment = false;
 
       if (unchanged && cached) {
-        // Restore the display timestamp only after the fresh source revision
-        // matches. Aggregate counts alone are never enough to reuse enrichment.
-        mapped.modifiedAt = cached.summary.modifiedAt;
+        // Preserve the host's catalog timestamp, not an invented activity time.
+        // Aggregate counts alone are never enough to reuse enrichment.
         if (cached.summary.model && !mapped.model) mapped.model = cached.summary.model;
         if (
           cached.enrichment
@@ -1019,7 +1028,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       } else {
         // Never project stale file/plan facts onto a changed summary. Active
         // sessions can refresh them now; cold sessions remain summary-only until
-        // a host event or an explicit Planwerk action makes a live read necessary.
+        // observed activity or an explicit Planwerk action permits a live read.
         if (cached?.enrichment) staleEnrichmentUris.add(mapped.resource);
         if (!shouldReadLiveSessionState(mapped.status)) {
           coldSummaryOnlyCount++;
@@ -1111,6 +1120,9 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           stopWorkerObserver(event.params.session);
           const existing = sessions.get(event.params.session);
           sessions.delete(event.params.session);
+          completionReads.delete(event.params.session);
+          dirtyEnrichments.delete(event.params.session);
+          enrichmentVersions.set(event.params.session, (enrichmentVersions.get(event.params.session) ?? 0) + 1);
           removeSessionCache(hostUrl, event.params.session);
           clearPendingInput(event.params.session);
           onEvent({
@@ -1125,30 +1137,42 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           if (existing) {
             debug("sessionChanged:", sessionUri, Object.keys(changes).join(","));
             const sourceBefore = riskFactsSourceBinding(existing);
-            const currentEnrichment = enrichments.get(sessionUri);
-            const hadPlan = Boolean(
-              currentEnrichment?.planContentHash
-              || currentEnrichment?.planContent
-              || currentEnrichment?.artifacts.some(
-                (artifact) => artifact.type === "plan",
-              ),
-            );
+            const previousStatus = existing.status;
+            const previousActivity = existing.activity;
+            const previousAHPRevision = (existing as SourceAwareSummary)._planwerkAHPSourceRevision;
+            const previousChanges = JSON.stringify(existing.changes);
             applySdkSessionSummaryChanges(existing, changes);
             if (changes._meta !== undefined) {
               attachAHPSourceRevision(existing, changes);
             }
             const sourceAfter = riskFactsSourceBinding(existing);
+            const contentChanged =
+              previousAHPRevision !== (existing as SourceAwareSummary)._planwerkAHPSourceRevision
+              || previousChanges !== JSON.stringify(existing.changes);
+            const completed = isSessionCompletion(previousStatus, existing.status);
+            const runtimeMask = AHPStatus.Idle | AHPStatus.Error | AHPStatus.InputNeeded;
+            const runtimeChanged = (previousStatus & runtimeMask) !== (existing.status & runtimeMask);
+            const inputMayHaveChanged = previousStatus !== existing.status
+              || previousActivity !== existing.activity
+              || contentChanged;
+            if (completed) completionReads.set(sessionUri, existing.status);
+            else if (existing.status !== previousStatus) completionReads.delete(sessionUri);
             const changesetSourceChanged =
               sourceBefore.sourceRevision !== sourceAfter.sourceRevision;
             const planVersionChanged =
-              hadPlan && sourceBefore.planVersion !== sourceAfter.planVersion;
-            if (changesetSourceChanged || planVersionChanged) {
+              sourceBefore.planVersion !== sourceAfter.planVersion;
+            if (changesetSourceChanged || planVersionChanged || contentChanged || runtimeChanged) {
+              enrichmentVersions.set(sessionUri, (enrichmentVersions.get(sessionUri) ?? 0) + 1);
               enrichments.delete(sessionUri);
               persistSessionSummary(existing, CLEAR_ENRICHMENT);
             }
 
             // Check if session became archived
             if (existing.status & AHPStatus.IsArchived) {
+              enrichmentVersions.set(sessionUri, (enrichmentVersions.get(sessionUri) ?? 0) + 1);
+              completionReads.delete(sessionUri);
+              dirtyEnrichments.delete(sessionUri);
+              enrichments.delete(sessionUri);
               stopWorkerObserver(sessionUri);
               clearPendingInput(sessionUri);
               if (shouldShowSession(existing.status, existing.changes?.files)) {
@@ -1172,9 +1196,12 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
             }
 
             // Sync input state when status changes
-            if (changes.status !== undefined) {
+            if (previousStatus !== existing.status) {
               syncInputState(sessionUri, existing.status);
-            } else if ((existing.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded) {
+            } else if (
+              (existing.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded
+              && inputMayHaveChanged
+            ) {
               // Refetch input if session is still InputNeeded but summary changed
               // (host may have replaced the input request without toggling status)
               fetchInputOnce(sessionUri);
@@ -1190,22 +1217,13 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
               pendingInput: pendingInputs.get(sessionUri),
               workers: workersBySession.get(sessionUri),
             });
-            // Re-trigger enrichment if file changes updated, the session became
-            // idle, or it's InputNeeded but has no plan artifact yet. InputNeeded
-            // (24) is composite and carries the InProgress bit, so the "became
-            // idle" guard alone skips the plan (re)fetch at the exact moment a
-            // plan confirmation appears — and session-state plan.md lives outside
-            // the git tree, so file counts don't move either. The missing-plan
-            // guard scopes this to the case that matters and avoids re-enriching
-            // once the plan is captured.
-            const isInputNeeded = (existing.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
             const missingPlan = !enrichments.get(sessionUri)?.artifacts.some((a) => a.type === "plan");
-            if (
-              changesetSourceChanged
-              || (changes.status !== undefined && !(changes.status & AHPStatus.InProgress))
-              || (isInputNeeded && missingPlan)
-              || (planVersionChanged && !pendingEnrichments.has(sessionUri))
-            ) {
+            if (shouldEnrichSessionOnChange(
+              previousStatus,
+              existing.status,
+              contentChanged,
+              missingPlan && inputMayHaveChanged,
+            )) {
               triggerEnrichment(sessionUri);
             }
           } else {

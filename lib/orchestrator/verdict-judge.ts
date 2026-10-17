@@ -18,6 +18,7 @@ import {
   classifyCopilotFailure,
 } from "./sdk-runtime";
 import type { CopilotRuntimeLease } from "./sdk-runtime-manager";
+import { judgeVerdictSchema } from "./response-schemas.ts";
 
 const SYSTEM_PROMPT = `You are an independent gate judge for an AI software-review workflow.
 
@@ -57,11 +58,13 @@ const sdkTransport: VerdictJudgeTransport = async (reviewResponse) => {
           prompt: JSON.stringify({
             reviewResponse,
           }),
+          source: "system",
         },
+        judgeVerdictSchema,
         30_000
       );
       responseCompleted = true;
-      return response?.data?.content;
+      return response;
     } finally {
       const cleanup = await disposeOneShotSession(
         client,

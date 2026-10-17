@@ -33,6 +33,7 @@ import {
 import { inboxEventMatchesHost, inboxEvents } from "@/lib/inbox/events";
 import type { InboxStreamEvent } from "@/lib/inbox/types";
 import { KanbanCard, type Phase, type RiskLevel } from "@/lib/types";
+import { registerDesktopHosts } from "@/lib/desktop/status";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -193,6 +194,7 @@ let nextStreamId = 0;
 interface HostConnectionResource {
   abortController: AbortController;
   bridgeStarted: boolean;
+  connected: boolean;
   streamWrites: Promise<void>;
 }
 
@@ -210,10 +212,17 @@ const hostStreams = new HostStreamRegistry<
   () => ({
     abortController: new AbortController(),
     bridgeStarted: false,
+    connected: false,
     streamWrites: Promise.resolve(),
   }),
   (resource) => resource.abortController.abort(),
 );
+
+registerDesktopHosts(() => Array.from(hostStreams.entries(), ([hostUrl, partition]) => ({
+  hostUrl,
+  connected: partition.resource.connected,
+  running: partition.cards.filter((card) => card.runtime === "running").length,
+})));
 
 function getAutomationHosts() {
   return Array.from(hostStreams.entries(), ([hostUrl, partition]) => {
@@ -322,9 +331,13 @@ function applyProjectedEvent(
   projected: CardStreamEvent,
 ): void {
   if (projected.type === "init") {
+    partition.resource.connected = true;
     partition.cards = projected.cards;
     partition.initialized = true;
     return;
+  }
+  if (projected.type === "error") {
+    partition.resource.connected = false;
   }
   if (projected.type === "cardChanged") {
     const incoming = projected.card;

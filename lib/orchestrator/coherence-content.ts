@@ -8,7 +8,7 @@ import type {
 import { withAHPClient } from "@/lib/ahp/client-operation";
 import { readReadyChangesetState } from "@/lib/ahp/changeset-readiness";
 import { readTextResource } from "@/lib/ahp/resource-read";
-import { readSessionState } from "@/lib/ahp/snapshot";
+import { readActiveSessionState } from "@/lib/ahp/snapshot";
 import type { CoherenceTier } from "@/lib/types";
 
 const MAX_FILES_PER_CARD = 5;
@@ -68,7 +68,8 @@ function buildMatcher(tier: CoherenceTier, overlapPaths: string[]): (path: strin
  * Fetch the content of a card's overlapping files from its AHP session changeset.
  * Uses an exclusively owned AHP client for the complete read. Best-effort:
  * returns `failed: true` when the changeset can't be read so the caller can decide
- * how to treat degraded evidence (e.g. keep a high-risk pair blocked).
+ * how to treat degraded evidence (e.g. keep a high-risk pair blocked). Background
+ * coherence checks never restore cold sessions just to obtain that evidence.
  */
 export async function fetchOverlapContent(
   hostUrl: string,
@@ -81,7 +82,7 @@ export async function fetchOverlapContent(
   try {
     return await withAHPClient(hostUrl, async (client) => {
       const sessionState = await withTimeout(
-        readSessionState(client, sessionUri),
+        readActiveSessionState(client, sessionUri),
         READ_TIMEOUT_MS,
       );
       const changeset = sessionState?.changesets?.length
@@ -125,7 +126,12 @@ export async function fetchOverlapContent(
 
       return { sessionUri, files, failed: false };
     });
-  } catch {
+  } catch (error) {
+    console.warn(
+      "[coherence-content] Live overlap read unavailable:",
+      sessionUri,
+      error instanceof Error ? error.message : error,
+    );
     return { sessionUri, files: [], failed: true };
   }
 }

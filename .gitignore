@@ -15,6 +15,13 @@
 
 # next.js
 /.next/
+/.next-desktop/
+/desktop/node_modules/
+/desktop/.hutch/
+/desktop/build/
+/desktop/artifacts/
+/desktop/payload/
+/desktop/generated/
 /out/
 
 # production

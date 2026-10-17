@@ -21,9 +21,10 @@ const channelOwners = new WeakMap<object, Map<string, number>>();
 
 export function shouldObserveChat(chat: SessionChatSummary, sessionStatus: number, defaultChat: string | undefined, alreadyObserved: boolean): boolean {
   if (chat.interactivity === "hidden" || (sessionStatus & 64) !== 0 || (chat.status !== undefined && (chat.status & 64) !== 0)) return false;
-  return alreadyObserved
-    || (chat.status !== undefined && shouldReadLiveSessionState(chat.status))
-    || (chat.resource === defaultChat && shouldReadLiveSessionState(sessionStatus));
+  return alreadyObserved || (shouldReadLiveSessionState(sessionStatus) && (
+    (chat.status !== undefined && shouldReadLiveSessionState(chat.status))
+    || chat.resource === defaultChat
+  ));
 }
 
 export function canSendToChat(chat: { interactivity?: string } | undefined): boolean {

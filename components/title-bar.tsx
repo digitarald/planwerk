@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useShallow } from "zustand/react/shallow";
 import Image from "next/image";
 import { Bot, Columns3, Eye, EyeOff, FolderOpen, ListTree, PanelTop } from "lucide-react";
@@ -24,7 +24,12 @@ import { useUIStore, type WorkspaceMode } from "@/lib/store/ui-store";
 import { ATTENTION_META, highestAttention } from "@/lib/utils/attention";
 import { cn } from "@/lib/utils";
 
+const subscribeDesktop = () => () => {};
+const isDesktop = () => Reflect.get(window, "__PLANWERK_DESKTOP__") === true;
+const isWebServer = () => false;
+
 export function TitleBar() {
+  const desktop = useSyncExternalStore(subscribeDesktop, isDesktop, isWebServer);
   const cards = useBoardStore((s) => s.cards);
   const attentionCount = cards.filter((c) => c.attention !== "none").length;
   const topAttention = highestAttention(cards);
@@ -53,7 +58,10 @@ export function TitleBar() {
   const isFiltered = workspaceFilters.size > 0;
 
   return (
-    <header className="relative z-sticky flex h-11 shrink-0 items-center border-b border-border/60 bg-background px-3 shadow-elevation-xs sm:px-4">
+    <header data-desktop-titlebar={desktop || undefined} className={cn(
+      "relative z-sticky flex h-11 shrink-0 items-center border-b border-border/60 bg-background px-3 shadow-elevation-xs sm:px-4",
+      desktop && "select-none !pl-[88px]",
+    )}>
       <div className="flex shrink-0 items-center gap-2.5">
         <Image src="/logo-light-64.png" alt="Planwerk" width={24} height={24} className="dark:hidden" />
         <Image src="/logo-dark-64.png" alt="Planwerk" width={24} height={24} className="hidden dark:block" />

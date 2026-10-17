@@ -1,3 +1,10 @@
+import {
+  ConnectionError,
+  ConnectionErrors,
+  ErrorCodes,
+  ResponseError,
+} from "vscode-jsonrpc/node.js";
+
 export interface ManagedCopilotRuntimeClient {
   start(): Promise<void>;
   stop(): Promise<Error[]>;
@@ -58,6 +65,25 @@ export function classifyCopilotFailure(error: unknown): CopilotFailureKind {
     name === "CtoSessionCleanupTimeoutError"
   ) {
     return "runtime-invalidating";
+  }
+  // SDK 1.0.22 propagates vscode-jsonrpc errors. Only these codes establish
+  // transport failure; response data (including data.code) is application-owned.
+  if (error instanceof ResponseError) {
+    switch (error.code) {
+      case ErrorCodes.MessageWriteError:
+      case ErrorCodes.MessageReadError:
+      case ErrorCodes.PendingResponseRejected:
+      case ErrorCodes.ConnectionInactive:
+        return "transport";
+      default:
+        return "domain";
+    }
+  }
+  if (error instanceof ConnectionError) {
+    return error.code === ConnectionErrors.Closed ||
+      error.code === ConnectionErrors.Disposed
+      ? "transport"
+      : "domain";
   }
   if (/^(ECONNRESET|ECONNREFUSED|EPIPE|ENOTCONN|ETIMEDOUT)$/i.test(code) ||
       /\b(transport|connection|websocket|socket|broken pipe|rpc connection closed|client (?:is )?(?:stopped|closed|not started)|runtime (?:exited|unavailable))\b/i.test(

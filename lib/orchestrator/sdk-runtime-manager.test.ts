@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { test } from "node:test";
+import {
+  ConnectionError,
+  ConnectionErrors,
+  ErrorCodes,
+  ResponseError,
+} from "vscode-jsonrpc/node.js";
 
 import {
   classifyCopilotFailure,
@@ -69,6 +76,16 @@ function createHarness(options: {
   });
   return { clients, manager };
 }
+
+test("SDK and application share JSON-RPC error constructor identities", () => {
+  const require = createRequire(import.meta.url);
+  const sdkRequire = createRequire(require.resolve("@github/copilot-sdk"));
+  assert.equal(
+    sdkRequire.resolve("vscode-jsonrpc/node.js"),
+    require.resolve("vscode-jsonrpc/node.js"),
+    "Update the direct vscode-jsonrpc pin with the SDK to preserve error classification.",
+  );
+});
 
 test("serializes concurrent startup and shares one client", async () => {
   let releaseStart!: () => void;
@@ -192,6 +209,153 @@ test("transport failures are distinct from domain and parsing failures", () => {
     ),
     false,
   );
+});
+
+test("JSON-RPC transport codes override message and application data", () => {
+  for (const code of [
+    ErrorCodes.MessageWriteError,
+    ErrorCodes.MessageReadError,
+    ErrorCodes.PendingResponseRejected,
+    ErrorCodes.ConnectionInactive,
+  ]) {
+    const error = new ResponseError(code, "Session not found", {
+      code: "workflow_not_found",
+    });
+    assert.equal(classifyCopilotFailure(error), "transport", `code ${code}`);
+    assert.equal(isCopilotRuntimeInvalidatingFailure(error), true);
+  }
+});
+
+test("domain and unknown RPC codes override transport-like messages and data", () => {
+  for (const code of [
+    ErrorCodes.ParseError,
+    ErrorCodes.InvalidRequest,
+    ErrorCodes.MethodNotFound,
+    ErrorCodes.InvalidParams,
+    ErrorCodes.InternalError,
+    ErrorCodes.ServerNotInitialized,
+    ErrorCodes.UnknownErrorCode,
+    -32800,
+    -32050,
+    1,
+  ]) {
+    for (const data of [
+      undefined,
+      null,
+      "ECONNRESET",
+      42,
+      [],
+      { code: "workflow_not_found" },
+      { code: "canvas_handler_error", message: "socket closed" },
+      { code: "ECONNRESET" },
+      { code: ErrorCodes.ConnectionInactive },
+      { code: { code: ErrorCodes.MessageWriteError } },
+      { unknown: true },
+    ]) {
+      const error = new ResponseError(
+        code,
+        "Cannot configure socket connection transport",
+        data,
+      );
+      assert.equal(classifyCopilotFailure(error), "domain", `code ${code}`);
+      assert.equal(isCopilotRuntimeInvalidatingFailure(error), false);
+    }
+  }
+});
+
+test("native JSON-RPC connection errors use their own code namespace", () => {
+  for (const code of [ConnectionErrors.Closed, ConnectionErrors.Disposed]) {
+    assert.equal(
+      classifyCopilotFailure(new ConnectionError(code, "Request failed")),
+      "transport",
+    );
+  }
+  for (const code of [ConnectionErrors.AlreadyListening, 99]) {
+    assert.equal(
+      classifyCopilotFailure(new ConnectionError(code, "Connection failure")),
+      "domain",
+    );
+  }
+});
+
+test("malformed and lookalike payloads do not acquire RPC code semantics", () => {
+  for (const error of [
+    undefined,
+    null,
+    1,
+    {},
+    { code: ErrorCodes.MessageWriteError, message: "Request failed" },
+    { code: String(ErrorCodes.MessageWriteError), data: { code: "ECONNRESET" } },
+    { code: ConnectionErrors.Closed, message: "Request failed" },
+    { data: { code: ErrorCodes.ConnectionInactive } },
+    Object.assign(new Error("Request failed"), { data: { code: "ECONNRESET" } }),
+    Object.assign(new Error("Request failed"), { code: 1 }),
+  ]) {
+    assert.equal(classifyCopilotFailure(error), "domain");
+  }
+  for (const code of [NaN, Infinity, -32099.5, "-32099", undefined]) {
+    const error = new ResponseError(
+      code as number,
+      "Connection closed",
+      { code: "ECONNRESET" },
+    );
+    assert.equal(classifyCopilotFailure(error), "domain");
+  }
+});
+
+test("native transport and unstructured SDK errors retain fallback classification", () => {
+  for (const code of ["ECONNRESET", "ECONNREFUSED", "EPIPE", "ENOTCONN", "ETIMEDOUT"]) {
+    assert.equal(
+      classifyCopilotFailure(Object.assign(new Error("Request failed"), { code })),
+      "transport",
+    );
+  }
+  for (const message of [
+    "The in-process runtime connection is closed.",
+    "Failed to write a frame to the in-process runtime connection.",
+    "Client not started",
+    "runtime exited",
+    "socket closed",
+  ]) {
+    assert.equal(classifyCopilotFailure(new Error(message)), "transport");
+  }
+});
+
+test("CTO cleanup timeout takes precedence over RPC transport and domain codes", () => {
+  for (const code of [ErrorCodes.MessageWriteError, ErrorCodes.InvalidParams]) {
+    const error = Object.assign(new ResponseError(code, "socket closed"), {
+      name: "CtoSessionCleanupTimeoutError",
+    });
+    assert.equal(classifyCopilotFailure(error), "runtime-invalidating");
+  }
+  assert.equal(
+    classifyCopilotFailure(Object.assign(new Error("Request failed"), {
+      code: "CTO_SESSION_CLEANUP_TIMEOUT",
+    })),
+    "runtime-invalidating",
+  );
+});
+
+test("domain RPC failures do not retire a healthy leased runtime", async () => {
+  const { clients, manager } = createHarness();
+  const lease = await manager.acquireClient();
+  const error = new ResponseError(
+    ErrorCodes.InternalError,
+    "Cannot configure socket connection",
+    { code: "canvas_handler_error" },
+  );
+
+  if (isCopilotRuntimeInvalidatingFailure(error)) {
+    await lease.invalidate(error);
+  }
+  await lease.release();
+
+  assert.equal(await manager.getClient(), lease.client);
+  assert.equal(lease.client.stopCalls, 0);
+  assert.equal(manager.getHealth().healthy, true);
+  assert.equal(manager.getHealth().restartCount, 0);
+  assert.equal(clients.length, 1);
+  await manager.shutdown();
 });
 
 test("bounds repeated resets and permits recovery after the window", async () => {

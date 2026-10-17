@@ -1,6 +1,7 @@
 import "server-only";
 
 import path from "node:path";
+import { dataDirectory } from "../data-directory";
 
 import { CopilotClient } from "@github/copilot-sdk";
 
@@ -13,8 +14,7 @@ import {
 } from "./sdk-runtime-manager";
 
 const PLANWERK_COPILOT_BASE_DIRECTORY = path.join(
-  process.cwd(),
-  ".planwerk",
+  dataDirectory(),
   "copilot-sdk"
 );
 
@@ -22,7 +22,7 @@ const manager = new CopilotRuntimeManager({
   createClient: () =>
     new CopilotClient({
       mode: "empty",
-      workingDirectory: process.cwd(),
+      workingDirectory: process.env.PLANWERK_DATA_DIR || process.cwd(),
       baseDirectory: PLANWERK_COPILOT_BASE_DIRECTORY,
       clientInfo: {
         applicationName: "planwerk",

@@ -1,6 +1,7 @@
 "use client";
 
 import { AppShell } from "@/components/app-shell";
+import { DesktopNavigation } from "@/components/desktop-navigation";
 import { AgentWorkspace } from "@/components/agent-workspace";
 import { CommandPalette } from "@/components/command-palette";
 import { Onboarding } from "@/components/connection/onboarding";
@@ -15,6 +16,7 @@ export default function Home() {
   if (status === "disconnected") {
     return (
       <AppShell>
+        <DesktopNavigation />
         <Onboarding />
       </AppShell>
     );
@@ -24,6 +26,7 @@ export default function Home() {
     <NotificationProvider>
       <LiveSessionProvider>
         <AppShell>
+          <DesktopNavigation />
           {status === "reconnecting" ? <Onboarding /> : <AgentWorkspace />}
           {status === "connected" && (
             <>

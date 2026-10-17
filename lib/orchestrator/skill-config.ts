@@ -240,7 +240,7 @@ export function loadConfig(projectPath?: string): PlanwerkConfig {
   if (projectPath) {
     searchPaths.push(resolve(projectPath, ".github/planwerk.yml"));
   } else {
-    searchPaths.push(resolve(process.cwd(), ".github/planwerk.yml"));
+    searchPaths.push(resolve(process.env.PLANWERK_DATA_DIR || process.cwd(), ".github/planwerk.yml"));
   }
 
   for (const filePath of searchPaths) {

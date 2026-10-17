@@ -137,6 +137,64 @@ Config: `coherence.{enabled, module_depth, block_high_risk_ship}` in `planwerk.y
 └────────────────────────────────────────────────────────────┘
 ```
 
+### AHP 1.0 runtime facts
+
+Every build offers only AHP `1.0.0`; there is no older-version fallback or retry
+with an untested host version. The SDK dependency is pinned to that release.
+
+Root-channel session summaries preserve the host's ordered lightweight chat
+catalogue and `defaultChat` routing hint, including per-chat status,
+interactivity, and aggregate change counts. Missing chat status remains unknown.
+Hidden chats are omitted from the UI. Read-only chats remain visible, while
+message dispatch checks both the fresh session catalogue and chat snapshot
+before sending to the default chat.
+
+Cold sessions stay catalogue-only because subscribing can restore their
+provider. Active chat observers use the lightweight catalogue when available;
+a parent-session subscription supplies missing chat discovery or routing data.
+Once established, observers survive idle and input-needed states so shells and
+subagents in `ChatState.backgroundWork` remain visible until the host removes
+them. Hidden, archived, and removed chats release their observers.
+
+Catalog timestamps are freshness hints, not evidence of a user or assistant turn.
+VS Code may restore a cold provider on subscribe; SDK resume/shutdown journal
+writes can then change the session's displayed recency
+([upstream issue](https://github.com/microsoft/vscode/issues/342118)).
+Timestamp-only updates may invalidate cached file/plan evidence, but never
+authorize enrichment, input refetches, or dirty enrichment retries. Cold startup
+and idle catalog changes remain subscription-free, including explicit content
+revision changes. New chat observers also require an active parent session.
+
+An observed active-to-idle/error transition permits one final enrichment read,
+including zero-file outcomes. Queued work rechecks eligibility after connection
+acquisition; completion permission is consumed once. The session subscription
+stays owned through dependent chat/changeset reads to avoid evicting and restoring
+between them. Removed/archived sessions and disposed bridges reject late results.
+Background coherence and auto-answer validation check the passive catalog before
+reading live state. Explicit inspection, send, resume, and authorized review
+operations retain their intentional live reads.
+
+AHP 1.0 has no advertised non-restoring session-snapshot operation. Catalog
+checks are not atomic residency guarantees, and even a bounded completion read
+can race host eviction. When freshness changes during a read, its file/plan
+facts are discarded rather than relabelled current or repeatedly restored.
+Without an immutable host revision, the timestamp/count digest remains only a
+conservative cache-binding fence, not a content-change notification. Missing
+facts wait for real activity or explicit inspection.
+
+Each observed chat's static changeset catalogue is followed through its own
+channels. Card details show scoped file facts, and board cards show active
+background-work counts. Computing, recomputing, errored, and unavailable
+changesets do not expose current files. Templated per-turn and comparison views
+are not expanded. Shared changeset channels use reference-counted ownership;
+only the last observer releases the server subscription.
+
+Chat changesets and background work are informational. They never contribute
+to session change totals, gate freshness, phase transitions, or coordinator
+authority. Verified session-scoped changesets remain the source of file evidence
+for those existing workflows. See `lib/ahp/chat-facts.ts` and
+`lib/ahp/client-bridge.ts` for observation and ownership.
+
 ## Tech Stack
 
 | Layer | Choice |
@@ -207,7 +265,13 @@ Config: `coherence.{enabled, module_depth, block_high_risk_ship}` in `planwerk.y
 ### CTO SDK continuity and authority
 
 The CTO uses one restart-safe Copilot SDK conversation whose ID is stored in
-SQLite. Every request acquires an expiring SQLite lease, resumes the conversation,
+SQLite. The shared SDK runtime uses `mode: "empty"` and an explicit
+`dataDirectory()/copilot-sdk` base directory, which overrides the spawned
+runtime's `COPILOT_HOME`; it never attaches to the desktop runtime or falls back
+to the global Copilot session directory. Runtime startup and health checks do not
+list or resume sessions. The coordinator checks metadata only for its persisted
+ID; unrelated sessions are never candidates for continuity.
+Every request acquires an expiring SQLite lease, resumes the conversation,
 and re-registers its tools, hooks, event handlers, and permission policy. Release
 atomically quarantines the binding before disconnect; a fully successful
 disconnect restores the active binding without deleting history. Any reported

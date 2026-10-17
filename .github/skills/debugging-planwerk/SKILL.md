@@ -181,9 +181,30 @@ its chats is not: VS Code Agent Host may restore evicted state, invoke the
 provider's resume path, refresh session git state, pin residency, and bump the
 Copilot CLI session's `modifiedAt`. Planwerk startup must therefore remain
 catalogue-only for cold sessions. It reads live session state only for sessions
-already `InProgress`/`InputNeeded`, after a relevant host event, or while carrying
-out an explicit user/orchestrator action. A cold cache, missing enrichment, or a
-new host URL must never fan out subscriptions across the session catalogue.
+already `InProgress`/`InputNeeded`, for one final enrichment after an observed
+active-to-idle/error transition, or while carrying out an explicit
+user/authorized orchestrator action. A cold cache, missing enrichment, a
+timestamp-only event, or a new host URL must never fan out subscriptions across
+the session catalogue. A cold chat cannot bypass this through a stale
+`InProgress` chat summary: new observers require an active parent session.
+
+`modifiedAt` is not evidence of a turn. A session subscription can cause SDK
+resume/shutdown journal writes and change the timestamp that VS Code displays as
+recency. The bridge uses timestamp/count fallback revisions only to invalidate
+uncertain cached facts, never as permission to subscribe. Its dirty queue
+rechecks eligibility after connecting and cannot retry a consumed completion
+read. Enrichment keeps the session subscribed through dependent reads; late
+results are discarded on revision drift, removal, archiving, or bridge disposal.
+Background coherence and auto-answer validation use `readActiveSessionState`
+to check the passive catalog first. AHP 1.0 offers no non-restoring snapshot
+operation or atomic residency check, so a completion read can still race host
+eviction. Do not label old file/plan facts current to hide this limitation.
+
+The direct SDK lane is separate: `sdk-runtime.ts` configures empty mode and
+`dataDirectory()/copilot-sdk` as its explicit base directory. Health checks do
+not list/resume sessions, and `cto-session-manager.ts` only checks metadata and
+resumes the SQLite-bound coordinator ID under its existing lease. It must not
+discover continuity by scanning global `~/.copilot` history.
 
 Cold cards without a current authoritative gate revision are parked by the
 heartbeat: they do not enter automation, coherence, or WIP counts. Missing
@@ -238,14 +259,15 @@ For a specific session, subscribe to its `resource` and inspect `snapshot.state`
 `defaultChat`, `status`, `lifecycle`. For changeset-review state, subscribe to the selected
 static session changeset and inspect its `ChangesetState.files[].reviewed`; its catalogue
 `capabilities.review` is presence-based (an empty object is supported). Use
-`lib/ahp/snapshot.ts` helpers (`readSessionState`, `readChatState`,
-`readChangesetState`) to narrow the snapshot union. Standalone SDK scripts run under
+`readSessionState` and `readChatState` from `lib/ahp/snapshot.ts`, and
+`asChangesetState` from `lib/ahp/changeset-readiness.ts`, to narrow snapshots.
+Standalone SDK scripts run under
 `node --experimental-strip-types` and can import `../lib/ahp/*.ts` **relatively** (the
 `@/` alias does not resolve outside Next/tsc).
 
 VS Code's **All Changes** entry is the static catalogue item whose
 `changeKind === "session"`. Its subscribed snapshot can initially be
-`status:"computing"`; a client must briefly reduce the subsequent `changeset/*` actions
+`status:"computing"` or `status:"recomputing"`; a client must briefly reduce the subsequent `changeset/*` actions
 into that snapshot until `changeset/statusChanged` reports `ready`, or keep the result
 unknown and retry. Do **not** re-subscribe to get a fresh snapshot after readiness:
 current VS Code starts another computation for each subscription. Closing immediately
@@ -253,7 +275,8 @@ on the computing snapshot can leave `changesetVerified:false` even though VS Cod
 renders the completed All Changes view.
 Every fresh changeset subscription may also start a new computation. Consumers must use
 `readReadyChangesetState` to reduce the existing subscription through `ready`/`error`
-rather than close a `computing` snapshot and subscribe again. This applies to card
+rather than close a `computing`/`recomputing` snapshot and subscribe again. Retained
+files during recomputation are not current evidence. This applies to card
 enrichment, file-review mutations, and coherence reads.
 
 Subscription ownership is URI-global within one SDK `AhpClient`, not local to the
@@ -263,6 +286,20 @@ URI. Do not overlap a one-shot read and a long-lived observer for the same URI o
 client. Prefer one subscribed reducer, serialize operations, or use separately owned
 clients. Repeated subscribe/unsubscribe polling also touches residency and can repeatedly
 restore cold state; consume actions from the original subscription when possible.
+The live chat-facts observer in `lib/ahp/chat-facts.ts` reference-counts shared
+changeset channels and unsubscribes only when their last observer releases them.
+It follows `chat/changesetsChanged` and clears scoped file facts while a changeset
+is computing, recomputing, errored, or unavailable. These facts never replace the
+session changeset used by gates.
+
+Before subscribing to inspect workers, check `SessionSummary.chats` and
+`defaultChat` on the root catalogue. Preserve missing chat status as unknown and
+respect `interactivity`: hidden chats are omitted, read-only chats accept no
+messages. Existing live observers continue through idle/input-needed states;
+`ChatState.backgroundWork` and `chat/backgroundWorkSet`/`Removed` report active
+shells and subagents independently of turn lifetime. Ending or removing a chat
+releases its observers and clears background facts.
+
 Planwerk's imperative routes and orchestrator helpers use `lib/ahp/client-operation.ts`
 for one exclusive connection per logical operation; the board bridge keeps a separate
 persistent observer client and performs one-shot enrichment/input reads on operation clients.
@@ -334,11 +371,14 @@ npm run typecheck   # tsc --noEmit
 npm run lint        # eslint
 npm test            # node --test lib/**/*.test.ts
 ```
-Harness caveat: `node --test` runs modules directly, so it **cannot import** files that
-use the `@/` path alias or `server-only` (most of `lib/ahp` and `lib/orchestrator`). Only
-dependency-light, alias-free modules (e.g. `lib/orchestrator/coherence-detect.ts`) are
-unit-tested this way. To exercise alias/`server-only` code, drive it through a live
-smoke script (source 3) or replicate the pure logic in a standalone `node -e` snippet.
+Harness caveat: `node --test` runs modules directly; `@/` aliases, `server-only`,
+and TypeScript parameter properties need test support. Existing integration
+tests use scoped `node:module` `registerHooks` to resolve aliases and replace
+external boundaries with fakes. `lib/ahp/client-bridge.test.ts` exercises the real
+event bridge, snapshot reads, explicit sending, and turn resume without touching
+a live host. Prefer these fakes over smoke subscriptions when investigating
+timestamp/residency side effects. `sdk-runtime-isolation.test.ts` verifies the
+direct SDK configuration and health path without launching a runtime.
 
 ### 8. Git archaeology — when did this change?
 Behavior regressions often trace to a recent AHP/SDK upgrade. Use blame and the pickaxe:

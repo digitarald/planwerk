@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
 
 import type {
   InboxActionIntent,
@@ -81,7 +82,7 @@ const PRIMARY_ACTIONS_BY_KIND: Record<
   conflict: ["inspect", "open-session"],
   "coordinator-action": ["mark-read", "open-session", "resolve"],
 };
-const BRIEFING_SYNTHESIS_VERSION = "cos-note-v9";
+const BRIEFING_SYNTHESIS_VERSION = "cos-note-v10";
 const INTERNAL_METADATA_KEYS = new Set([
   "cardId",
   "chatUri",
@@ -127,14 +128,22 @@ Return only a JSON delivery envelope:
 
 The envelope is transport metadata, not a writing template. Include up to two secondary actions only when they are genuinely useful. Choose the primary intent for the next interface action, not the hoped-for real-world outcome. A resolve intent only clears the inbox item; it never fixes, approves, ships, or changes the underlying work. Reply, approve, review, inspect, and open-session open the relevant Planwerk context so the lead can take that action. Use only the allowed intents supplied with the evidence.`;
 
-function cleanJsonEnvelope(content: string): string {
-  const cleaned = content
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/, "")
-    .trim();
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  return start >= 0 && end > start ? cleaned.slice(start, end + 1) : cleaned;
+export function briefingResponseSchema(kind: InboxItemKind, eventType?: string) {
+  const allowed = allowedActions(kind, eventType);
+  const text = z.string().trim().min(1);
+  return z.strictObject({
+    headline: text,
+    message: text,
+    attention: z.enum(["now", "soon", "routine"]),
+    primaryAction: z.strictObject({
+      intent: z.enum(allowed.primary),
+      label: text,
+    }),
+    secondaryActions: z.array(z.strictObject({
+      intent: z.enum(allowed.secondary),
+      label: text,
+    })).max(2),
+  });
 }
 
 function cleanText(value: unknown, maxLength: number): string | null {
@@ -161,59 +170,54 @@ function validIntent(
     allowed.includes(value as InboxActionIntent);
 }
 
-export function parseSynthesizedBriefing(
-  content: string,
+export function normalizeSynthesizedBriefing(
+  parsed: unknown,
   kind: InboxItemKind,
   eventType?: string,
 ): SynthesizedInboxBriefing | null {
-  try {
-    const parsed: unknown = JSON.parse(cleanJsonEnvelope(content));
-    if (!parsed || typeof parsed !== "object") return null;
-    const candidate = parsed as Record<string, unknown>;
-    const headline = cleanText(candidate.headline, 100);
-    const message = cleanText(candidate.message, 520);
-    const attention = candidate.attention;
-    const primary = candidate.primaryAction;
-    const secondary = candidate.secondaryActions;
-    const allowed = allowedActions(kind, eventType);
-    if (
-      !headline ||
-      !message ||
-      (attention !== "now" && attention !== "soon" && attention !== "routine") ||
-      !primary ||
-      typeof primary !== "object"
-    ) {
-      return null;
-    }
-
-    const primaryCandidate = primary as Record<string, unknown>;
-    const primaryIntent = primaryCandidate.intent;
-    const primaryLabel = cleanText(primaryCandidate.label, 32);
-    if (!validIntent(primaryIntent, allowed.primary) || !primaryLabel) {
-      return null;
-    }
-
-    if (!Array.isArray(secondary)) return null;
-    const secondaryActions: SynthesizedInboxBriefing["secondaryActions"] = [];
-    for (const value of secondary.slice(0, 2)) {
-      if (!value || typeof value !== "object") continue;
-      const action = value as Record<string, unknown>;
-      const intent = action.intent;
-      const label = cleanText(action.label, 32);
-      if (!validIntent(intent, allowed.secondary) || !label) continue;
-      if (intent === primaryIntent) continue;
-      secondaryActions.push({ intent, label });
-    }
-    return {
-      headline,
-      message,
-      attention,
-      primaryAction: { intent: primaryIntent, label: primaryLabel },
-      secondaryActions,
-    };
-  } catch {
+  if (!parsed || typeof parsed !== "object") return null;
+  const candidate = parsed as Record<string, unknown>;
+  const headline = cleanText(candidate.headline, 100);
+  const message = cleanText(candidate.message, 520);
+  const attention = candidate.attention;
+  const primary = candidate.primaryAction;
+  const secondary = candidate.secondaryActions;
+  const allowed = allowedActions(kind, eventType);
+  if (
+    !headline ||
+    !message ||
+    (attention !== "now" && attention !== "soon" && attention !== "routine") ||
+    !primary ||
+    typeof primary !== "object"
+  ) {
     return null;
   }
+
+  const primaryCandidate = primary as Record<string, unknown>;
+  const primaryIntent = primaryCandidate.intent;
+  const primaryLabel = cleanText(primaryCandidate.label, 32);
+  if (!validIntent(primaryIntent, allowed.primary) || !primaryLabel) {
+    return null;
+  }
+
+  if (!Array.isArray(secondary)) return null;
+  const secondaryActions: SynthesizedInboxBriefing["secondaryActions"] = [];
+  for (const value of secondary.slice(0, 2)) {
+    if (!value || typeof value !== "object") continue;
+    const action = value as Record<string, unknown>;
+    const intent = action.intent;
+    const label = cleanText(action.label, 32);
+    if (!validIntent(intent, allowed.secondary) || !label) continue;
+    if (intent === primaryIntent) continue;
+    secondaryActions.push({ intent, label });
+  }
+  return {
+    headline,
+    message,
+    attention,
+    primaryAction: { intent: primaryIntent, label: primaryLabel },
+    secondaryActions,
+  };
 }
 
 export function buildBriefingSynthesisPrompt(

@@ -3,10 +3,11 @@ import "server-only";
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import path from "path";
+import { dataDirectory } from "../data-directory";
 
 import type { OtlpNotification } from "./telemetry-transport";
 
-const TELEMETRY_DIR = path.join(process.cwd(), ".planwerk", "telemetry");
+const TELEMETRY_DIR = path.join(dataDirectory(), "telemetry");
 const LOGS_FILE = path.join(TELEMETRY_DIR, "logs.ndjson");
 const MAX_LINES = 10_000;
 

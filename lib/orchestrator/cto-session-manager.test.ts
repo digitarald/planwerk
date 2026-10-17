@@ -86,6 +86,27 @@ function harness() {
 
 const config = { model: "model-1", availableTools: [] } satisfies SessionConfig;
 
+test("only the persisted coordinator ID is looked up and resumed, never a foreign session", async () => {
+  const { db, store, calls, client, sessions } = harness();
+  sessions.add("foreign-vscode-session");
+  const metadataIds: string[] = [];
+  const getMetadata = client.getSessionMetadata;
+  client.getSessionMetadata = async (id) => {
+    metadataIds.push(id);
+    return getMetadata(id);
+  };
+  const manager = new CtoSessionManager(store);
+  const created = await manager.open(client, "model-1", config);
+  await created.release();
+  assert.deepEqual(metadataIds, []);
+  const resumed = await manager.open(client, "model-1", config);
+  await resumed.release();
+  assert.deepEqual(metadataIds, ["created-1"]);
+  assert.equal(calls.some((call) => call.includes("foreign-vscode-session")), false);
+  assert.equal(sessions.has("foreign-vscode-session"), true);
+  db.close();
+});
+
 test("creates once, persists the ID, resumes, and disconnects without deletion", async () => {
   const { db, store, calls, client } = harness();
   const manager = new CtoSessionManager(store);

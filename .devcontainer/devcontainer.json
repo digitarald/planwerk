@@ -1,10 +1,11 @@
 {
   "name": "Planwerk",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "image": "mcr.microsoft.com/devcontainers/base:3.0.8-noble@sha256:d7c468679f45a52ad3673d06656b5bf16e488990b17216a1fa295d9e1f89d724",
   "features": {
     "ghcr.io/devcontainers/features/node:2": {
       "version": "24.17.0",
-      "npmVersion": "11.13.0",
+      "npmVersion": "none",
+      "pnpmVersion": "none",
       "nodeGypDependencies": true
     },
     "ghcr.io/devcontainers/features/github-cli:1": {}

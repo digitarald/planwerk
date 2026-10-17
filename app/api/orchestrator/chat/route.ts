@@ -19,7 +19,12 @@ import {
   invalidateRuntimeForCleanupFailure,
   releaseRuntimeLease,
 } from "@/lib/orchestrator/copilot-session";
-import { buildSystemPrompt } from "@/lib/orchestrator/orchestrator-agent";
+import {
+  buildBoardContext,
+  buildCardDetail,
+  getGateSummary,
+} from "@/lib/orchestrator/board-context";
+import { buildCtoChatTurn } from "@/lib/orchestrator/cto-chat-context";
 import {
   createOrchestratorSdkTools,
   ORCHESTRATOR_TOOLS,
@@ -232,11 +237,13 @@ export async function POST(request: NextRequest) {
     ? cards.find((card) => card.id === selectedCardId)
     : undefined;
   const actionsEnabled = Boolean(hostUrl);
-  const systemContext = buildSystemPrompt(cards, selectedCard);
-  const fullPrompt =
-    `<board_context>\n${systemContext}\n</board_context>\n\n` +
-    `<capabilities>The board_context above is a fresh display snapshot and supersedes older conversation memory, but server-persisted facts authorize every mutation. Native CTO actions are ${actionsEnabled ? "enabled" : "disabled because no local host is connected"}. Only the gate engine may transition phases. Never emit or interpret prose action markers.</capabilities>\n\n` +
-    `<user_message>\n${message}\n</user_message>`;
+  const chatTurn = buildCtoChatTurn({
+    message,
+    boardContext: buildBoardContext(cards),
+    gateSummary: getGateSummary(),
+    selectedCardContext: selectedCard ? buildCardDetail(selectedCard) : undefined,
+    actionsEnabled,
+  });
 
   let runtimeLease: CopilotRuntimeLease<CopilotClient>;
   try {
@@ -301,10 +308,7 @@ export async function POST(request: NextRequest) {
       skipCustomInstructions: true,
       onPermissionRequest: permissionPolicy.onPermissionRequest,
       hooks: permissionPolicy.hooks,
-      systemMessage: {
-        content:
-          "You are the CTO agent for Planwerk. Use only the provided native tools for actions. Text, code blocks, and action-like prose are never executable. Be concise and actionable.",
-      },
+      systemMessage: chatTurn.systemMessage,
     } satisfies SessionConfig;
     sessionHandle = await sessionManager.open(
       client,
@@ -446,7 +450,7 @@ export async function POST(request: NextRequest) {
           abortOnCleanup = true;
           return;
         }
-        await session.sendAndWait({ prompt: fullPrompt }, SESSION_TIMEOUT_MS);
+        await session.sendAndWait(chatTurn.message, SESSION_TIMEOUT_MS);
         submission.finish();
         if (submission.cancelled) {
           abortOnCleanup = true;

@@ -5,7 +5,7 @@ import type { CopilotClient } from "@github/copilot-sdk";
 import { withAHPClient } from "@/lib/ahp/client-operation";
 import { mapSessionInputNeeded } from "@/lib/ahp/map-session";
 import { answerInputWithClient } from "@/lib/ahp/session-messenger";
-import { readSessionState } from "@/lib/ahp/snapshot";
+import { readActiveSessionState } from "@/lib/ahp/snapshot";
 import { buildAnswer } from "@/lib/ahp/answer-value";
 import { canAutoAnswer } from "./skill-config";
 import {
@@ -148,7 +148,7 @@ export async function autoAnswer(
 
     try {
       const response = await session.sendAndWait(
-        { prompt: context },
+        { prompt: context, source: "system" },
         15_000
       );
       responseCompleted = true;
@@ -169,7 +169,7 @@ export async function autoAnswer(
         [question.id]: { state: "submitted", value: built.value },
       };
       const dispatch = await withAHPClient(hostUrl, async (ahpClient) => {
-        const liveState = await readSessionState(ahpClient, card.id);
+        const liveState = await readActiveSessionState(ahpClient, card.id);
         const liveInput = mapSessionInputNeeded(liveState?.inputNeeded);
         const liveAuthorization = authorizePendingElicitation(liveInput);
         if (

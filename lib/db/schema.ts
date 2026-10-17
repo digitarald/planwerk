@@ -3,6 +3,7 @@ import "server-only";
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
+import { dataDirectory } from "../data-directory";
 import { ensureCtoContinuitySchema } from "./cto-continuity-schema";
 import { ensureCoordinatorModeSchema } from "./coordinator-mode-schema";
 import { ensureSdkObservabilitySchema } from "./sdk-observability-schema";
@@ -20,7 +21,7 @@ let db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
   if (!db) {
-    const dbPath = path.join(process.cwd(), ".planwerk", "planwerk.db");
+    const dbPath = path.join(dataDirectory(), "planwerk.db");
 
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 

@@ -55,6 +55,27 @@ With Docker and the VS Code Dev Containers extension installed, run
 and npm versions declared by the project, installs dependencies, and forwards
 Planwerk on [http://localhost:3000](http://localhost:3000).
 
+### Native macOS app
+
+Planwerk also runs in an Electrobun desktop app using the macOS WebKit renderer.
+The app bundles its Node server and has a native menu-bar inbox count.
+
+```bash
+npm run native:setup
+npm run native:dev
+```
+
+To produce the macOS app and DMG for your Mac's architecture:
+
+```bash
+npm run native:build
+```
+
+The installer is written to `desktop/artifacts/macos-<arch>-Planwerk.dmg`.
+These local builds are unsigned and not notarized. They are not yet a public
+distribution release. See [desktop/README.md](desktop/README.md) for lifecycle,
+data storage, validation, and release requirements.
+
 All builds offer only AHP 1.0.0. Hosts must accept that version; Planwerk does
 not retry with older or untested protocol versions.
 
@@ -68,6 +89,27 @@ the originating local UI flow. This prevents approval-ID guessing and replay,
 but does not authenticate other native processes running as the same OS user.
 See [`zettelkasten/security.md`](zettelkasten/security.md) for the trust model
 and limitations.
+
+## Copilot SDK integration
+
+Risk triage, coherence reviews, gate verdicts, and inbox briefings use the SDK's
+typed structured-output API. Zod schemas constrain the response format and
+validate the returned object; semantic checks still reject contradictory
+verdicts and disallowed inbox actions. Invalid or missing responses retain each
+caller's conservative fallback rather than being accepted as successful work.
+
+Generated SDK prompts are attributed to `system`. Human CTO messages retain
+`user` provenance, with the current board snapshot supplied separately as
+untrusted context in the session's appended system message on create and resume.
+Provenance does not grant authority: server-side gates and permission checks
+still authorize every action.
+
+Runtime recovery distinguishes JSON-RPC transport errors from domain failures
+using the SDK's shared `vscode-jsonrpc` error classes and codes. Message matching
+is a compatibility fallback for unstructured errors, not an override for
+structured domain errors.
+Keep the direct `vscode-jsonrpc` pin aligned with the SDK: a regression test
+checks that both resolve the same module so error constructor identities match.
 
 ## Learn more
 

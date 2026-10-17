@@ -120,7 +120,8 @@ test("cold catalogues stay passive while existing observers survive idle and inp
   assert.equal(shouldObserveChat(item, 1, chatUri, true), true);
   assert.equal(shouldObserveChat(item, 24, chatUri, true), true);
   assert.equal(shouldObserveChat(item, 24, chatUri, false), true);
-  assert.equal(shouldObserveChat({ ...item, status: 8 }, 1, undefined, false), true);
+  assert.equal(shouldObserveChat({ ...item, status: 8 }, 1, undefined, false), false);
+  assert.equal(shouldObserveChat({ ...item, status: 8 }, 8, undefined, false), true);
   assert.equal(shouldObserveChat(item, 65, chatUri, true), false);
   assert.equal(shouldObserveChat({ ...item, status: 65 as SessionChatSummary["status"] }, 8, chatUri, true), false);
   assert.equal(shouldObserveChat({ ...item, interactivity: "hidden" as SessionChatSummary["interactivity"] }, 8, chatUri, true), false);

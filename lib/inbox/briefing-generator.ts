@@ -15,8 +15,9 @@ import {
 import type { CopilotRuntimeLease } from "../orchestrator/sdk-runtime-manager.ts";
 import {
   briefingSynthesisSystemPrompt,
+  briefingResponseSchema,
   buildBriefingSynthesisPrompt,
-  parseSynthesizedBriefing,
+  normalizeSynthesizedBriefing,
   type InboxSynthesisEvidence,
   type SynthesizedInboxBriefing,
 } from "./briefing-synthesis-core.ts";
@@ -49,18 +50,16 @@ export async function generateInboxBriefing(
     let responseCompleted = false;
     try {
       const response = await session.sendAndWait(
-        { prompt: buildBriefingSynthesisPrompt(evidence) },
+        { prompt: buildBriefingSynthesisPrompt(evidence), source: "system" },
+        briefingResponseSchema(evidence.kind, evidence.eventType),
         30_000,
       );
       responseCompleted = true;
-      const content = response?.data?.content;
-      const briefing = content
-        ? parseSynthesizedBriefing(
-            content,
-            evidence.kind,
-            evidence.eventType,
-          )
-        : null;
+      const briefing = normalizeSynthesizedBriefing(
+        response,
+        evidence.kind,
+        evidence.eventType,
+      );
       if (!briefing) {
         throw new Error("Copilot returned an invalid inbox briefing envelope.");
       }
