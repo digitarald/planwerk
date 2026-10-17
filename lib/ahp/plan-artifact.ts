@@ -23,8 +23,8 @@ const SESSION_ARTIFACTS = [
   { filename: "review.md", type: "review", title: "Review" },
 ] as const;
 
-// Negative cache: sessionUri + filename → modifiedAt when an artifact was missing.
-const missingArtifactCache = new Map<string, string>();
+// A bridge owns misses across its transient clients, never across hosts/reconnects.
+const missingArtifactCache = new WeakMap<object, Map<string, string>>();
 
 
 /**
@@ -48,12 +48,18 @@ async function fetchCopilotCliArtifact(
   sessionUri: string,
   modifiedAt: string,
   definition: (typeof SESSION_ARTIFACTS)[number],
+  cacheOwner: object,
 ): Promise<Artifact | null> {
   const sessionId = extractSessionId(sessionUri);
   if (!sessionId) return null;
 
   const cacheKey = `${sessionUri}:${definition.filename}`;
-  const cachedMissAt = missingArtifactCache.get(cacheKey);
+  let misses = missingArtifactCache.get(cacheOwner);
+  if (!misses) {
+    misses = new Map();
+    missingArtifactCache.set(cacheOwner, misses);
+  }
+  const cachedMissAt = misses.get(cacheKey);
   if (cachedMissAt === modifiedAt) return null;
 
   const artifactPath = join(
@@ -69,7 +75,7 @@ async function fetchCopilotCliArtifact(
     const content = await readTextResource(client, artifactUri);
 
     debug("found", definition.filename, "for", sessionUri, `(${content.length} chars)`);
-    missingArtifactCache.delete(cacheKey);
+    misses.delete(cacheKey);
 
     return {
       id: `session-state-${definition.type}`,
@@ -86,7 +92,7 @@ async function fetchCopilotCliArtifact(
     // err.message for the numeric code as a substring.
     const isNotFound = err instanceof RpcError && err.code === AhpErrorCodes.NotFound;
     if (isNotFound) {
-      missingArtifactCache.set(cacheKey, modifiedAt);
+      misses.set(cacheKey, modifiedAt);
     } else {
       debug(
         `resourceRead failed for ${definition.filename}:`,
@@ -101,10 +107,11 @@ export async function fetchCopilotCliArtifacts(
   client: AhpClient,
   sessionUri: string,
   modifiedAt: string,
+  cacheOwner: object = client,
 ): Promise<Artifact[]> {
   const artifacts = await Promise.all(
     SESSION_ARTIFACTS.map((definition) =>
-      fetchCopilotCliArtifact(client, sessionUri, modifiedAt, definition)
+      fetchCopilotCliArtifact(client, sessionUri, modifiedAt, definition, cacheOwner)
     )
   );
   return artifacts.filter((artifact): artifact is Artifact => artifact !== null);
@@ -118,9 +125,4 @@ export async function fetchCopilotCliPlan(
 ): Promise<Artifact | null> {
   const artifacts = await fetchCopilotCliArtifacts(client, sessionUri, modifiedAt);
   return artifacts.find((artifact) => artifact.type === "plan") ?? null;
-}
-
-/** Clear the negative cache (e.g., on reconnect). */
-export function clearPlanCache(): void {
-  missingArtifactCache.clear();
 }

@@ -8,8 +8,8 @@ import {
   type JsonRpcMessage,
   type TransportFrame,
 } from "@microsoft/agent-host-protocol/client";
-import { WebSocketTransport } from "@microsoft/agent-host-protocol/ws";
 import WebSocket, { type RawData } from "ws";
+import { awaitAbortable, awaitWithTimeout, OperationAbortedError, throwIfAborted } from "../abort.ts";
 
 import { listAllSessions } from "./catalog.ts";
 import { LOCAL_DESKTOP_HOST } from "./endpoint-config.ts";
@@ -28,6 +28,7 @@ import { OFFERED_PROTOCOL_VERSIONS, ProtocolCompatibilityError } from "./protoco
 import { readProtocolCompatibilityError } from "./protocol-rpc.ts";
 
 const DISCOVERY_TTL_MS = 30_000;
+const CONNECT_TIMEOUT_MS = 15_000;
 
 interface PendingRead {
   resolve(value: TransportFrame | null): void;
@@ -56,6 +57,7 @@ export interface ConnectedAhpClient {
 }
 
 export interface ConnectAhpClientOptions extends InitializeAhpClientOptions {
+  signal?: AbortSignal;
   requestTimeoutMs?: number;
   wrapTransport?: (transport: AhpTransport) => AhpTransport;
 }
@@ -73,8 +75,9 @@ interface DesktopSocketProbeOutcome {
 }
 
 let cachedDesktopSelection: CachedDesktopSelection | undefined;
+let pendingDesktopSelection: Promise<CachedDesktopSelection> | undefined;
 
-class LocalSocketWebSocketTransport implements AhpTransport {
+class NodeWebSocketTransport implements AhpTransport {
   private readonly inbox: Array<TransportFrame | null> = [];
   private readonly waiters: PendingRead[] = [];
   private readonly socket: WebSocket;
@@ -82,30 +85,37 @@ class LocalSocketWebSocketTransport implements AhpTransport {
   private closed = false;
 
   static connect(
-    socketPath: string,
-    connectionToken?: string,
-  ): Promise<LocalSocketWebSocketTransport> {
+    url: URL,
+    signal?: AbortSignal,
+    socketPath?: string,
+  ): Promise<NodeWebSocketTransport> {
+    throwIfAborted(signal);
     return new Promise((resolve, reject) => {
-      const tokenQuery = connectionToken
-        ? `?tkn=${encodeURIComponent(connectionToken)}`
-        : "";
-      const socket = new WebSocket(`ws://localhost/${tokenQuery}`, {
-        createConnection: () => connectSocket(socketPath),
+      const socket = new WebSocket(url, {
+        ...(socketPath ? { createConnection: () => connectSocket(socketPath) } : {}),
       });
+      const timer = setTimeout(() => {
+        reject(new TransportError("io", "AHP websocket connection timed out"));
+        socket.terminate();
+      }, CONNECT_TIMEOUT_MS);
+      const onAbort = () => {
+        reject(new OperationAbortedError(signal?.reason));
+        socket.terminate();
+      };
 
       const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         socket.off("open", onOpen);
         socket.off("error", onError);
         socket.off("close", onClose);
       };
       const onOpen = () => {
         cleanup();
-        resolve(new LocalSocketWebSocketTransport(socket));
+        resolve(new NodeWebSocketTransport(socket));
       };
       const onError = (cause: Error) => {
-        cleanup();
-        socket.close();
-        reject(new TransportError("io", `desktop websocket failed to open: ${cause.message}`, { cause }));
+        reject(new TransportError("io", `AHP websocket failed to open: ${cause.message}`, { cause }));
       };
       const onClose = (code: number) => {
         cleanup();
@@ -113,8 +123,9 @@ class LocalSocketWebSocketTransport implements AhpTransport {
       };
 
       socket.once("open", onOpen);
-      socket.once("error", onError);
+      socket.on("error", onError);
       socket.once("close", onClose);
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
@@ -178,6 +189,12 @@ class LocalSocketWebSocketTransport implements AhpTransport {
   }
 }
 
+function desktopSocketUrl(connectionToken?: string): URL {
+  const url = new URL("ws://localhost/");
+  if (connectionToken) url.searchParams.set("tkn", connectionToken);
+  return url;
+}
+
 function implementationInfo(result: InitializeResult): {
   name?: string;
   version?: string;
@@ -196,30 +213,35 @@ async function probeDesktopSocket(
   },
 ): Promise<DesktopSocketProbeOutcome> {
   let client: AhpClient | undefined;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS);
   try {
-    const connection = await connectInitializedClient(async () => {
-      const transport = await LocalSocketWebSocketTransport.connect(
-        candidate.socketPath,
-        candidate.connectionToken,
-      );
-      const nextClient = new AhpClient(transport, { requestTimeoutMs: 15_000 });
-      nextClient.connect();
-      client = nextClient;
-      return nextClient;
-    });
-    client = connection.client;
-    const initialized = connection.initialized;
-    const sessions = await listAllSessions(client);
-    const server = implementationInfo(initialized);
-    return {
-      probe: {
-        ...candidate,
-        sessionCount: sessions.length,
-        protocolVersion: initialized.protocolVersion,
-        serverName: server.name,
-        serverVersion: server.version,
-      },
-    };
+    return await awaitAbortable(async () => {
+      const connection = await connectInitializedClient(async () => {
+        const transport = await NodeWebSocketTransport.connect(
+          desktopSocketUrl(candidate.connectionToken),
+          controller.signal,
+          candidate.socketPath,
+        );
+        const nextClient = new AhpClient(transport, { requestTimeoutMs: CONNECT_TIMEOUT_MS });
+        nextClient.connect();
+        client = nextClient;
+        return nextClient;
+      });
+      client = connection.client;
+      const initialized = connection.initialized;
+      const sessions = await listAllSessions(client);
+      const server = implementationInfo(initialized);
+      return {
+        probe: {
+          ...candidate,
+          sessionCount: sessions.length,
+          protocolVersion: initialized.protocolVersion,
+          serverName: server.name,
+          serverVersion: server.version,
+        },
+      };
+    }, controller.signal);
   } catch (error) {
     const incompatibility = readProtocolCompatibilityError(error);
     if (process.env.AHP_DEBUG) {
@@ -233,7 +255,12 @@ async function probeDesktopSocket(
     }
     return incompatibility ? { incompatibility } : {};
   } finally {
-    await client?.shutdown().catch(() => {});
+    clearTimeout(timer);
+    if (client) {
+      await awaitWithTimeout(
+        () => client!.shutdown(), 1_000, "AHP probe cleanup timed out",
+      ).catch((error) => console.warn("[ahp:endpoint] Probe cleanup failed:", error));
+    }
   }
 }
 
@@ -241,7 +268,16 @@ async function discoverDesktopSocket(): Promise<CachedDesktopSelection> {
   if (cachedDesktopSelection && cachedDesktopSelection.expiresAt > Date.now()) {
     return cachedDesktopSelection;
   }
+  if (pendingDesktopSelection) return pendingDesktopSelection;
+  pendingDesktopSelection = probeDesktopCandidates();
+  try {
+    return await pendingDesktopSelection;
+  } finally {
+    pendingDesktopSelection = undefined;
+  }
+}
 
+async function probeDesktopCandidates(): Promise<CachedDesktopSelection> {
   const candidates = await discoverLocalEditorEndpoints();
   if (candidates.length === 0) {
     throw new TransportError(
@@ -290,20 +326,25 @@ async function discoverDesktopSocket(): Promise<CachedDesktopSelection> {
   return cachedDesktopSelection;
 }
 
-async function connectDesktop(): Promise<ConnectedAhpTransport> {
-  let selection = await discoverDesktopSocket();
+async function connectDesktop(signal?: AbortSignal): Promise<ConnectedAhpTransport> {
+  let selection = await awaitAbortable(discoverDesktopSocket, signal);
+  throwIfAborted(signal);
   let transport: AhpTransport;
   try {
-    transport = await LocalSocketWebSocketTransport.connect(
+    transport = await NodeWebSocketTransport.connect(
+      desktopSocketUrl(selection.selected.connectionToken),
+      signal,
       selection.selected.socketPath,
-      selection.selected.connectionToken,
     );
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     cachedDesktopSelection = undefined;
-    selection = await discoverDesktopSocket();
-    transport = await LocalSocketWebSocketTransport.connect(
+    selection = await awaitAbortable(discoverDesktopSocket, signal);
+    throwIfAborted(signal);
+    transport = await NodeWebSocketTransport.connect(
+      desktopSocketUrl(selection.selected.connectionToken),
+      signal,
       selection.selected.socketPath,
-      selection.selected.connectionToken,
     );
   }
 
@@ -331,12 +372,13 @@ function validateRemoteHost(hostUrl: string): URL {
   return parsed;
 }
 
-export async function connectAhpTransport(hostUrl: string): Promise<ConnectedAhpTransport> {
-  if (hostUrl === LOCAL_DESKTOP_HOST) return connectDesktop();
+export async function connectAhpTransport(hostUrl: string, signal?: AbortSignal): Promise<ConnectedAhpTransport> {
+  throwIfAborted(signal);
+  if (hostUrl === LOCAL_DESKTOP_HOST) return connectDesktop(signal);
 
   const parsed = validateRemoteHost(hostUrl);
   return {
-    transport: await WebSocketTransport.connect(parsed),
+    transport: await NodeWebSocketTransport.connect(parsed, signal),
     diagnostics: {
       logicalUrl: hostUrl,
       transport: "websocket",
@@ -352,30 +394,46 @@ export async function connectInitializedAhpClient(
   options: ConnectAhpClientOptions = {},
 ): Promise<ConnectedAhpClient> {
   const {
+    signal,
     requestTimeoutMs,
     wrapTransport,
     ...initializeOptions
   } = options;
   let endpoint: ConnectedAhpTransport | undefined;
-  const connection = await connectInitializedClient(async () => {
-    endpoint = await connectAhpTransport(hostUrl);
-    const transport = wrapTransport
-      ? wrapTransport(endpoint.transport)
-      : endpoint.transport;
-    const client = new AhpClient(transport, { requestTimeoutMs });
-    client.connect();
-    return client;
-  }, initializeOptions);
-
-  if (!endpoint) {
-    await connection.client.shutdown().catch(() => {});
-    throw new TransportError("io", "AHP connection initialized without endpoint diagnostics");
-  }
-
-  return {
-    ...connection,
-    diagnostics: endpoint.diagnostics,
+  let ownedClient: AhpClient | undefined;
+  const onAbort = () => {
+    void ownedClient?.shutdown().catch((error) => console.warn("[ahp:endpoint] Cancelled connection cleanup failed:", error));
   };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    const connection = await awaitAbortable(() => connectInitializedClient(async () => {
+      endpoint = await connectAhpTransport(hostUrl, signal);
+      if (signal?.aborted) {
+        await endpoint.transport.close();
+        throwIfAborted(signal);
+      }
+      const transport = wrapTransport
+        ? wrapTransport(endpoint.transport)
+        : endpoint.transport;
+      const client = new AhpClient(transport, { requestTimeoutMs });
+      ownedClient = client;
+      client.connect();
+      return client;
+    }, initializeOptions), signal);
+    throwIfAborted(signal);
+
+    if (!endpoint) {
+      await connection.client.shutdown().catch(() => {});
+      throw new TransportError("io", "AHP connection initialized without endpoint diagnostics");
+    }
+
+    return {
+      ...connection,
+      diagnostics: endpoint.diagnostics,
+    };
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 export function clearDesktopEndpointCache(): void {

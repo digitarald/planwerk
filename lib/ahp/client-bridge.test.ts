@@ -98,8 +98,8 @@ function harness(status: number = AHPStatus.Idle) {
     root, client: client as unknown as AhpClient, reads, releases, shutdowns, emitted, cached, summary,
     seededCache, artifacts, actions,
     setChat(value: ChatState) { chat = value; },
-    async connect(options?: unknown) {
-      if (!options && connectionWait) { const wait = connectionWait; connectionWait = undefined; await wait; }
+    async connect(options?: { initialSubscriptions?: readonly string[] }) {
+      if (!options?.initialSubscriptions && connectionWait) { const wait = connectionWait; connectionWait = undefined; await wait; }
       return { client, initialized: { protocolVersion: "1.0.0" }, diagnostics: {} };
     },
     waitForRead(wait: Promise<void>) { readWait = wait; },

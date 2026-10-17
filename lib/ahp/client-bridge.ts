@@ -11,7 +11,7 @@ import { type AHPSessionSummary, type AHPEvent, AHPStatus, shouldShowSession } f
 import { classifyError, type ConnectionError } from "./connection-error";
 import { classifyAhpError } from "./rpc-error";
 import { enrichFromChangeset, type ChangesetEnrichment, hashPlanContent } from "./changeset-enricher";
-import { fetchCopilotCliArtifacts, clearPlanCache } from "./plan-artifact";
+import { fetchCopilotCliArtifacts } from "./plan-artifact";
 import { extractModelFromConfig } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
 import { asChatState, asSessionState, withSessionState } from "./snapshot";
@@ -334,7 +334,6 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     if (disposed) return;
     disposed = true;
     readsController.abort();
-    clearPlanCache();
     pendingInputs.clear();
     workersBySession.clear();
     workerChatsBySession.clear();
@@ -410,7 +409,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         if (!state) throw new Error("The agent host did not return session state");
         return Promise.all([
           (session.changes?.files ?? 0) > 0 ? enrichFromChangeset(detailClient, sessionUri, state) : null,
-          fetchCopilotCliArtifacts(detailClient, sessionUri, session.modifiedAt),
+          fetchCopilotCliArtifacts(detailClient, sessionUri, session.modifiedAt, readsController),
           session.model ?? extractModelFromConfig(state.config),
           readSessionDetailsForState(detailClient, state),
         ]);
