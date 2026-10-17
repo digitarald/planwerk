@@ -32,6 +32,9 @@ import {
 } from "lucide-react";
 
 import { canSendToChat } from "@/lib/ahp/chat-facts";
+import { requestEvidenceRefresh } from "@/lib/ahp/evidence-request";
+import { SessionEvidencePanel } from "./session-evidence-panel";
+import { SessionOwnershipRecovery } from "./session-ownership-recovery";
 
 import { PendingInputCard } from "./pending-input-card";
 import { Badge } from "@/components/ui/badge";
@@ -543,11 +546,54 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
     "idle" | "resuming" | "error"
   >("idle");
   const [resumeError, setResumeError] = useState("");
+  const evidenceKey = JSON.stringify([hostUrl, card.id]);
+  const [evidenceResult, setEvidenceResult] = useState<{
+    key: string;
+    state: "refreshing" | "ready" | "error";
+    error?: string;
+  } | null>(null);
+  const evidenceState = evidenceResult?.key === evidenceKey ? evidenceResult.state : "idle";
+  const evidenceError = evidenceResult?.key === evidenceKey ? evidenceResult.error : undefined;
+  const evidenceRequest = useRef<AbortController | null>(null);
+  const detailsRequest = useRef<AbortController | null>(null);
   const [dismissingPeer, setDismissingPeer] = useState<string | null>(null);
   const [statusHistory, setStatusHistory] = useState<StatusEntry[]>(
     card.statusHistory ?? []
   );
   const scrimRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    return () => {
+      evidenceRequest.current?.abort();
+      evidenceRequest.current = null;
+    };
+  }, [card.id, hostUrl]);
+
+  const refreshEvidence = async () => {
+    if (!hostUrl || card.ownershipConflict || evidenceRequest.current) return;
+    const controller = new AbortController();
+    evidenceRequest.current = controller;
+    detailsRequest.current?.abort();
+    setEvidenceResult({ key: evidenceKey, state: "refreshing" });
+    try {
+      await requestEvidenceRefresh(hostUrl, card.id, controller.signal);
+      if (controller.signal.aborted || evidenceRequest.current !== controller) return;
+      // Current facts arrive over the ordered stream, never a racing HTTP patch.
+      setEvidenceResult({ key: evidenceKey, state: "ready" });
+    } catch (error) {
+      if (controller.signal.aborted || evidenceRequest.current !== controller) return;
+      setDetailsResult({
+        cardId: card.id, state: "error",
+        error: error instanceof Error ? error.message : "Evidence refresh failed",
+      });
+      setEvidenceResult({
+        key: evidenceKey, state: "error",
+        error: error instanceof Error ? error.message : "Evidence refresh failed",
+      });
+    } finally {
+      if (evidenceRequest.current === controller) evidenceRequest.current = null;
+    }
+  };
 
   // Signature of the newest recorded status so the timeline refetches when a new
   // status arrives on the live card (keeps the open modal from going stale).
@@ -576,14 +622,18 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   useEffect(() => {
     let cancelled = false;
 
-    if (!hostUrl) {
+    if (!hostUrl || card.ownershipConflict) {
       return;
     }
+    const controller = new AbortController();
+    detailsRequest.current = controller;
+    const observed = useBoardStore.getState().getCard(card.id);
 
     fetch("/api/ahp/sessions/details", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ hostUrl, sessionUri: card.id }),
+      signal: controller.signal,
     })
       .then(async (response) => {
         const data = (await response.json().catch(() => null)) as
@@ -595,7 +645,15 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
         return data.details;
       })
       .then((details) => {
-        if (cancelled) return;
+        if (cancelled || controller.signal.aborted) return;
+        const current = useBoardStore.getState().getCard(card.id);
+        if (!current || current !== observed) {
+          if (current) setDetailsResult({
+            cardId: card.id, state: "ready",
+            details: { lastAgentMessage: current.lastAgentMessage, runtimeError: current.runtimeError },
+          });
+          return;
+        }
         setDetailsResult({
           cardId: card.id,
           state: "ready",
@@ -607,7 +665,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
         });
       })
       .catch((error: unknown) => {
-        if (cancelled) return;
+        if (cancelled || controller.signal.aborted) return;
         setDetailsResult({
           cardId: card.id,
           state: "error",
@@ -620,9 +678,12 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
 
     return () => {
       cancelled = true;
+      controller.abort();
+      if (detailsRequest.current === controller) detailsRequest.current = null;
     };
   }, [
     card.id,
+    card.ownershipConflict,
     hostUrl,
     reconcileCard,
   ]);
@@ -663,7 +724,8 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
     }
   };
 
-  const inputAllowed = canSendToChat(card.chats?.find((chat) => chat.resource === card.defaultChat))
+  const ownershipBlocked = card.ownershipConflict || card.automationWait?.reason === "ownership";
+  const inputAllowed = !ownershipBlocked && canSendToChat(card.chats?.find((chat) => chat.resource === card.defaultChat))
     && (!card.defaultChat || card.chats === undefined || card.chats.some((chat) => chat.resource === card.defaultChat));
 
   const handleInject = async (e: React.FormEvent) => {
@@ -792,13 +854,13 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   const showCurrentActivity = card.activity && !isGenericStatus(card.activity);
   const currentDetailsResult =
     detailsResult?.cardId === card.id ? detailsResult : undefined;
-  const needsAuthoritativeDetails = Boolean(hostUrl);
+  const needsAuthoritativeDetails = Boolean(hostUrl) && !card.ownershipConflict;
   const detailsState =
-    currentDetailsResult?.state ??
+    (evidenceState === "ready" ? "ready" : currentDetailsResult?.state) ??
     (needsAuthoritativeDetails ? "loading" : "idle");
   const detailsError = currentDetailsResult?.error ?? "";
   const sessionDetails =
-    currentDetailsResult?.details ?? {
+    (evidenceState === "ready" ? undefined : currentDetailsResult?.details) ?? {
       lastAgentMessage: card.lastAgentMessage,
       runtimeError: card.runtimeError,
     };
@@ -814,7 +876,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   const [reviewingFileIds, setReviewingFileIds] = useState<Set<string>>(new Set());
   const changesetReview = card.changesetReview;
   const reviewById = new Map(changesetReview?.files.map((file) => [file.id, file]) ?? []);
-  const supportsFileReview =
+  const supportsFileReview = !ownershipBlocked &&
     changesetReview?.capabilities.review === true && changesetReview.files.length > 0;
   const reviewedFileCount = changesetReview?.files.filter((file) => file.reviewed).length ?? 0;
   const remainingReviewFileIds =
@@ -927,7 +989,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 </span>
               )}
               <GateBadge status={card.gateStatus} />
-              {card.gateStatus === "pending" && card.gateBlocker && (
+              {card.gateStatus === "pending" && card.gateBlocker && !card.automationWait && (
                 <span
                   className="inline-flex items-center gap-1 text-xs text-muted-foreground"
                   title={blockedFromAdvancingHint(card.gateBlocker)}
@@ -975,7 +1037,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 </span>
               )}
             </div>
-            <div className="mt-2.5">
+            <div className="mt-2.5 flex flex-wrap items-center gap-3">
               <SessionCoordinatorModeControl
                 cardId={card.id}
                 cardTitle={card.title}
@@ -1011,6 +1073,12 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
           {/* Left pane */}
           <ScrollArea className="min-h-0">
             <div className="flex flex-col gap-5 p-6">
+              <SessionEvidencePanel
+                card={card} connected={Boolean(hostUrl)}
+                refreshState={evidenceState} refreshError={evidenceError}
+                onRefresh={refreshEvidence}
+                ownershipRecovery={card.ownershipConflict ? <SessionOwnershipRecovery key={evidenceKey} sessionUri={card.id} /> : undefined}
+              />
               {effectiveRuntimeError && (
                 <section
                   aria-live="polite"
@@ -1031,7 +1099,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                               size="sm"
                               variant="destructive"
                               onClick={handleResume}
-                              disabled={resumeState === "resuming"}
+                              disabled={ownershipBlocked || resumeState === "resuming"}
                             >
                               <RotateCcw
                                 className={cn(
@@ -1538,7 +1606,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder={inputAllowed ? "Send instructions to this session..." : "This chat does not accept messages"}
+                    placeholder={ownershipBlocked ? "Resolve session ownership before sending instructions" : inputAllowed ? "Send instructions to this session..." : "This chat does not accept messages"}
                     disabled={!inputAllowed || sendState === "sending"}
                     className="min-h-[3rem] resize-none pr-10 text-[13px]"
                     rows={2}

@@ -8,6 +8,8 @@ import type {
   PendingInputQuestion,
 } from "../types.ts";
 import { stableJson } from "../db/cto-continuity-store.ts";
+import { isSessionOwnedByHost } from "../db/session-ownership.ts";
+import { sourceBindingsMatch, sourceEvidenceRevision } from "../ahp/source-binding-match.ts";
 import type { RiskInput } from "./risk-assessor.ts";
 
 export interface NormalizedPendingInput {
@@ -70,6 +72,8 @@ interface PersistedRiskFacts {
   sourceRevision?: string;
   planVersion?: string;
   contentRevision?: string;
+  manifestRevision?: string;
+  evidenceDigest?: string;
   pendingInput?: unknown;
 }
 
@@ -93,6 +97,8 @@ interface PersistedEnrichment {
     sourceRevision?: string;
     planVersion?: string;
     contentRevision?: string;
+    manifestRevision?: string;
+    evidenceDigest?: string;
   };
 }
 
@@ -297,6 +303,8 @@ function parseRowFacts(row: RiskFactsRow): {
   sourceRevision: string | null;
   planVersion: string | null;
   contentRevision: string | null;
+  manifestRevision: string | null;
+  evidenceDigest: string | null;
 } {
   const summary = JSON.parse(row.summary_json) as PersistedSummary;
   const parsedEnrichment = row.enrichment_json
@@ -310,10 +318,7 @@ function parseRowFacts(row: RiskFactsRow): {
   const enrichment = parsedEnrichment
     && source
     && sourceRevision
-    && source.planVersion
-    && parsedEnrichment._planwerkSource?.sourceRevision === sourceRevision
-    && parsedEnrichment._planwerkSource.planVersion === source.planVersion
-    && parsedEnrichment._planwerkSource.contentRevision === source.contentRevision
+    && sourceBindingsMatch(source, parsedEnrichment._planwerkSource)
       ? parsedEnrichment
       : null;
   const verified = enrichment?.changesetVerified === true;
@@ -347,7 +352,7 @@ function parseRowFacts(row: RiskFactsRow): {
       filePaths,
       lastAgentMessage: enrichment?.lastAgentMessage,
       planContent: enrichment?.planContent,
-      sourceRevision: sourceRevision ?? undefined,
+      sourceRevision: sourceEvidenceRevision(enrichment?._planwerkSource) ?? sourceRevision ?? undefined,
       pendingElicitation: pendingInput ?? undefined,
       factsComplete,
     },
@@ -357,6 +362,8 @@ function parseRowFacts(row: RiskFactsRow): {
     sourceRevision,
     planVersion: source?.planVersion ?? null,
     contentRevision: source?.contentRevision ?? null,
+    manifestRevision: source?.manifestRevision ?? null,
+    evidenceDigest: source?.evidenceDigest ?? null,
   };
 }
 
@@ -386,7 +393,8 @@ function digestRow(row: RiskFactsRow): string | null {
       planContentHash: facts.planContentHash,
       sourceRevision: facts.sourceRevision,
       planVersion: facts.planVersion,
-      contentRevision: facts.contentRevision,
+      contentRevision: facts.manifestRevision ?? facts.contentRevision,
+      ...(facts.evidenceDigest ? { evidenceDigest: facts.evidenceDigest } : {}),
       pendingInput: facts.pendingInput,
     }))
     .digest("hex");
@@ -397,6 +405,7 @@ function readRiskFactsRow(
   hostUrl: string,
   cardId: string,
 ): RiskFactsRow | undefined {
+  if (!isSessionOwnedByHost(db, cardId, hostUrl)) return undefined;
   return db.prepare(`
     SELECT c.session_uri AS card_id, c.host_url, c.summary_json,
       c.enrichment_json, p.phase
@@ -454,6 +463,7 @@ export function currentRiskFactsSnapshot(
   `).all(cardId) as RiskFactsRow[];
   if (rows.length !== 1) return null;
   const row = rows[0];
+  if (!isSessionOwnedByHost(db, cardId, row.host_url)) return null;
   const digest = digestRow(row);
   if (!digest) return null;
   const facts = parseRowFacts(row);

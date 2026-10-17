@@ -1,5 +1,5 @@
 import type { SessionChatSummary } from "@microsoft/agent-host-protocol";
-import type { ChatDetails, SessionBackgroundWork } from "../types.ts";
+import type { ChatDetails, SessionBackgroundWork, EvidenceCapture } from "../types.ts";
 
 export interface AHPSessionSummary {
   resource: string;
@@ -9,6 +9,8 @@ export interface AHPSessionSummary {
   activity?: string;
   createdAt: string;
   modifiedAt: string;
+  /** Last actual collection, retained as stale metadata after invalidation. */
+  lastEvidenceCapture?: EvidenceCapture;
   project?: {
     name: string;
     path: string;

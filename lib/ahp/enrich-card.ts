@@ -30,6 +30,9 @@ import {
 import { mapSessionToCard } from "./map-session";
 import { AHPSessionSummary } from "./types";
 import type { ChangesetEnrichment } from "./changeset-enricher";
+import { getDb } from "../db/schema";
+import { getSessionOwnership, isSessionOwnedByHost } from "../db/session-ownership";
+import { automationWaitForCard } from "./automation-wait.ts";
 
 function safeParseJson(json: string): string[] | undefined {
   try {
@@ -123,6 +126,7 @@ function computeGateBlocker(
 }
 
 export interface EnrichOptions {
+  hostUrl?: string;
   /** When false, read/attach status history but don't record the current
    *  activity. Used for cached rehydration so a stale cached activity can't be
    *  written with a fresh timestamp and surface as the card's "current" status. */
@@ -135,6 +139,27 @@ export function enrichSessionToCard(
   options?: EnrichOptions,
   workers?: WorkerActivity[],
 ): KanbanCard {
+  if (options?.hostUrl && !isSessionOwnedByHost(getDb(), session.resource, options.hostUrl)) {
+    const card = mapSessionToCard(session, undefined, undefined, "high", workers);
+    const ownership = getSessionOwnership(getDb(), session.resource);
+    const conflict = ownership?.quarantined === true;
+    return {
+      ...card,
+      phase: "define",
+      gateStatus: "pending",
+      attention: "stale",
+      gateBlocker: "Session ownership is unavailable or ambiguous. Automation is disabled.",
+      ownershipConflict: conflict,
+      evidence: { state: "unavailable" },
+      automationWait: conflict ? automationWaitForCard({ ...card, ownershipConflict: true }) : {
+        reason: "ownership",
+        summary: ownership ? "This session is managed by another host." : "Session ownership is unavailable.",
+        nextStep: ownership
+          ? `Connect to ${ownership.owner.label} to manage this work. This host cannot reuse its evidence or approvals.`
+          : "Reconnect to load the session catalog before acting on this work.",
+      },
+    };
+  }
   const persistedPhase = getPersistedCardPhase(session.resource);
   let authoritativeRisk = getAuthoritativeCardRisk(session.resource);
   let riskPolicy = riskAutomationPolicy(authoritativeRisk);
@@ -146,8 +171,10 @@ export function enrichSessionToCard(
     workers,
   );
 
-  // Sync DB when inference overrides the persisted phase (e.g. archived+code → ship)
-  if (card.phase !== persistedPhase) {
+  // Projection cannot advance an existing persisted phase. Only seed a new
+  // live card; cached display and later re-projections are not gate authority.
+  if (persistedPhase !== undefined) card.phase = persistedPhase;
+  if (persistedPhase === undefined && options?.recordStatus !== false) {
     setCardPhase(session.resource, card.phase);
     authoritativeRisk = getAuthoritativeCardRisk(session.resource);
     riskPolicy = riskAutomationPolicy(authoritativeRisk);
@@ -263,9 +290,10 @@ export function enrichSessionToCard(
   // error/needs-human (runtime) > conflict > stale > none — so we never mask a
   // runtime attention that already needs the human.
   try {
-    const coherence = buildCoherenceSummary(session.resource);
+    const coherence = buildCoherenceSummary(session.resource, undefined, undefined, options?.hostUrl);
     if (coherence) {
       card.coherence = { conflictsWith: coherence.peers, blocking: coherence.blocking };
+      card.automationWait = coherence.wait;
       const runtimeCritical = card.attention === "needs-human" || card.attention === "error";
       if (coherence.peers.length > 0 && !runtimeCritical) {
         card.attention = "conflict";
@@ -277,5 +305,6 @@ export function enrichSessionToCard(
     }
   }
 
+  card.automationWait = automationWaitForCard(card, card.automationWait);
   return card;
 }

@@ -29,7 +29,8 @@ const TRIAGE_PHASES: Phase[] = ["plan", "build"];
 export async function triageCard(
   cardId: string,
   riskSnapshot: RiskFactsSnapshot,
-  toPhase: Phase
+  toPhase: Phase,
+  options: { isCurrent?: () => boolean } = {},
 ): Promise<TriageResult | null> {
   if (!TRIAGE_PHASES.includes(toPhase)) {
     return null;
@@ -39,7 +40,7 @@ export async function triageCard(
     cardId,
     riskSnapshot,
     assessRisk,
-    persistAuthoritativeRisk,
+    (...args) => options.isCurrent?.() === false ? false : persistAuthoritativeRisk(...args),
   );
   const authoritative = getAuthoritativeCardRisk(cardId, riskSnapshot.hostUrl);
   if (authoritative.status !== "current") {

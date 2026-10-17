@@ -9,6 +9,10 @@ import type { ChatState, ChangesetState, SessionState, Snapshot, StateAction } f
 import type { NextRequest } from "next/server";
 import type { SessionStateAccess } from "./snapshot.ts";
 import { AHPStatus } from "./types.ts";
+import { awaitAbortable, OperationAbortedError } from "../abort.ts";
+import { OperationAdmission } from "../orchestrator/operation-admission.ts";
+import { withOperationContext } from "../orchestrator/operation-context.ts";
+import { coordinatorModeAllows, type CoordinatorMode } from "../orchestrator/coordinator-mode.ts";
 
 const uri = "copilotcli:/lifecycle";
 const chatUri = "ahp-chat:/lifecycle";
@@ -74,6 +78,8 @@ function harness() {
     cleanupError: undefined as Error | undefined,
     cleanupWait: undefined as Promise<void> | undefined,
     onDispatch: undefined as ((channel: string, action: StateAction) => void) | undefined,
+    onRead: undefined as ((resource: string) => Promise<void>) | undefined,
+    onRequest: undefined as ((method: string) => Promise<void>) | undefined,
     ping: async () => {},
     push(channel: string, action: StateAction) {
       streams.get(channel)?.push({
@@ -98,6 +104,7 @@ function harness() {
         : resource === chatUri ? chat
           : resource === changesetUri ? changeset
             : { agents: [{ provider: "copilotcli", capabilities: { multipleChats: {} } }] };
+      await h.onRead?.(resource);
       return {
         result: { snapshot: h.missing && resource === uri
           ? undefined : { resource, state: structuredClone(state), fromSeq: 0 } as Snapshot },
@@ -121,6 +128,7 @@ function harness() {
     async request(method: string) {
       assert.equal(resident.has(uri), true, "peer chat work must retain the session");
       requests.push(method);
+      await h.onRequest?.(method);
       return {};
     },
     dispatch(channel: string, action: StateAction) {
@@ -188,6 +196,29 @@ function pendingInput() {
     kind: "chatInput", id: "input:1", chat: "ahp-chat:/owning-input",
     request: { id: "request:1", questions: [] },
   } as unknown as NonNullable<SessionState["inputNeeded"]>[number];
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function ownedOperation() {
+  const admission = new OperationAdmission();
+  const lease = admission.acquire("ws://fake", uri)!;
+  const controller = new AbortController();
+  const authority = { mode: "coordinate" as CoordinatorMode, source: "facts-1", scoped: true };
+  const context = {
+    signal: controller.signal,
+    hostUrl: "ws://fake",
+    cardId: uri,
+    lease,
+    isCurrent: (capability: Parameters<typeof coordinatorModeAllows>[1]) =>
+      authority.source === "facts-1" && authority.scoped &&
+      coordinatorModeAllows(authority.mode, capability),
+  };
+  return { admission, lease, controller, authority, context };
 }
 
 function request(body: object, signal?: AbortSignal): NextRequest {
@@ -340,6 +371,168 @@ test("peer review retains its session through capability read, peer creation and
   assert.deepEqual(active.requests, ["createChat"]);
   assert.deepEqual(active.reads, [uri, "ahp-root://"]);
   assert.equal(active.releases.at(-1), uri);
+});
+
+for (const change of ["mode", "source", "scope"] as const) {
+  test(`owned input rechecks ${change} after state acquisition and dispatches nothing when revoked`, async () => {
+    active = harness();
+    active.session.inputNeeded = [pendingInput()];
+    const { authority, context, lease, admission } = ownedOperation();
+    const acquired = deferred();
+    const release = deferred();
+    active.onRead = async (resource) => {
+      if (resource === uri) {
+        acquired.resolve();
+        await release.promise;
+      }
+
+    };
+    const operation = withOperationContext(context, () =>
+      answerInput("ws://fake", uri, "request:1", "accept"));
+    await acquired.promise;
+    if (change === "mode") authority.mode = "verify";
+    if (change === "source") authority.source = "facts-2";
+    if (change === "scope") authority.scoped = false;
+    release.resolve();
+    await assert.rejects(operation, OperationAbortedError);
+    assert.deepEqual(active.actions, []);
+    lease.finish();
+    const replacement = admission.acquire("ws://fake", uri);
+    assert.ok(replacement, "no remote effect was attempted, so admission remains retryable");
+    replacement.finish();
+  });
+}
+
+test("owned messenger operations cannot dispatch to a different host or session than admission", async () => {
+  active = harness();
+  const { context, lease } = ownedOperation();
+  for (const [hostUrl, sessionUri] of [["ws://wrong", uri], ["ws://fake", "copilotcli:/wrong"]]) {
+    await assert.rejects(async () => withOperationContext(context, () =>
+      answerInput(hostUrl, sessionUri, "request:1", "accept")), OperationAbortedError);
+    await assert.rejects(async () => withOperationContext(context, () =>
+      startPeerChatReview(hostUrl, sessionUri, undefined, "/review")), OperationAbortedError);
+  }
+  assert.deepEqual(active.reads, []);
+  assert.deepEqual(active.actions, []);
+  lease.finish();
+});
+
+test("owned peer creation rechecks authority after the asynchronous capability read", async () => {
+  active = harness();
+  const { authority, context, lease } = ownedOperation();
+  const acquired = deferred();
+  const release = deferred();
+  active.onRead = async (resource) => {
+    if (resource === "ahp-root://") {
+      acquired.resolve();
+      await release.promise;
+    }
+  };
+  const operation = withOperationContext(context, () =>
+    startPeerChatReview("ws://fake", uri, undefined, "/review"));
+  await acquired.promise;
+  authority.mode = "observe";
+  release.resolve();
+  const result = await operation;
+  assert.equal(result.success, false);
+  assert.deepEqual(active.requests, []);
+  assert.deepEqual(active.actions, []);
+  lease.finish();
+});
+
+test("ended authoritative session access prevents peer creation after a capability read", async () => {
+  active = harness();
+  const acquired = deferred();
+  const release = deferred();
+  active.onRead = async (resource) => {
+    if (resource === "ahp-root://") {
+      acquired.resolve();
+      await release.promise;
+    }
+  };
+  const operation = startPeerChatReview("ws://fake", uri, undefined, "/review");
+  await acquired.promise;
+  await active.end(uri);
+  await tick();
+  release.resolve();
+  assert.equal((await operation).success, false);
+  assert.deepEqual(active.requests, []);
+});
+
+test("downgrade after peer creation disposes that identity without starting a review prompt", async () => {
+  active = harness();
+  const { authority, context, lease } = ownedOperation();
+  const created = deferred();
+  const release = deferred();
+  active.onRequest = async (method) => {
+    if (method === "createChat") {
+      created.resolve();
+      await release.promise;
+    }
+  };
+  const operation = withOperationContext(context, () =>
+    startPeerChatReview("ws://fake", uri, undefined, "/review"));
+  await created.promise;
+  authority.mode = "observe";
+  release.resolve();
+  assert.equal((await operation).success, false);
+  assert.deepEqual(active.requests, ["createChat", "disposeChat"]);
+  assert.deepEqual(active.actions, []);
+  lease.finish();
+});
+
+test("a raced-out peer creation keeps admission until its actual acknowledgement and cleanup", async () => {
+  active = harness();
+  const { context, lease, admission, controller } = ownedOperation();
+  const created = deferred();
+  const release = deferred();
+  active.onRequest = async (method) => {
+    if (method === "createChat") {
+      created.resolve();
+      await release.promise;
+    }
+  };
+  const operation = withOperationContext(context, () =>
+    startPeerChatReview("ws://fake", uri, undefined, "/review"));
+  const waiter = awaitAbortable(() => operation, controller.signal);
+  await created.promise;
+  controller.abort();
+  await assert.rejects(waiter, OperationAbortedError);
+  lease.finish();
+  assert.equal(admission.acquire("ws://fake", uri), null);
+  release.resolve();
+  await assert.rejects(operation, OperationAbortedError);
+  assert.deepEqual(active.requests, ["createChat", "disposeChat"]);
+  assert.deepEqual(active.actions, []);
+  const replacement = admission.acquire("ws://fake", uri);
+  assert.ok(replacement, "the late create and exact cleanup are now confirmed");
+  replacement.finish();
+});
+
+test("partial input dispatch followed by authority loss is ambiguous and quarantines admission", async () => {
+  active = harness();
+  active.session.inputNeeded = [pendingInput()];
+  const { authority, context, lease, admission } = ownedOperation();
+  active.onDispatch = () => { authority.mode = "observe"; };
+  await assert.rejects(withOperationContext(context, () =>
+    answerInput("ws://fake", uri, "request:1", "accept", { question: { value: true } })),
+  MessageDispatchAmbiguousError);
+  assert.deepEqual(active.actions.map(({ action }) => action.type), ["chat/inputAnswerChanged"]);
+  lease.finish();
+  assert.equal(admission.isQuarantined("ws://fake", uri), true);
+  assert.equal(admission.acquire("ws://fake", uri), null);
+});
+
+test("automatic unconfirmed archive writes are never retried and quarantine their slot", async () => {
+  active = harness();
+  active.echo = false;
+  const { context, lease, admission } = ownedOperation();
+  const result = await withOperationContext(context, () =>
+    setSessionArchived("ws://fake", uri, true, { verifyTimeoutMs: 2 }));
+  assert.equal(result.success, false);
+  assert.equal(active.actions.length, 1);
+  lease.finish();
+  assert.equal(admission.isQuarantined("ws://fake", uri), true);
 });
 
 test("input success requires authoritative consumption, not ping or optimistic dispatch", async () => {

@@ -361,13 +361,22 @@ export function executeGateCommand(
   command: string,
   cwd: string,
   onComplete?: (status: "passed" | "failed") => void,
+  options?: { signal?: AbortSignal; isCurrent?: () => boolean },
 ): void {
   const complete = (status: "passed" | "failed", output: string): void => {
     clearInterval(renewalTimer);
+    if (options?.signal?.aborted || options?.isCurrent?.() === false) {
+      status = "failed";
+      output = "Gate operation cancelled or its authority/source changed; result not accepted.";
+    }
     if (completeGateRun(runId, status, output)) onComplete?.(status);
   };
   const ownerId = gateRunOwners.get(runId);
   const renewalTimer = setInterval(() => {
+    if (options?.signal?.aborted || options?.isCurrent?.() === false) {
+      clearInterval(renewalTimer);
+      return;
+    }
     if (!ownerId) return;
     const now = Date.now();
     const renewed = getDb().prepare(`
@@ -379,6 +388,10 @@ export function executeGateCommand(
     if (renewed.changes !== 1) clearInterval(renewalTimer);
   }, Math.max(1, Math.floor(WORK_LEASE_MS / 3)));
   renewalTimer.unref();
+  if (options?.signal?.aborted || options?.isCurrent?.() === false) {
+    complete("failed", "Gate operation cancelled before command dispatch.");
+    return;
+  }
 
   let resolvedCwd: string;
   try {
@@ -404,7 +417,12 @@ export function executeGateCommand(
   try {
     exec(
       command,
-      { cwd: resolvedCwd, timeout: GATE_TIMEOUT_MS, maxBuffer: GATE_MAX_OUTPUT },
+      {
+        cwd: resolvedCwd,
+        timeout: GATE_TIMEOUT_MS,
+        maxBuffer: GATE_MAX_OUTPUT,
+        signal: options?.signal,
+      },
       (error, stdout, stderr) => {
         if (error) {
           const output = (stderr || stdout || error.message).slice(0, GATE_MAX_OUTPUT);

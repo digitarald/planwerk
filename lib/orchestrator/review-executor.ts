@@ -42,6 +42,7 @@ import { judgeReviewResponse } from "./verdict-judge";
 import type { ReviewVerdict } from "./verdict-judge-core";
 import { getRiskForAutomation } from "./risk-store";
 import {
+  awaitAbortable,
   isOperationAborted,
   throwIfAborted,
 } from "@/lib/abort";
@@ -57,6 +58,10 @@ import { attemptReviewPeerChatCleanup } from "./review-chat-cleanup";
 import { PeerChatCleanupRequiredError } from "@/lib/ahp/peer-review-dispatch";
 import { runLeaseRenewalTick } from "./lease-renewal";
 import { WORK_LEASE_MS } from "@/lib/db/work-lease-schema";
+import {
+  assertOperationCurrent,
+  getOperationSignal,
+} from "./operation-context";
 
 const REVIEW_JUDGMENT_LEASE_MS = 60_000;
 
@@ -316,10 +321,11 @@ export async function startReview(
   }
   const db = getDb();
   const maxIterations = getEffectiveMaxIterations(skill.id, riskLevel);
-  const signal = options?.signal;
+  const signal = options?.signal ?? getOperationSignal();
   const startOwnerId = randomUUID();
 
   throwIfAborted(signal);
+  assertOperationCurrent("verify");
   const recoveredDispatch = reconcileRecoveredReviewDispatch(db, {
     cardId,
     skillId: skill.id,
@@ -371,6 +377,13 @@ export async function startReview(
   const iteration = startClaim.iteration;
   const leaseState: { failure?: unknown } = {};
   const renewalTimer = reviewRenewalScheduler.set(() => {
+    try {
+      throwIfAborted(signal);
+      assertOperationCurrent("verify");
+    } catch {
+      reviewRenewalScheduler.clear(renewalTimer);
+      return;
+    }
     runLeaseRenewalTick(
       leaseState,
       () => renewReviewStartLease(
@@ -411,6 +424,9 @@ export async function startReview(
       turnId: string;
       disposablePeerChat: boolean;
     }) => {
+      assertOperationCurrent(
+        skill.autoFix ? "review-edits" : options?.independent || options?.pendingRequestId ? "verify" : "interact",
+      );
       dispatchPreparation = prepareOwnedReviewDispatch(
         db,
         {
@@ -576,6 +592,12 @@ export async function processReviewResult(
   currentChangesetRef?: string,
   projectPath?: string,
 ): Promise<(ReviewVerdict & { action: ReviewAction }) | null> {
+  assertOperationCurrent();
+  const ownedSignal = getOperationSignal();
+  const signal = AbortSignal.any([
+    ...(ownedSignal ? [ownedSignal] : []),
+    AbortSignal.timeout(REVIEW_JUDGMENT_LEASE_MS),
+  ]);
   const db = getDb();
   const ownerId = randomUUID();
   const row = claimReviewJudgment(
@@ -623,6 +645,13 @@ export async function processReviewResult(
 
   const leaseState: { failure?: unknown } = {};
   const renewalTimer = reviewRenewalScheduler.set(() => {
+    try {
+      throwIfAborted(signal);
+      assertOperationCurrent();
+    } catch {
+      reviewRenewalScheduler.clear(renewalTimer);
+      return;
+    }
     runLeaseRenewalTick(
       leaseState,
       () => renewReviewJudgmentLease(
@@ -649,9 +678,12 @@ export async function processReviewResult(
           madeEdits: false,
         };
       } else {
-        const turn = run.chatUri
-          ? await fetchChatTurnById(hostUrl, run.chatUri, run.turnId)
-          : await fetchTurnById(hostUrl, sessionUri, run.turnId);
+        const turn = await awaitAbortable(
+          () => run.chatUri
+            ? fetchChatTurnById(hostUrl, run.chatUri, run.turnId!)
+            : fetchTurnById(hostUrl, sessionUri, run.turnId!),
+          signal,
+        );
         if (!turn) {
           verdict = {
             status: "needs-human",
@@ -661,7 +693,10 @@ export async function processReviewResult(
           };
         } else {
           const evidence = extractReviewEvidence(turn);
-          const judgment = await judgeReviewResponse(evidence.response);
+          const judgment = await awaitAbortable(
+            () => judgeReviewResponse(evidence.response),
+            signal,
+          );
           verdict = { ...judgment, madeEdits: evidence.madeEdits };
         }
       }
@@ -678,9 +713,11 @@ export async function processReviewResult(
       };
     }
     if (leaseState.failure !== undefined) return null;
+    throwIfAborted(signal);
+    assertOperationCurrent();
 
     const config = loadConfig(projectPath);
-    const riskLevel = getRiskForAutomation(run.cardId);
+    const riskLevel = getRiskForAutomation(run.cardId, hostUrl);
     const maxIterations = run.maxIterations;
     const action = decideReviewAction(
       verdict,

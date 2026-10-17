@@ -10,6 +10,7 @@ import { AhpErrorCodes } from "@microsoft/agent-host-protocol";
 
 import type { Artifact } from "@/lib/types";
 import { readTextResource } from "./resource-read";
+import type { EvidenceCaptureBudget } from "./evidence-budget";
 
 const LOG_PREFIX = "[ahp:artifact]";
 const debug = (...args: unknown[]) => {
@@ -49,6 +50,8 @@ async function fetchCopilotCliArtifact(
   modifiedAt: string,
   definition: (typeof SESSION_ARTIFACTS)[number],
   cacheOwner: object,
+  strict: boolean,
+  budget?: EvidenceCaptureBudget,
 ): Promise<Artifact | null> {
   const sessionId = extractSessionId(sessionUri);
   if (!sessionId) return null;
@@ -72,7 +75,9 @@ async function fetchCopilotCliArtifact(
   const artifactUri = pathToFileURL(artifactPath).toString();
 
   try {
-    const content = await readTextResource(client, artifactUri);
+    budget?.assertCurrent();
+    const content = await readTextResource(client, artifactUri,
+      budget ? (count) => budget.consumeDecodedBytes(count) : undefined);
 
     debug("found", definition.filename, "for", sessionUri, `(${content.length} chars)`);
     misses.delete(cacheKey);
@@ -94,6 +99,7 @@ async function fetchCopilotCliArtifact(
     if (isNotFound) {
       misses.set(cacheKey, modifiedAt);
     } else {
+      if (strict) throw err;
       debug(
         `resourceRead failed for ${definition.filename}:`,
         err instanceof Error ? err.message : err
@@ -108,10 +114,12 @@ export async function fetchCopilotCliArtifacts(
   sessionUri: string,
   modifiedAt: string,
   cacheOwner: object = client,
+  strict = false,
+  budget?: EvidenceCaptureBudget,
 ): Promise<Artifact[]> {
   const artifacts = await Promise.all(
     SESSION_ARTIFACTS.map((definition) =>
-      fetchCopilotCliArtifact(client, sessionUri, modifiedAt, definition, cacheOwner)
+      fetchCopilotCliArtifact(client, sessionUri, modifiedAt, definition, cacheOwner, strict, budget)
     )
   );
   return artifacts.filter((artifact): artifact is Artifact => artifact !== null);

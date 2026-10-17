@@ -15,7 +15,12 @@ const state: {
   getHosts?: () => HeartbeatHostSnapshot[];
   heartbeat: boolean;
   failProjection: boolean;
-} = { heartbeat: false, failProjection: false };
+  triageWait?: Promise<void>;
+  triages: number;
+  triageError?: Error;
+  riskStatus: string;
+  sessions: Map<string, object>;
+} = { heartbeat: false, failProjection: false, triages: 0, riskStatus: "current", sessions: new Map() };
 const key = "__planwerkEventStreamTest";
 Object.defineProperty(globalThis, key, { value: state, configurable: true });
 const root = path.resolve(import.meta.dirname, "../..");
@@ -23,14 +28,14 @@ const routeUrl = pathToFileURL(path.join(root, "app/api/ahp/events/route.ts")).h
 const mocks: Record<string, string> = {
   "next/server": `export class NextResponse extends Response { static json(value, init) { return new Response(JSON.stringify(value), init); } }`,
   "@/lib/ahp/client-bridge": `export async function createAHPBridge(options) { globalThis["${key}"].bridge = options; }`,
-  "@/lib/ahp/enrich-card": `export function enrichSessionToCard(s) { return { id:s.resource, title:s.title, phase:"plan", runtime:s.status === 8 ? "running" : "idle", risk:"medium" }; }`,
+  "@/lib/ahp/enrich-card": `export function enrichSessionToCard(s) { globalThis["${key}"].sessions.set(s.resource, structuredClone(s)); return { id:s.resource, title:s.title, phase:"plan", runtime:s.status === 24 ? "input-needed" : s.status === 8 ? "running" : "idle", risk:"medium" }; }`,
   "@/lib/ahp/map-session": `export function mapSessionToCard(s) { return {id:s.resource}; }`,
   "@/lib/ahp/connection-error": `export function classifyError(message) { return {type:"error",message}; }`,
-  "@/lib/db/session-cache": `export function getCachedSessions() { return [{summary:{resource:"cached",title:"Cached",status:1}}]; }`,
-  "@/lib/orchestrator/triage": `export async function triageCard() {}`,
+  "@/lib/db/session-cache": `export function getCachedSessions() { return [{summary:{resource:"cached",title:"Cached",status:1}}, ...[...globalThis["${key}"].sessions.values()].map(summary=>({summary}))]; } export function getCachedSession(host,id) {const summary=globalThis["${key}"].sessions.get(id);return summary ? {summary} : undefined;}`,
+  "@/lib/orchestrator/triage": `export async function triageCard() { const s=globalThis["${key}"];s.triages++;await s.triageWait;if(s.triageError)throw s.triageError;return {risk:{level:"medium",factors:[]},requiredGates:[],requiresHumanApproval:false}; }`,
   "@/lib/orchestrator/gate-engine": `export function getPersistedCardPhase() { if(globalThis["${key}"].failProjection) throw new Error("projection failed"); return "plan"; }`,
-  "@/lib/orchestrator/risk-store": `export function getAuthoritativeCardRisk() { return {status:"current"}; } export function getAuthoritativeRiskSnapshot() {}`,
-  "@/lib/orchestrator/heartbeat": `export function startHeartbeat(getHosts) { const s=globalThis["${key}"]; s.getHosts=getHosts; s.heartbeat=true; } export async function stopHeartbeat() { globalThis["${key}"].heartbeat=false; } export function isHeartbeatRunning() { return globalThis["${key}"].heartbeat; }`,
+  "@/lib/orchestrator/risk-store": `export function getAuthoritativeCardRisk() { return {status:globalThis["${key}"].riskStatus}; } export function getAuthoritativeRiskSnapshot(host,id) { return {digest:"facts:"+id,hostUrl:host,cardId:id}; }`,
+  "@/lib/orchestrator/heartbeat": `export function requestHeartbeatTick() {} export function invalidateHostWork() {} export function startHeartbeat(getHosts) { const s=globalThis["${key}"]; s.getHosts=getHosts; s.heartbeat=true; } export async function stopHeartbeat() { globalThis["${key}"].heartbeat=false; } export function isHeartbeatRunning() { return globalThis["${key}"].heartbeat; }`,
   "@/lib/http/local-mutation": `export function validateLocalEventStreamRequest() {}`,
   "@/lib/inbox/service": `export function projectArchivedSessionToInbox() {} export function projectCardToInbox() {} export function projectHeartbeatToInbox() {} export function projectRemovedSessionToInbox() {}`,
   "@/lib/desktop/status": `export function registerDesktopHosts() {}`,
@@ -107,4 +112,100 @@ test("producer closure removes inbox listeners, closes host and fences replayed 
   assert.deepEqual(state.getHosts!(), []);
   await replacement.cancel();
   await tick();
+});
+
+test("blocked model work does not delay deterministic events or revive a removed card", async () => {
+  let finish!: () => void;
+  state.triageWait = new Promise<void>((resolve) => { finish = resolve; });
+  state.riskStatus = "missing";
+  const reader = await open();
+  await reader.read();
+  const session = { resource: "slow-model", title: "Slow", status: 1, provider: "fake", createdAt: "", modifiedAt: "" };
+  emit({ type: "sessionAdded", session });
+  await reader.read();
+  await tick();
+  assert.ok(state.triages > 0);
+  emit({ type: "sessionSummaryChanged", session: { ...session, status: 8 } });
+  const running = JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6));
+  assert.equal(running.card.runtime, "running");
+  emit({ type: "sessionRemoved", resource: session.resource });
+  await reader.read();
+  finish();
+  await tick();
+  assert.equal(state.getHosts!().some((host) => host.cards.some((card) => card.id === session.resource)), false);
+  await reader.cancel();
+  state.riskStatus = "current";
+  state.triageWait = undefined;
+});
+
+test("1000 mixed idle/running/input-needed events stay ordered within a 100ms p95 SSE budget", async (t) => {
+  const reader = await open("ws://load-test");
+  await reader.read();
+  const sent: number[] = [];
+  for (let index = 0; index < 1000; index++) {
+    sent.push(performance.now());
+    emit({ type: "sessionAdded", session: {
+      resource: `load-${index}`, title: "Load", provider: "fake", status: [1, 8, 24][index % 3], createdAt: "", modifiedAt: "",
+    } });
+  }
+  const latencies: number[] = [];
+  for (let index = 0; index < 1000; index++) {
+    const event = JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6));
+    latencies.push(performance.now() - sent[index]);
+    assert.equal(event.card.id, `load-${index}`);
+    assert.equal(event.sequence, index + 2);
+  }
+  latencies.sort((a, b) => a - b);
+  t.diagnostic(`synthetic ingress-to-reader p95=${latencies[949].toFixed(1)}ms; 1000-event burst, small payloads, model off-path`);
+  assert.ok(latencies[949] <= 100, `p95=${latencies[949].toFixed(1)}ms`);
+  await reader.cancel();
+});
+
+test("an explicit pending-input removal cannot be resurrected by projection fallback", async () => {
+  const reader = await open("ws://input-removal");
+  await reader.read();
+  const session = { resource: "pending", title: "Pending", status: 24, provider: "fake", createdAt: "", modifiedAt: "" };
+  emit({ type: "sessionAdded", session, pendingInput: { requestId: "request-1", message: "Choose", questions: [] } });
+  const initial = JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6));
+  assert.equal(initial.card.pendingInput.requestId, "request-1");
+  emit({ type: "sessionSummaryChanged", session, pendingInput: null });
+  const removed = JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6));
+  assert.equal(removed.card.pendingInput, undefined);
+  await reader.cancel();
+});
+
+test("unchanged facts cannot repeatedly spend model work after a triage failure", async () => {
+  state.riskStatus = "missing";
+  state.triageError = new Error("model unavailable");
+  const reader = await open("ws://model-failure");
+  await reader.read();
+  const before = state.triages;
+  const session = { resource: "failed-model", title: "Failed", provider: "fake", status: 1, createdAt: "", modifiedAt: "" };
+  emit({ type: "sessionAdded", session });
+  await reader.read();
+  await tick();
+  for (let index = 0; index < 10; index++) {
+    emit({ type: "sessionSummaryChanged", session: { ...session, activity: `activity-${index}` } });
+    await reader.read();
+    await tick();
+  }
+  assert.equal(state.triages, before + 1);
+  await reader.cancel();
+  state.riskStatus = "current";
+  state.triageError = undefined;
+});
+
+test("a slow consumer is disconnected at its byte budget without closing a healthy subscriber", async () => {
+  const slow = await open("ws://buffer-test");
+  const healthy = await open("ws://buffer-test");
+  await healthy.read();
+  for (let index = 0; index < 5; index++) {
+    const session = { resource: `buffer-${index}`, title: "x".repeat(2 * 1024 * 1024), provider: "fake", status: 8, createdAt: "", modifiedAt: "" };
+    emit({ type: "sessionAdded", session });
+    assert.equal(JSON.parse(new TextDecoder().decode((await healthy.read()).value).slice(6)).card.id, session.resource);
+  }
+  await assert.rejects(slow.read(), /buffer exceeded/);
+  assert.equal(state.bridge!.signal!.aborted, false);
+  await healthy.cancel();
+  assert.equal(state.bridge!.signal!.aborted, true);
 });

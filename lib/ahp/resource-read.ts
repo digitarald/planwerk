@@ -20,7 +20,11 @@ import type { ContentEncoding } from "@microsoft/agent-host-protocol";
  * a value under `isolatedModules` — the wire string literals are cast to the
  * type instead, matching the pattern in `actions.ts`.
  */
-export async function readTextResource(client: AhpClient, uri: string): Promise<string> {
+export async function readTextResource(
+  client: AhpClient,
+  uri: string,
+  onDecodedBytes?: (count: number) => void,
+): Promise<string> {
   const result = await client.request("resourceRead", {
     channel: "ahp-root://" as const,
     uri,
@@ -28,7 +32,10 @@ export async function readTextResource(client: AhpClient, uri: string): Promise<
   });
 
   if ((result.encoding as string) === "base64") {
-    return Buffer.from(result.data, "base64").toString("utf-8");
+    const bytes = Buffer.from(result.data, "base64");
+    onDecodedBytes?.(bytes.length);
+    return bytes.toString("utf-8");
   }
+  onDecodedBytes?.(Buffer.byteLength(result.data, "utf-8"));
   return result.data;
 }

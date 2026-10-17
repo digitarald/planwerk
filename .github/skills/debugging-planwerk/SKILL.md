@@ -208,9 +208,55 @@ discover continuity by scanning global `~/.copilot` history.
 
 For startup automation, inspect the SSE host partition's `resource.connected`.
 Cached initialization is display-only; `getAutomationHosts` excludes a host until
-the current live catalog has been projected. Bridge events are cloned before
-queueing to preserve intermediate runtime states. Server-side stream closure
+the current live catalog has been projected. Bridge events are cloned and projected
+synchronously; model triage is off the delivery path and shares the bounded
+assessment lane with heartbeat. The browser rejects old epochs/duplicate sequences
+and no longer races SSE against phase hydration HTTP calls. Cached snapshots do
+not count as a live connection. Server-side stream closure
 must remove inbox listeners just as consumer cancellation does.
+
+Each subscriber's Web Streams queue has an eight-MiB byte budget. A slow reader
+disconnects without stopping other subscribers; an oversized snapshot is an
+explicit terminal error. This is not a promise about proxy/TCP buffering. The
+synthetic event-stream test measures ingress-to-reader separately from browser
+paint; its 1000-event small-payload budget is not a live-host performance guarantee.
+
+Use the card's explicit **Refresh evidence** action (or
+`POST /api/ahp/sessions/evidence`) to collect plan, files and outcome intentionally.
+It may restore a cold session and change its activity timestamp. Observe
+`evidenceDigest` separately from legacy manifest `contentRevision`: the former
+hashes captured bytes but does not prove that an unsupported host will report
+every later change. Superseded refreshes, changed captures and cache-CAS failures
+must not be committed as current.
+
+Explicit capture budgets are 256 files, 32 MiB cumulative decoded bytes and a
+30-second collection deadline. Inspect the evidence API's 422 unsupported detail
+(`file-limit`, `byte-limit`, `changeset-template`) or 503 deadline detail before
+retrying. Resource reads have no range parameter; these are post-response byte
+checks, not a pre-transfer bound on an unsized host response.
+
+An identical session URI claimed by another host is a persistent ownership
+quarantine, not a reason to move historical phases or reuse another host's facts.
+Inspect `session-ownership.ts` and cache snapshot/CAS helpers before clearing or
+migrating those records. Quarantined projection is display-only.
+
+Ownership conflicts remain visible on the board, without enrichment, input
+or worker subscriptions. The card's evidence disclosure shows the recorded
+host choices only for a conflict. `GET /api/ahp/sessions/ownership?sessionUri=...`
+returns redacted host labels and opaque IDs; explicit `POST` recovery requires
+the selected ID, expected revision, and confirmation. It validates the passive
+catalog and refuses active/ambiguous work, preserves phase/history, invalidates
+old evidence/risk/gate/review authority, and writes
+`session_ownership_recovery_audit`. Known rejected hosts cannot silently reclaim
+ownership on reconnect. Unknown hosts still quarantine.
+
+`card.automationWait` is explanatory, not authorization. It distinguishes system
+waits from human input and exposes a next step/retry time where supported.
+`card.evidence.capture` records actual `capturedAt`, `source` and `coverage`;
+`session.lastEvidenceCapture` retains that provenance after invalidation.
+Do not replace collection time with catalog `modifiedAt`, or show a past byte
+capture as a current approval. All of this fits in one disclosure in card
+details; it does not create human inbox work.
 
 Explicit operations retain session residency through dependent chat/changeset
 reads and reduce host echoes for confirmation instead of re-subscribing to poll.
@@ -227,10 +273,23 @@ to one bridge generation across its temporary clients. A miss on another host
 or a previous connection must not hide a current plan.
 
 For coherence, inspect the versioned source-bound signature and
-`review_lease_expires_at_ms`. Missing/incomplete session-scoped evidence or SDK
-failure returns a detected pair with a 60-second cooldown, not `coherent` or an
-automatic human escalation. Oversized evidence remains deferred. Ship checks
-reopen stale settled verdicts rather than reuse a count-identical old review.
+`review_lease_expires_at_ms` and the structured deferral state. Inactivity/new
+evidence waits differ from infrastructure backoff and unsupported evidence
+limits; neither unsupported inputs nor repeated invalid output should spend
+model work forever. Reconciliation is host-scoped and a missing card in an
+eligibility-filtered batch must not clear a blocker. Ship checks reopen stale
+settled verdicts rather than reuse a count-identical old review.
+
+Refresh persists code digests, not reviewable code bytes. An inactive coherence
+pair therefore cannot be reviewed from a digest or woken into background cold
+subscriptions by refreshing it. Activate both sessions for automatic review or
+use the explicit revision-bound accept-divergence action.
+
+Heartbeat dirty-key wakeups supplement the periodic sweep. Operation admission
+rechecks host/session, source, phase, scope, mode and generation before effects.
+A bounded scheduler drain retires authority, not necessarily an already-accepted
+remote command. Same-session unsettled mutations retain their admission slot or
+quarantine; never reset it merely to make a timed-out request retryable.
 
 Cold cards without a current authoritative gate revision are parked by the
 heartbeat: they do not enter automation, coherence, or WIP counts. Missing
@@ -373,11 +432,11 @@ The global coordinator-mode hydration request sends only `hostUrl`; the server r
 all overrides for that host and the client computes effective defaults for visible cards.
 If a large board reports `Coordinator mode request failed (431)`, inspect whether an
 older client is still putting every card ID in the query string.
-Persisted phase hydration still sends card IDs to `/api/gates/phases`, but
-`lib/hooks/use-live-sessions.ts` bounds those requests to batches of 40 and merges
-the returned state maps. A `431` from that route means batching regressed or a
-different request has started serializing the full catalogue into one URL; do
-not address it by increasing server header limits.
+Persisted phase/gate truth now comes in the server's SSE snapshot. The live hook
+does not issue a second `/api/gates/phases` hydration request that could race a
+newer stream or a host switch. That endpoint remains for compatibility; a `431`
+from it indicates an older client or another caller serializing a catalog into
+one URL, not a reason to increase server header limits.
 
 If the browser reports that it could not open the Planwerk event stream before an
 `init` event, inspect the `/api/ahp/events` HTTP response before debugging AHP. Native
@@ -484,8 +543,9 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
 **Plan-approval "accepted but agent still stuck"** — if `heartbeat_log` shows a
 `plan-approved` yet the card sits in plan awaiting input, check whether the
 approval was *applied*, not just dispatched. `answerInput`
-(`lib/ahp/session-messenger.ts`) reports `success` only after it re-reads
-`SessionState.inputNeeded` and confirms the request left the aggregate
+(`lib/ahp/session-messenger.ts`) reports `success` only after it reduces
+authoritative `SessionState.inputNeeded` actions and confirms the request left
+the aggregate
 (`client.ping()` alone flushes the transport — it does NOT confirm the host
 applied the answer). The presence/removal predicate is the alias-free, unit-
 tested `lib/ahp/input-presence.ts` (`isInputResolved` etc.). When an accept

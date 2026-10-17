@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { RpcError, type AhpClient } from "@microsoft/agent-host-protocol/client";
+import { EvidenceCaptureBudget, EvidenceCaptureLimitError } from "./evidence-budget.ts";
 
 const hooks = registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -44,4 +45,27 @@ test("a bridge shares misses across transient clients but not reconnects or othe
   assert.equal(reads, 2);
   await fetchCopilotCliArtifacts(client(), session, "v1", new AbortController());
   assert.equal(reads, 4);
+});
+
+test("intentional captures propagate unreadable artifacts instead of certifying their absence", async () => {
+  const client = { async request() { throw new Error("transport interrupted"); } } as unknown as AhpClient;
+  const session = "copilotcli:/12345678-1234-1234-1234-123456789abc";
+  assert.deepEqual(await fetchCopilotCliArtifacts(client, session, "v1"), []);
+  await assert.rejects(fetchCopilotCliArtifacts(client, session, "v1", {}, true), /transport interrupted/);
+  const missing = { async request() { throw new RpcError(-32008, "Not found"); } } as unknown as AhpClient;
+  assert.deepEqual(await fetchCopilotCliArtifacts(missing, session, "v1", {}, true), []);
+});
+
+test("provider fallback artifacts share the cumulative decoded byte budget", async () => {
+  const budget = new EvidenceCaptureBudget({ maxFiles: 2, maxDecodedBytes: 3, timeoutMs: 1_000 });
+  const client = {
+    async request() { return { encoding: "base64", data: Buffer.from([0x80, 0x81]).toString("base64") }; },
+  } as unknown as AhpClient;
+  try {
+    await assert.rejects(fetchCopilotCliArtifacts(client,
+      "copilotcli:/12345678-1234-1234-1234-123456789abc", "v1", {}, true, budget),
+    (error) => error instanceof EvidenceCaptureLimitError && error.detail === "byte-limit");
+  } finally {
+    budget.dispose();
+  }
 });

@@ -6,11 +6,10 @@ import type {
 } from "@microsoft/agent-host-protocol";
 
 import { withAHPClient } from "@/lib/ahp/client-operation";
-import { readReadyChangesetState } from "@/lib/ahp/changeset-readiness";
 import { readTextResource } from "@/lib/ahp/resource-read";
 import { listAllSessions } from "@/lib/ahp/catalog";
 import { shouldReadLiveSessionState } from "@/lib/ahp/session-read-policy";
-import { withSessionState } from "@/lib/ahp/snapshot";
+import { withChangesetState, withSessionState } from "@/lib/ahp/snapshot";
 import type { CoherenceTier } from "@/lib/types";
 
 const MAX_FILES_PER_CARD = 5;
@@ -35,7 +34,7 @@ export type CardOverlapContent = {
       failed: true;
       reason: "inactive-session" | "session-changeset-unavailable" |
         "changeset-unavailable" | "incomplete-files" | "file-content-unavailable" |
-        "read-unavailable";
+        "read-unavailable" | "evidence-limit" | "evidence-changed";
     }
 );
 
@@ -89,21 +88,32 @@ export async function fetchOverlapContent(
   hostUrl: string,
   sessionUri: string,
   tier: CoherenceTier,
-  overlapPaths: string[]
+  overlapPaths: string[],
+  options: { isCurrent?: () => boolean; signal?: AbortSignal } = {},
 ): Promise<CardOverlapContent> {
   const matcher = buildMatcher(tier, overlapPaths);
   const deferred = (
     reason: Extract<CardOverlapContent, { status: "deferred" }>["reason"],
     files: OverlapFileContent[] = [],
   ): CardOverlapContent => ({ sessionUri, status: "deferred", failed: true, reason, files });
+  if (tier === "file" && overlapPaths.length > MAX_FILES_PER_CARD) return deferred("evidence-limit");
+  const assertCurrent = () => {
+    if (options.signal?.aborted || options.isCurrent?.() === false) {
+      throw new Error("Coherence evidence operation is no longer current");
+    }
+  };
 
   try {
+    assertCurrent();
     return await withAHPClient(hostUrl, (client) => withTimeout((async () => {
       const summary = (await listAllSessions(client)).find((item) => item.resource === sessionUri);
+      assertCurrent();
       if (!summary || !shouldReadLiveSessionState(summary.status)) {
         return deferred("inactive-session");
       }
-      return withSessionState(client, sessionUri, async (sessionState): Promise<CardOverlapContent> => {
+      return withSessionState(client, sessionUri, async (sessionState, sessionAccess): Promise<CardOverlapContent> => {
+        assertCurrent();
+        sessionAccess.assertCurrent();
         const changeset = sessionState?.changesets?.length
           ? findSessionChangeset(sessionState.changesets)
           : undefined;
@@ -111,47 +121,70 @@ export async function fetchOverlapContent(
           return deferred("session-changeset-unavailable");
         }
 
-        const csState = await withTimeout(
-          readReadyChangesetState(client, changeset.uriTemplate, READ_TIMEOUT_MS),
-          READ_TIMEOUT_MS + 1_000,
-        );
-        if (!csState?.files) {
-          return deferred("changeset-unavailable");
-        }
-
-        const targets = csState.files.filter((f) => matcher(extractFilePath(f)));
-        if (targets.length === 0 || targets.length > MAX_FILES_PER_CARD ||
-            (tier === "file" && overlapPaths.some((path) =>
-              !targets.some((file) => extractFilePath(file) === path)))) {
-          return deferred("incomplete-files");
-        }
-
-        const files: OverlapFileContent[] = [];
-        for (const file of targets) {
-          const path = extractFilePath(file);
-          const deleted = !file.edit.after;
-          const contentUri = deleted
-            ? file.edit.before?.content?.uri
-            : file.edit.after?.content?.uri;
-          if (!contentUri) {
-            return deferred("file-content-unavailable", files);
+        const sessionManifest = JSON.stringify(sessionState?.changesets);
+        return withChangesetState(client, changeset.uriTemplate, async (initial, changesetAccess) => {
+          const ready = initial?.status === "ready" ||
+            await changesetAccess.waitFor((state) => state?.status === "ready" || state?.status === "error",
+              READ_TIMEOUT_MS, options.signal);
+          assertCurrent();
+          sessionAccess.assertCurrent();
+          changesetAccess.assertCurrent();
+          const csState = changesetAccess.getState();
+          if (!ready || csState?.status !== "ready") {
+            return deferred("changeset-unavailable");
           }
-          try {
-            const raw = await withTimeout(
-              readTextResource(client, contentUri),
-              READ_TIMEOUT_MS,
-            );
-            const truncated = raw.length > MAX_BYTES_PER_FILE;
-            files.push({ path, content: raw.slice(0, MAX_BYTES_PER_FILE), truncated, deleted });
-            if (truncated) return deferred("incomplete-files", files);
-          } catch {
-            return deferred("file-content-unavailable", files);
-          }
-        }
+          const manifest = JSON.stringify(csState);
 
-        return { sessionUri, files, status: "ready", failed: false };
-      });
-    })(), READ_TIMEOUT_MS * (MAX_FILES_PER_CARD + 2)));
+          const targets = csState.files.filter((f) => matcher(extractFilePath(f)));
+          if (targets.length > MAX_FILES_PER_CARD) return deferred("evidence-limit");
+          if (targets.length === 0 ||
+              (tier === "file" && overlapPaths.some((path) =>
+                !targets.some((file) => extractFilePath(file) === path)))) {
+            return deferred("incomplete-files");
+          }
+
+          const files: OverlapFileContent[] = [];
+          for (const file of targets) {
+            assertCurrent();
+            sessionAccess.assertCurrent();
+            changesetAccess.assertCurrent();
+            const path = extractFilePath(file);
+            const deleted = !file.edit.after;
+            const contentUri = deleted
+              ? file.edit.before?.content?.uri
+              : file.edit.after?.content?.uri;
+            if (!contentUri) {
+              return deferred("file-content-unavailable", files);
+            }
+            try {
+              const raw = await withTimeout(
+                readTextResource(client, contentUri),
+                READ_TIMEOUT_MS,
+              );
+              assertCurrent();
+              sessionAccess.assertCurrent();
+              changesetAccess.assertCurrent();
+              const truncated = Buffer.byteLength(raw, "utf8") > MAX_BYTES_PER_FILE;
+              files.push({ path, content: raw.slice(0, MAX_BYTES_PER_FILE), truncated, deleted });
+              if (truncated) return deferred("evidence-limit", files);
+            } catch {
+              return deferred("file-content-unavailable", files);
+            }
+          }
+
+          const latest = (await listAllSessions(client)).find((item) => item.resource === sessionUri);
+          assertCurrent();
+          sessionAccess.assertCurrent();
+          changesetAccess.assertCurrent();
+          if (manifest !== JSON.stringify(changesetAccess.getState()) ||
+              sessionManifest !== JSON.stringify(sessionAccess.getState()?.changesets) ||
+              JSON.stringify(summary) !== JSON.stringify(latest)) {
+            return deferred("evidence-changed");
+          }
+          return { sessionUri, files, status: "ready", failed: false };
+        }, options.signal);
+      }, options.signal);
+    })(), READ_TIMEOUT_MS * (MAX_FILES_PER_CARD + 2)), options.signal);
   } catch (error) {
     console.warn(
       "[coherence-content] Live overlap read unavailable:",

@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 
 import type { CoherenceTier } from "@/lib/types";
 import { getRiskForAutomation } from "./risk-store";
-import { effectiveRisk } from "./coherence-detect";
+import { effectiveRisk, type CoherenceDeferralReason } from "./coherence-detect";
 import {
   disposeOneShotSession,
   invalidateRuntimeForCleanupFailure,
@@ -53,7 +53,7 @@ type PairReviewResult =
       kind: "verdict";
       verdict: { status: "conflict" | "coherent" | "needs-human"; summary: string; findings: string[] };
     }
-  | { kind: "deferred"; reason: string };
+  | { kind: "deferred"; reason: CoherenceDeferralReason };
 
 const SYSTEM_PROMPT = `You are a coherence reviewer for a system that runs multiple AI coding agents in parallel on the same repository.
 
@@ -118,25 +118,27 @@ async function reviewPair(
   row: CoherenceRow,
   ctxById: Map<string, ReviewCardCtx>,
   isCurrent: () => boolean,
+  signal?: AbortSignal,
 ): Promise<PairReviewResult> {
   const stale: PairReviewResult = {
-    kind: "deferred", reason: "Coherence review deferred: source revision or owner lease changed.",
+    kind: "deferred", reason: "source-changed",
   };
   if (!isCurrent()) return stale;
   const a = ctxById.get(row.cardA) ?? { id: row.cardA, title: row.cardA };
   const b = ctxById.get(row.cardB) ?? { id: row.cardB, title: row.cardB };
 
   const [aContent, bContent] = await Promise.all([
-    fetchOverlapContent(hostUrl, row.cardA, row.tier, row.overlapPaths),
-    fetchOverlapContent(hostUrl, row.cardB, row.tier, row.overlapPaths),
+    fetchOverlapContent(hostUrl, row.cardA, row.tier, row.overlapPaths, { isCurrent, signal }),
+    fetchOverlapContent(hostUrl, row.cardB, row.tier, row.overlapPaths, { isCurrent, signal }),
   ]);
 
   if (aContent.status !== "ready" || bContent.status !== "ready" ||
       aContent.files.length === 0 || bContent.files.length === 0) {
-    return {
-      kind: "deferred",
-      reason: "Coherence review deferred: overlapping session code is unavailable or incomplete.",
-    };
+    const reasons = [aContent, bContent].flatMap((content) =>
+      content.status === "deferred" ? [content.reason] : []);
+    return { kind: "deferred", reason: reasons.includes("evidence-limit") ? "evidence-limit"
+      : reasons.includes("inactive-session") ? "inactive-session"
+      : reasons.includes("evidence-changed") ? "source-changed" : "evidence-unavailable" };
   }
   if (!isCurrent()) return stale;
 
@@ -158,6 +160,12 @@ async function reviewPair(
       availableTools: [],
       skipCustomInstructions: true,
     });
+    const abort = () => {
+      void session.abort().catch((error) => {
+        console.warn("[coherence-reviewer] Failed to abort canceled review:", error);
+      });
+    };
+    signal?.addEventListener("abort", abort, { once: true });
     let responseCompleted = false;
     try {
       if (!isCurrent()) return stale;
@@ -172,6 +180,7 @@ async function reviewPair(
       responseCompleted = true;
       return { kind: "verdict", verdict: response };
     } finally {
+      signal?.removeEventListener("abort", abort);
       const cleanup = await disposeOneShotSession(
         client,
         session,
@@ -187,23 +196,29 @@ async function reviewPair(
   } catch (err) {
     if (runtimeLease && classifyCopilotFailure(err) === "transport") {
       await runtimeLease.invalidate(err).catch((resetError) => {
-      console.warn(
-        "[coherence-reviewer] Failed to reset Copilot SDK runtime:",
-        resetError instanceof Error ? resetError.message : resetError
-      );
+        console.warn(
+          "[coherence-reviewer] Failed to reset Copilot SDK runtime:",
+          resetError instanceof Error ? resetError.message : resetError
+        );
       });
     }
     console.warn(
       "[coherence-reviewer] SDK call failed:",
       err instanceof Error ? err.message : err
     );
+    const failure = err as { name?: unknown; message?: unknown; issues?: unknown } | null;
+    if (Array.isArray(failure?.issues) ||
+        (typeof failure?.name === "string" && /zod|structured.*(output|response)/i.test(failure.name)) ||
+        (typeof failure?.message === "string" && /schema|invalid.*json|structured.*response/i.test(failure.message))) {
+      return { kind: "deferred", reason: "invalid-model-output" };
+    }
   } finally {
     await releaseRuntimeLease(runtimeLease, "[coherence-reviewer]");
   }
 
   return {
     kind: "deferred",
-    reason: "Coherence reviewer unavailable; review will retry.",
+    reason: "infrastructure",
   };
 }
 
@@ -215,16 +230,19 @@ async function reviewPair(
 export async function runCoherenceExecutor(
   hostUrl: string,
   rows: CoherenceRow[],
-  ctxById: Map<string, ReviewCardCtx>
+  ctxById: Map<string, ReviewCardCtx>,
+  options: { isCurrent?: () => boolean; signal?: AbortSignal } = {},
 ): Promise<CoherenceReviewOutcome[]> {
   const outcomes: CoherenceReviewOutcome[] = [];
   let reviewed = 0;
 
   for (const row of rows) {
     if (reviewed >= MAX_REVIEWS_PER_PASS) break;
+    const operationCurrent = () => !options.signal?.aborted && (options.isCurrent?.() ?? true);
+    if (!operationCurrent()) break;
     // CAS-claim: only the winner proceeds; skips if signature changed meanwhile.
     const ownerId = randomUUID();
-    if (!claimForReviewOwner(row.id, row.signature, ownerId)) continue;
+    if (!claimForReviewOwner(row.id, row.signature, ownerId, hostUrl)) continue;
     reviewed++;
 
     const renewal = setInterval(() => {
@@ -234,13 +252,15 @@ export async function runCoherenceExecutor(
     let result: PairReviewResult;
     try {
       result = await reviewPair(hostUrl, row, ctxById, () =>
-        isCoherenceReviewCurrent(row.id, row.signature, ownerId, hostUrl));
+        operationCurrent() && isCoherenceReviewCurrent(row.id, row.signature, ownerId, hostUrl),
+      options.signal);
     } catch (error) {
       console.warn("[coherence-reviewer] Review deferred:", error);
-      result = { kind: "deferred", reason: "Coherence review unavailable; review will retry." };
+      result = { kind: "deferred", reason: "infrastructure" };
     } finally {
       clearInterval(renewal);
     }
+    if (!operationCurrent()) result = { kind: "deferred", reason: "source-changed" };
     if (result.kind === "deferred") {
       deferCoherenceReview(row.id, row.signature, ownerId, result.reason);
       continue;
@@ -265,7 +285,7 @@ export async function runCoherenceExecutor(
     } else {
       deferCoherenceReview(
         row.id, row.signature, ownerId,
-        "Coherence review deferred: source revision or owner lease changed.",
+        "source-changed",
       );
     }
   }

@@ -11,6 +11,7 @@ import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 
 import {
   awaitAbortableBoundary,
+  OperationAbortedError,
   throwIfAborted,
 } from "../abort.ts";
 import { withAHPClient } from "./client-operation";
@@ -43,6 +44,11 @@ import {
   disposePeerChatAfterFailure,
   PeerChatCleanupRequiredError,
 } from "./peer-review-dispatch";
+import {
+  assertOperationCurrent,
+  getOperationSignal,
+  runOperationEffect,
+} from "../orchestrator/operation-context";
 
 export { MessageDispatchAmbiguousError } from "./dispatch-confirmation";
 
@@ -73,7 +79,9 @@ export async function injectMessageWithClient(
   success: boolean;
   queued?: boolean;
 }> {
+  signal ??= getOperationSignal();
   throwIfAborted(signal);
+  assertOperationCurrent("interact", { cardId: sessionUri });
   return withSessionState(client, sessionUri, async (sessionState, access) => {
     if (!sessionState?.defaultChat) {
       debug("No chat channel found for", sessionUri);
@@ -84,14 +92,20 @@ export async function injectMessageWithClient(
       () => assertDefaultChatWritable(client, sessionState),
       signal,
     );
-    const { isInProgress } = parseAHPStatus(access.getState()?.status ?? sessionState.status);
+    access.assertCurrent();
+    assertOperationCurrent("interact", { cardId: sessionUri });
+    const currentState = access.getState();
+    if (currentState?.defaultChat !== chatUri) {
+      throw new OperationAbortedError("The default chat changed during message setup.");
+    }
+    const { isInProgress } = parseAHPStatus(currentState.status);
     const messageId = crypto.randomUUID();
     beforeDispatch?.({
       chatUri,
       turnId: messageId,
       disposablePeerChat: false,
     });
-    await dispatchAndConfirm(
+    await runOperationEffect("interact", () => dispatchAndConfirm(
       client,
       chatUri,
       isInProgress ? chatQueuedMessage(messageId, message) : chatTurnStarted(messageId, message),
@@ -99,7 +113,7 @@ export async function injectMessageWithClient(
         ? "The queued message may have been dispatched before the transport failed."
         : "The message may have been dispatched before the transport failed.",
       signal,
-    );
+    ));
 
     debug(isInProgress ? "Queued message for" : "Injected message into", sessionUri, messageId);
     return { turnId: messageId, chatUri, success: true, ...(isInProgress ? { queued: true } : {}) };
@@ -124,6 +138,8 @@ export function injectMessage(
   success: boolean;
   queued?: boolean;
 }> {
+  const signal = options?.signal ?? getOperationSignal();
+  assertOperationCurrent("interact", { hostUrl, cardId: sessionUri });
   return withAHPClient(
     hostUrl,
     (client) =>
@@ -131,10 +147,10 @@ export function injectMessage(
         client,
         sessionUri,
         message,
-        options?.signal,
+        signal,
         options?.beforeDispatch,
       ),
-    options?.signal,
+    signal,
   );
 }
 
@@ -165,7 +181,8 @@ export async function startPeerChatReview(
     }) => void;
   },
 ): Promise<PeerChatReviewStart> {
-  const signal = options?.signal;
+  const signal = options?.signal ?? getOperationSignal();
+  assertOperationCurrent("verify", { hostUrl, cardId: sessionUri });
   return withAHPClient(hostUrl, (client) => withSessionState(client, sessionUri, async (initialState, access) => {
     let reviewChatUri: string | undefined;
     let reviewChatCreated = false;
@@ -177,6 +194,8 @@ export async function startPeerChatReview(
         signal,
       );
       const sessionState = access.getState() ?? initialState;
+      access.assertCurrent();
+      assertOperationCurrent("verify");
       if (!sessionState) {
         return { success: false, reason: "Session state is unavailable." };
       }
@@ -197,22 +216,35 @@ export async function startPeerChatReview(
       const params = buildCreatePeerChatParams(sessionUri, crypto.randomUUID());
       reviewChatUri = params.chat;
       throwIfAborted(signal);
-      await createPeerChatWithCleanupOnFailure(client, params);
+      access.assertCurrent();
+      const created = await runOperationEffect("verify", async () => {
+        try {
+          await createPeerChatWithCleanupOnFailure(client, params);
+          return { success: true as const };
+        } catch (error) {
+          if (error instanceof PeerChatCleanupRequiredError) throw error;
+          // The helper confirms disposal before rethrowing a create failure.
+          return { success: false as const, disposition: "retryable" as const, error };
+        }
+      });
+      if (!created.success) throw created.error;
       reviewChatCreated = true;
       throwIfAborted(signal);
+      access.assertCurrent();
+      assertOperationCurrent("verify");
       const turnId = crypto.randomUUID();
       options?.beforeDispatch?.({
         chatUri: reviewChatUri,
         turnId,
         disposablePeerChat: true,
       });
-      const result = await dispatchPeerChatReviewWithClient(
+      const result = await runOperationEffect("verify", () => dispatchPeerChatReviewWithClient(
         client,
-        reviewChatUri,
+        params.chat,
         turnId,
         message,
         signal,
-      );
+      ));
       if (!result.success) return result;
       debug(
         "Started peer-chat review",
@@ -234,7 +266,7 @@ export async function startPeerChatReview(
       throwIfAborted(signal);
       const reason = error instanceof Error ? error.message : String(error);
       console.warn("[ahp:review] Failed to start peer chat:", reason);
-      return { success: false, reason };
+      return { success: false, reason, failureKind: "pre-dispatch" };
     }
   }, signal), signal);
 }
@@ -263,25 +295,34 @@ export async function dispatchInputCompletion(
   response: "accept" | "decline" | "cancel",
   answers?: Record<string, unknown>,
   signal?: AbortSignal,
+  beforeDispatch?: () => void,
 ): Promise<void> {
+  signal ??= getOperationSignal();
+  assertOperationCurrent("interact");
   let dispatched = false;
   const ambiguousMessage = "The input answer may have been dispatched before confirmation failed.";
-  try {
-    for (const [questionId, answer] of Object.entries(answers ?? {})) {
-      throwIfAborted(signal);
-      client.dispatch(chatUri, chatInputAnswerChanged(requestId, questionId, answer));
-      dispatched = true;
+  return runOperationEffect("interact", async () => {
+    try {
+      for (const [questionId, answer] of Object.entries(answers ?? {})) {
+        throwIfAborted(signal);
+        assertOperationCurrent("interact");
+        beforeDispatch?.();
+        client.dispatch(chatUri, chatInputAnswerChanged(requestId, questionId, answer));
+        dispatched = true;
+      }
+      assertOperationCurrent("interact");
+      beforeDispatch?.();
+      await dispatchAndConfirm(
+        client, chatUri, chatInputCompleted(requestId, response, answers),
+        ambiguousMessage, signal,
+      );
+    } catch (error) {
+      if (dispatched && !(error instanceof MessageDispatchAmbiguousError)) {
+        throw new MessageDispatchAmbiguousError(ambiguousMessage, { cause: error });
+      }
+      throw error;
     }
-    await dispatchAndConfirm(
-      client, chatUri, chatInputCompleted(requestId, response, answers),
-      ambiguousMessage, signal,
-    );
-  } catch (error) {
-    if (dispatched && !(error instanceof MessageDispatchAmbiguousError)) {
-      throw new MessageDispatchAmbiguousError(ambiguousMessage, { cause: error });
-    }
-    throw error;
-  }
+  });
 }
 
 /**
@@ -327,11 +368,14 @@ export async function answerInputWithClient(
   },
 ): Promise<{ success: boolean; stale?: boolean }> {
   const verifyTimeoutMs = options?.verifyTimeoutMs ?? 3_000;
-  const signal = options?.signal;
+  const signal = options?.signal ?? getOperationSignal();
 
   throwIfAborted(signal);
+  assertOperationCurrent("interact", { cardId: sessionUri });
   return withSessionState(client, sessionUri, async (sessionState, access) => {
-    const inputNeeded = sessionState?.inputNeeded;
+    access.assertCurrent();
+    assertOperationCurrent("interact");
+    const inputNeeded = (access.getState() ?? sessionState)?.inputNeeded;
 
     if (!hasObservedInputNeeded(inputNeeded)) {
       debug("Input aggregate unavailable; not dispatching:", requestId);
@@ -344,29 +388,32 @@ export async function answerInputWithClient(
       return { success: false, stale: true };
     }
 
-    await dispatchInputCompletion(
-      client, chatEntry.chat, requestId, response, answers, signal,
-    );
-    let applied: boolean;
-    try {
-      applied = await access.waitFor(
-        (state) => isInputObservedRemoved(state?.inputNeeded, requestId),
-        verifyTimeoutMs,
+    return runOperationEffect("interact", async () => {
+      await dispatchInputCompletion(
+        client, chatEntry.chat, requestId, response, answers, signal,
+        () => access.assertCurrent(),
       );
-    } catch (error) {
-      throw new MessageDispatchAmbiguousError(
-        "The input answer was dispatched, but its consumption could not be verified.",
-        { cause: error },
-      );
-    }
+      let applied: boolean;
+      try {
+        applied = await access.waitFor(
+          (state) => isInputObservedRemoved(state?.inputNeeded, requestId),
+          verifyTimeoutMs,
+        );
+      } catch (error) {
+        throw new MessageDispatchAmbiguousError(
+          "The input answer was dispatched, but its consumption could not be verified.",
+          { cause: error },
+        );
+      }
 
-    if (!applied) {
-      debug("Answer dispatched but request not consumed (not applied):", requestId, "on", sessionUri);
-      return { success: false };
-    }
+      if (!applied) {
+        debug("Answer dispatched but request not consumed (not applied):", requestId, "on", sessionUri);
+        return { success: false };
+      }
 
-    debug("Answered input", requestId, "on", sessionUri, "(applied)");
-    return { success: true };
+      debug("Answered input", requestId, "on", sessionUri, "(applied)");
+      return { success: true };
+    });
   }, signal);
 }
 
@@ -382,6 +429,8 @@ export function answerInput(
     signal?: AbortSignal;
   },
 ): Promise<{ success: boolean; stale?: boolean }> {
+  const signal = options?.signal ?? getOperationSignal();
+  assertOperationCurrent("interact", { hostUrl, cardId: sessionUri });
   return withAHPClient(
     hostUrl,
     (client) =>
@@ -391,9 +440,9 @@ export function answerInput(
         requestId,
         response,
         answers,
-        options,
+        { ...options, signal },
       ),
-    options?.signal,
+    signal,
   );
 }
 
@@ -507,7 +556,8 @@ export async function setSessionArchived(
   const verifyTimeoutMs = options?.verifyTimeoutMs ?? 8_000;
   const targetArchived = isArchived;
 
-  const signal = options?.signal;
+  const signal = options?.signal ?? getOperationSignal();
+  assertOperationCurrent("interact", { hostUrl, cardId: sessionUri });
   return withAHPClient(hostUrl, (client) => withSessionState(client, sessionUri, async (_initial, access) => {
     const isReady = (state: SessionState | undefined): state is SessionState =>
       state?.lifecycle === "ready" && Number.isInteger(state.status) && state.status >= 0;
@@ -522,25 +572,31 @@ export async function setSessionArchived(
     if (!await access.waitFor(isReady, readyTimeoutMs)) return result(false);
     if (matchesTarget(access.getState())) return result(true);
 
-    await dispatchAndConfirm(
-      client, sessionUri, sessionIsArchivedChanged(isArchived),
-      "The archive update may have been dispatched before confirmation failed.", signal,
-    );
-    try {
-      if (await access.waitFor(matchesTarget, verifyTimeoutMs / 2)) return result(true);
-      // Never retry a mutation against a session whose lifecycle is now unknown.
-      if (!isReady(access.getState())) return result(false);
+    access.assertCurrent();
+    return runOperationEffect("interact", async () => {
       await dispatchAndConfirm(
         client, sessionUri, sessionIsArchivedChanged(isArchived),
         "The archive update may have been dispatched before confirmation failed.", signal,
       );
-      return result(await access.waitFor(matchesTarget, verifyTimeoutMs / 2));
-    } catch (error) {
-      if (error instanceof MessageDispatchAmbiguousError) throw error;
-      throw new MessageDispatchAmbiguousError(
-        "The archive update was dispatched, but its application could not be verified.",
-        { cause: error },
-      );
-    }
+      try {
+        if (await access.waitFor(matchesTarget, verifyTimeoutMs / 2)) return result(true);
+        // Only explicit human operations retain the legacy retry. An automated
+        // unconfirmed mutation keeps its admission slot quarantined instead.
+        if (getOperationSignal() || !isReady(access.getState())) return result(false);
+        access.assertCurrent();
+        assertOperationCurrent("interact");
+        await dispatchAndConfirm(
+          client, sessionUri, sessionIsArchivedChanged(isArchived),
+          "The archive update may have been dispatched before confirmation failed.", signal,
+        );
+        return result(await access.waitFor(matchesTarget, verifyTimeoutMs / 2));
+      } catch (error) {
+        if (error instanceof MessageDispatchAmbiguousError) throw error;
+        throw new MessageDispatchAmbiguousError(
+          "The archive update was dispatched, but its application could not be verified.",
+          { cause: error },
+        );
+      }
+    });
   }, signal), signal);
 }

@@ -68,6 +68,7 @@ function harness(status: number = AHPStatus.Idle) {
   };
   let readWait: Promise<void> | undefined;
   let connectionWait: Promise<void> | undefined;
+  let owned = true;
   const client = {
     async *stateChanges() { yield* []; },
     async request() { return { items: [summary] }; },
@@ -98,6 +99,8 @@ function harness(status: number = AHPStatus.Idle) {
     root, client: client as unknown as AhpClient, reads, releases, shutdowns, emitted, cached, summary,
     seededCache, artifacts, actions,
     setChat(value: ChatState) { chat = value; },
+    ownsSession() { return owned; },
+    setOwned(value: boolean) { owned = value; },
     async connect(options?: { initialSubscriptions?: readonly string[] }) {
       if (!options?.initialSubscriptions && connectionWait) { const wait = connectionWait; connectionWait = undefined; await wait; }
       return { client, initialized: { protocolVersion: "1.0.0" }, diagnostics: {} };
@@ -130,6 +133,10 @@ const hooks = registerHooks({
       export function upsertSessionCache(host, uri, summary, enrichment) {
         globalThis["${key}"].cached.set(uri, {summary, enrichment:enrichment === CLEAR_ENRICHMENT ? null : enrichment});
       }`;
+    if (specifier === "@/lib/db/schema") source = "export function getDb(){return {};}";
+    if (specifier === "@/lib/db/session-ownership") source = `
+      export function claimSessionOwnership(){return globalThis["${key}"].ownsSession();}
+      export function isSessionOwnedByHost(){return globalThis["${key}"].ownsSession();}`;
     if (specifier === "./changeset-enricher") source = `
       export async function enrichFromChangeset() { return ${JSON.stringify(enrichment)}; }
       export function hashPlanContent(content) { return "plan:" + content; }`;
@@ -160,6 +167,7 @@ const hooks = registerHooks({
 after(() => { hooks.deregister(); Reflect.deleteProperty(globalThis, key); });
 
 const { createAHPBridge } = await import("./client-bridge.ts");
+const { invalidateEvidenceReads, publishEvidenceRefresh, publishOwnershipRecovery, bindEnrichment } = await import("./source-binding.ts");
 const { readActiveSessionState, readSessionState, withSessionState } = await import("./snapshot.ts");
 const { fetchSessionDetails, resumeErroredTurn } = await import("./session-details.ts");
 const { injectMessageWithClient } = await import("./session-messenger.ts");
@@ -271,10 +279,28 @@ test("disposal during connection acquisition prevents queued subscriptions and s
   const dispose = await createAHPBridge({ hostUrl: "ws://fake", onEvent: () => {} });
   await tick();
   dispose();
+  const coordination = (globalThis as typeof globalThis & {
+    __planwerkEvidenceCoordination: { reads: Map<string, symbol>; listeners: Map<string, unknown> };
+  }).__planwerkEvidenceCoordination;
+  assert.equal(coordination.reads.has(JSON.stringify(["ws://fake", uri])), false);
+  assert.equal(coordination.listeners.has("ws://fake"), false);
   wait.resolve();
   await tick();
   assert.deepEqual(active.reads, []);
   assert.ok(active.shutdowns.length >= 2);
+});
+
+test("an already-aborted bridge does not retain a refresh listener or start a connection", async () => {
+  active = harness();
+  const controller = new AbortController();
+  controller.abort();
+  const stop = await createAHPBridge({ hostUrl: "ws://already-aborted", onEvent: () => {}, signal: controller.signal });
+  stop();
+  assert.deepEqual(active.reads, []);
+  const coordination = (globalThis as typeof globalThis & {
+    __planwerkEvidenceCoordination: { listeners: Map<string, unknown> };
+  }).__planwerkEvidenceCoordination;
+  assert.equal(coordination.listeners.has("ws://already-aborted"), false);
 });
 
 test("background snapshot policy defers cold/archived sessions; explicit detail inspection still reads", async () => {
@@ -297,6 +323,91 @@ test("dependent reads keep the session subscribed and release on operation failu
     throw new Error("detail failed");
   }), /detail failed/);
   assert.deepEqual(active.releases, [uri]);
+});
+
+test("an explicit refresh supersedes older bridge work and adopted evidence survives later summaries", async () => {
+  active = harness(AHPStatus.InProgress);
+  const wait = deferred<void>();
+  active.waitForRead(wait.promise);
+  const dispose = await createAHPBridge({ hostUrl: "ws://fake", onEvent: (event) => active.emitted.push(event) });
+  await tick();
+  invalidateEvidenceReads("ws://fake", uri);
+  const summary = active.cached.get(uri)!.summary;
+  const refreshed = bindEnrichment(summary, { ...enrichment, capturedFilesDigest: "captured-explicit" });
+  publishEvidenceRefresh("ws://fake", { session: summary, enrichment: refreshed });
+  wait.resolve();
+  await tick();
+  const update = active.emitted.filter((event) => event.type === "sessionSummaryChanged").at(-1);
+  assert.equal(update?.type === "sessionSummaryChanged" ? update.enrichment : undefined, refreshed);
+  active.change({ title: "Updated title" });
+  await tick();
+  assert.equal(active.cached.get(uri)?.enrichment?.capturedFilesDigest, "captured-explicit");
+  const readsBeforeTimestamp = active.reads.length;
+  active.change({ modifiedAt: "2026-10-17T10:10:00Z" });
+  await tick();
+  assert.equal(active.cached.get(uri)?.enrichment, null);
+  const persisted = active.cached.get(uri)?.summary as { _planwerkRiskFacts?: { evidenceDigest?: string } };
+  assert.equal(persisted._planwerkRiskFacts?.evidenceDigest, undefined);
+  assert.equal(active.reads.length, readsBeforeTimestamp, "timestamp invalidation cannot authorize a new subscription");
+  dispose();
+});
+
+test("URI ownership collisions retain a display-only catalog entry without live reads", async () => {
+  active = harness(AHPStatus.InProgress);
+  active.summary.chats = [{ resource: "ahp-chat:/conflicted", title: "Conflicted", status: AHPStatus.InProgress }];
+  active.summary.defaultChat = "ahp-chat:/conflicted";
+  active.setOwned(false);
+  const dispose = await createAHPBridge({ hostUrl: "ws://fake", onEvent: (event) => active.emitted.push(event) });
+  await tick();
+  const init = active.emitted.find((event) => event.type === "init");
+  assert.equal(init?.type === "init" ? init.sessions.length : -1, 1);
+  assert.deepEqual(active.reads, []);
+  assert.equal(active.cached.size, 0);
+  assert.equal(active.shutdowns.length, 0, "a conflicting URI must not terminate the host");
+  dispose();
+});
+
+test("explicit ownership recovery updates passive conflict entries without restoring the session", async () => {
+  active = harness(AHPStatus.Idle);
+  active.setOwned(false);
+  const dispose = await createAHPBridge({ hostUrl: "ws://fake", onEvent: (event) => active.emitted.push(event) });
+  await tick();
+  active.setOwned(true);
+  publishOwnershipRecovery(["ws://fake", "ws://other"], {
+    session: {
+      resource: uri, provider: "copilotcli", title: "Selected host", status: AHPStatus.Idle,
+      createdAt: "2026-10-15T00:00:00Z", modifiedAt: "2026-10-15T00:00:00Z",
+    },
+    selectedHostUrl: "ws://fake", revision: 2,
+  });
+  const update = active.emitted.at(-1);
+  assert.equal(update?.type, "sessionSummaryChanged");
+  if (update?.type === "sessionSummaryChanged") {
+    assert.equal(update.session.title, "Selected host");
+    assert.equal(update.enrichment, null);
+  }
+  assert.deepEqual(active.reads, []);
+  dispose();
+});
+
+test("quarantine suppresses late enrichment but retains a passive recovery entry", async () => {
+  active = harness(AHPStatus.InProgress);
+  const wait = deferred<void>();
+  active.waitForRead(wait.promise);
+  const dispose = await createAHPBridge({ hostUrl: "ws://fake", onEvent: (event) => active.emitted.push(event) });
+  await tick();
+  const emittedBefore = active.emitted.length;
+  active.setOwned(false);
+  active.change({ changes: { files: 2, additions: 2, deletions: 0 } });
+  await tick();
+  wait.resolve();
+  await tick();
+  const later = active.emitted.slice(emittedBefore);
+  assert.equal(later.some((event) => event.type === "sessionSummaryChanged" && event.enrichment), false);
+  assert.equal(later.some((event) => event.type === "sessionSummaryChanged" && event.enrichment === null), true);
+  assert.equal(later.some((event) => event.type === "sessionRemoved"), false);
+  assert.equal(active.cached.get(uri)?.enrichment, null);
+  dispose();
 });
 
 function completedChat(): ChatState {

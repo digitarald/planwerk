@@ -1,6 +1,9 @@
 import "server-only";
 
 import { setCardPhase } from "./gate-engine";
+import { getDb } from "@/lib/db/schema";
+import { isSessionOwnedByHost } from "@/lib/db/session-ownership";
+import { resolveAuthoritativeGateRevision } from "./gate-revision";
 import {
   getShipBlockingConflicts,
   type CoherenceConfig,
@@ -19,12 +22,20 @@ import {
  */
 export function advanceReviewToShip(
   cardId: string,
-  config: CoherenceConfig = DEFAULT_COHERENCE_CONFIG
-): { advanced: boolean; blockedBy: CoherenceRow[] } {
-  const blockedBy = getShipBlockingConflicts(cardId, config);
-  if (blockedBy.length > 0) {
-    return { advanced: false, blockedBy };
-  }
-  setCardPhase(cardId, "ship");
-  return { advanced: true, blockedBy: [] };
+  config: CoherenceConfig = DEFAULT_COHERENCE_CONFIG,
+  hostUrl: string,
+): { advanced: boolean; blockedBy: CoherenceRow[]; reason?: string } {
+  const db = getDb();
+  return db.transaction(() => {
+    if (!hostUrl?.trim() || !isSessionOwnedByHost(db, cardId, hostUrl) ||
+        !resolveAuthoritativeGateRevision(db, cardId, "review", hostUrl).ok) {
+      return { advanced: false, blockedBy: [], reason: "Current host-owned evidence is required to ship." };
+    }
+    const blockedBy = getShipBlockingConflicts(cardId, config, hostUrl);
+    if (blockedBy.length > 0) {
+      return { advanced: false, blockedBy };
+    }
+    setCardPhase(cardId, "ship");
+    return { advanced: true, blockedBy: [] };
+  }).immediate();
 }

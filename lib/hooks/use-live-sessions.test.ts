@@ -1,0 +1,85 @@
+import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { registerHooks } from "node:module";
+import path from "node:path";
+import { after, test } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const state = {
+  effects: [] as Array<() => void>,
+  host: "ws://a",
+  changes: [] as Array<{ kind: string; id?: string }>,
+  liveConnections: 0,
+};
+const key = "__planwerkLiveSessionsTest";
+Object.defineProperty(globalThis, key, { value: state, configurable: true });
+const root = path.resolve(import.meta.dirname, "../..");
+const originalEventSource = globalThis.EventSource;
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+  onopen?: () => void;
+  onerror?: () => void;
+  onmessage?: (event: { data: string }) => void;
+  closed = false;
+  readonly url: string;
+  constructor(url: string) { this.url = url; FakeEventSource.instances.push(this); }
+  close() { this.closed = true; }
+  emit(data: object) { this.onmessage?.({ data: JSON.stringify(data) }); }
+}
+Object.defineProperty(globalThis, "EventSource", { value: FakeEventSource, configurable: true });
+const hooks = registerHooks({
+  resolve(specifier, context, nextResolve) {
+    const s = `globalThis["${key}"]`;
+    let source: string | undefined;
+    if (specifier === "react") source = `export function useRef(value){return {current:value};} export function useEffect(effect){const cleanup=effect();if(cleanup) ${s}.effects.push(cleanup);}`;
+    if (specifier === "@/lib/store/board-store") source = `
+      const state={cards:[],workspaceFilters:new Set(),
+        setCards(cards){${s}.changes.push({kind:"init",id:cards[0]?.id});},
+        replaceCard(id){${s}.changes.push({kind:"replace",id});},
+        addCard(card){${s}.changes.push({kind:"add",id:card.id});},
+        removeCard(id){${s}.changes.push({kind:"remove",id});},getCard(){return undefined;}};
+      export const useBoardStore=selector=>selector(state);
+      useBoardStore.getState=()=>state;`;
+    if (specifier === "@/lib/store/connection-store") source = `
+      export function useConnectionStore(selector){return selector({status:"connected",hostUrl:${s}.host,
+      setConnected(){${s}.liveConnections++;},setError(){${s}.changes.push({kind:"error"});}});}`;
+    if (specifier === "@/lib/store/inbox-store") source = "export const useInboxStore={getState(){return {reconcileItem(){},removeItem(){}};}};";
+    if (specifier === "@/lib/store/orchestrator-store") source = "export function useOrchestratorStore(selector){return selector({addFeedItem(){},setMonitoringStatus(){}});}";
+    if (source) return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(source)}` };
+    if (specifier.startsWith("@/")) return { shortCircuit: true, url: pathToFileURL(path.join(root, `${specifier.slice(2)}.ts`)).href };
+    if (specifier.startsWith(".") && !path.extname(specifier) && context.parentURL?.startsWith("file:")) {
+      const file = fileURLToPath(new URL(`${specifier}.ts`, context.parentURL));
+      if (existsSync(file)) return { shortCircuit: true, url: pathToFileURL(file).href };
+    }
+    return nextResolve(specifier, context);
+  },
+});
+after(() => {
+  for (const cleanup of state.effects.splice(0)) cleanup();
+  hooks.deregister();
+  Reflect.deleteProperty(globalThis, key);
+  if (originalEventSource === undefined) Reflect.deleteProperty(globalThis, "EventSource");
+  else Object.defineProperty(globalThis, "EventSource", { value: originalEventSource, configurable: true });
+});
+const { useLiveSessions } = await import("./use-live-sessions.ts");
+
+test("host switch and stream retirement fence delayed snapshots and removal resurrection", () => {
+  useLiveSessions();
+  const a = FakeEventSource.instances.at(-1)!;
+  a.emit({ type: "init", epoch: "a", sequence: 1, cached: true, cards: [{ id: "a" }] });
+  assert.equal(state.liveConnections, 0);
+  a.emit({ type: "cardRemoved", epoch: "a", sequence: 2, cardId: "a" });
+  a.emit({ type: "cardChanged", epoch: "a", sequence: 1, card: { id: "a" } });
+  assert.deepEqual(state.changes, [{ kind: "init", id: "a" }, { kind: "remove", id: "a" }]);
+  state.effects.pop()!();
+  state.host = "ws://b";
+  useLiveSessions();
+  const b = FakeEventSource.instances.at(-1)!;
+  b.emit({ type: "init", epoch: "b", sequence: 1, cards: [{ id: "b" }] });
+  assert.equal(state.liveConnections, 1);
+  a.emit({ type: "init", epoch: "a", sequence: 3, cards: [{ id: "old" }] });
+  a.onerror?.();
+  assert.equal(state.changes.at(-1)?.id, "b");
+  assert.equal(b.closed, false);
+  assert.equal(state.changes.some((change) => change.kind === "error"), false);
+});

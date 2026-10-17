@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 import type { Changeset, ChangesetFile } from "@microsoft/agent-host-protocol";
 import type { MessageOptions, ResponseSchema } from "@github/copilot-sdk";
-import type { KanbanCard, RiskLevel } from "../types.ts";
+import type { KanbanCard, Phase, RiskLevel } from "../types.ts";
 
 const HOST = "ws://coherence.test";
 const FILE = "/repo/src/x/shared.ts";
@@ -31,7 +31,8 @@ db.exec(`
 
 const state = {
   status: 8,
-  risk: "medium" as RiskLevel,
+  phase: "review" as Phase,
+  risk: "medium" as RiskLevel | undefined,
   changesets: undefined as Changeset[] | undefined,
   files: undefined as ChangesetFile[] | undefined,
   changesetStatus: "ready",
@@ -44,6 +45,7 @@ const state = {
   resident: new Set<string>(),
   onRead: undefined as (() => void) | undefined,
   onSend: undefined as (() => void) | undefined,
+  onCatalog: undefined as (() => void) | undefined,
 };
 
 function file(): ChangesetFile {
@@ -77,10 +79,13 @@ const ahp = {
       assert.equal(this.resident.size, 1, "changeset reads retain parent residency");
       snapshotState = { status: state.changesetStatus, files: state.files ?? [file()] };
     }
+    let end!: (value: { done: true; value: undefined }) => void;
+    const next = new Promise<{ done: true; value: undefined }>((resolve) => { end = resolve; });
     return {
       result: { snapshot: { resource: uri, state: snapshotState } },
       subscription: {
-        async close() { state.calls.push(`close:${uri}`); },
+        next() { return next; },
+        async close() { state.calls.push(`close:${uri}`); end({ done: true, value: undefined }); },
       },
     };
   },
@@ -92,6 +97,7 @@ const ahp = {
   async request(method: string) {
     state.calls.push(method);
     if (method === "listSessions") {
+      state.onCatalog?.();
       return { items: IDS.map((resource) => ({ resource, status: state.status })) };
     }
     assert.equal(method, "resourceRead");
@@ -144,8 +150,37 @@ const hooks = registerHooks({
         return operation(client);
       }`;
     }
-    if (specifier === "./risk-store") {
-      source = `export function getRiskForAutomation() { return globalThis["${key}"].state.risk; }`;
+    if (specifier === "./risk-store" || specifier === "@/lib/orchestrator/risk-store") {
+      source = `export function getRiskForAutomation() { return globalThis["${key}"].state.risk; }
+        export function getAuthoritativeCardRisk() {
+          return {status:"current",assessment:{level:globalThis["${key}"].state.risk}};
+        }`;
+    }
+    if (specifier === "./gate-engine" || specifier === "@/lib/orchestrator/gate-engine") {
+      source = `export function setCardPhase(id, phase) {
+          const state=globalThis["${key}"].state;
+          state.calls.push("phase:" + id + ":" + phase); state.phase=phase;
+        }
+        export function getCardPhase() { return globalThis["${key}"].state.phase; }
+        export function getNextPhase(phase) { return {review:"ship",build:"review",plan:"build",define:"plan"}[phase]; }
+        export function logManualOverride(id, from, to, direction) {
+          globalThis["${key}"].state.calls.push("override:" + id + ":" + from + ":" + to + ":" + direction);
+        }
+        export function canAdvancePhase() { return {allowed:true,pendingGates:[]}; }
+        export function getGatesForTransition() { return []; }
+        export function completeGateRun() {}
+        export function executeGateCommand() {}
+        export function resolveConfiguredGate() {}
+        export function startGateRun() {}`;
+    }
+    if (specifier === "next/server") {
+      source = `export class NextRequest extends Request {}
+        export const NextResponse = {json: (body, init) => Response.json(body, init)};`;
+    }
+    if (specifier === "@/lib/orchestrator/skill-config") {
+      source = `export function loadConfig() {
+        return {coherence:{enabled:true,moduleDepth:2,blockHighRiskShip:true}};
+      }`;
     }
     if (specifier === "./sdk-runtime") {
       source = `export async function acquireCopilotRuntimeClient() {
@@ -172,10 +207,14 @@ const hooks = registerHooks({
 
 const { fetchOverlapContent } = await import("./coherence-content.ts");
 const { runCoherenceExecutor } = await import("./coherence-reviewer.ts");
+const { advanceReviewToShip } = await import("./phase-advance.ts");
+const { POST: postGate } = await import("../../app/api/gates/run/route.ts");
 const {
   syncCoherence, DEFAULT_COHERENCE_CONFIG, claimForReviewOwner, completeReview,
-  isCoherenceReviewCurrent, getShipBlockingConflicts, dismissConflict,
+  isCoherenceReviewCurrent, getShipBlockingConflicts, dismissConflict, buildCoherenceSummary,
 } = await import("./coherence-engine.ts");
+const { claimSessionOwnership, ensureSessionOwnershipSchema } = await import("../db/session-ownership.ts");
+ensureSessionOwnershipSchema(db);
 
 after(() => {
   hooks.deregister();
@@ -184,13 +223,13 @@ after(() => {
 });
 
 beforeEach(() => {
-  db.exec("DELETE FROM session_cache; DELETE FROM coherence_conflicts; DELETE FROM heartbeat_log;");
+  db.exec("DELETE FROM session_cache; DELETE FROM coherence_conflicts; DELETE FROM heartbeat_log; DELETE FROM session_uri_ownership;");
   Object.assign(state, {
-    status: 8, risk: "medium", changesets: undefined, files: undefined,
+    status: 8, phase: "review", risk: "medium", changesets: undefined, files: undefined,
     changesetStatus: "ready", missingContent: false, failedRead: false,
     text: "export const answer = 42;",
     result: { status: "coherent", summary: "Independent edits.", findings: [] },
-    sdkError: undefined, onRead: undefined, onSend: undefined,
+    sdkError: undefined, onRead: undefined, onSend: undefined, onCatalog: undefined,
   });
   state.calls.length = 0;
   state.resident.clear();
@@ -221,12 +260,73 @@ function persisted() {
   return db.prepare("SELECT * FROM coherence_conflicts").get() as {
     status: string; verdict_summary: string | null; review_owner_id: string | null;
     review_lease_expires_at_ms: number | null; signature: string;
+    deferral_reason: string | null; wake_condition: string | null;
+    retry_at_ms: number | null; failure_attempts: number;
   };
 }
 
 function rows() {
-  return syncCoherence(cards(), DEFAULT_COHERENCE_CONFIG);
+  return syncCoherence(cards(), DEFAULT_COHERENCE_CONFIG, HOST);
 }
+
+async function drag(toPhase: Phase, extra: Record<string, unknown> = {}) {
+  return postGate(new Request("http://127.0.0.1:3000/api/gates/run", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json", host: "127.0.0.1:3000",
+      origin: "http://127.0.0.1:3000", "sec-fetch-site": "same-origin",
+    },
+    body: JSON.stringify({ cardId: IDS[0], action: "transition", toPhase, ...extra }),
+  }) as Parameters<typeof postGate>[0]);
+}
+
+test("DnD review-to-ship cannot bypass coherence or substitute a request-supplied host", async () => {
+  rows();
+  state.risk = "high";
+  const response = await drag("ship", { hostUrl: "ws://unrelated-host" });
+  assert.equal(response.status, 409);
+  const payload = await response.json();
+  assert.equal(payload.error, "Blocked by unresolved coherence conflict");
+  assert.equal(payload.coherenceConflicts.length, 1);
+  assert.equal(state.phase, "review");
+  assert.equal(state.calls.some((call) => call.startsWith("phase:") || call.startsWith("override:")), false);
+});
+
+test("DnD review-to-ship rejects unavailable and quarantined source authority without override", async () => {
+  assert.equal((await drag("ship")).status, 409);
+  rows();
+  assert.equal(claimSessionOwnership(db, IDS[0], HOST), true);
+  assert.equal(claimSessionOwnership(db, IDS[0], "ws://collision"), false);
+  assert.equal((await drag("ship")).status, 409);
+  assert.equal(state.phase, "review");
+  assert.equal(state.calls.some((call) => call.startsWith("phase:") || call.startsWith("override:")), false);
+});
+
+test("DnD review-to-ship uses current owned facts and preserves the deliberate override audit", async () => {
+  rows();
+  const response = await drag("ship");
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.manualOverride, true);
+  assert.equal(payload.newPhase, "ship");
+  assert.deepEqual(state.calls, [
+    `phase:${IDS[0]}:ship`,
+    `override:${IDS[0]}:review:ship:forward`,
+  ]);
+});
+
+test("DnD backwards rework remains possible without live source evidence", async () => {
+  state.phase = "ship";
+  const response = await drag("build");
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.direction, "backward");
+  assert.equal(payload.manualOverride, false);
+  assert.deepEqual(state.calls, [
+    `phase:${IDS[0]}:build`,
+    `override:${IDS[0]}:ship:build:backward`,
+  ]);
+});
 
 test("only a static session changeset is selected; workspace fallback is never evidence", async () => {
   for (const changesets of [
@@ -260,11 +360,36 @@ test("cold medium-risk pairs defer passively without SDK work or repeated reads"
   assert.equal(state.calls.includes("acquireRuntime"), false);
   assert.equal(persisted().status, "detected");
   assert.equal(persisted().review_owner_id, null);
-  assert.ok(persisted().review_lease_expires_at_ms! > Date.now());
+  assert.equal(persisted().wake_condition, "activation-change");
+  assert.equal(persisted().retry_at_ms, null);
   const count = state.calls.length;
   assert.deepEqual(await runCoherenceExecutor(HOST, pending, new Map()), []);
   assert.equal(state.calls.length, count);
-  assert.deepEqual(syncCoherence(cards(), DEFAULT_COHERENCE_CONFIG), []);
+  assert.deepEqual(syncCoherence(cards(), DEFAULT_COHERENCE_CONFIG, HOST), []);
+});
+
+test("refreshed cold high-risk evidence explicitly remains unsupported for automatic coherence review", async () => {
+  const pending = rows();
+  state.status = 1;
+  state.risk = "high";
+  await runCoherenceExecutor(HOST, pending, new Map());
+  const refreshed = cards().map((card) => {
+    const revision = `${card.id}-captured-by-explicit-refresh`;
+    cache(card.id, revision);
+    return { ...card, sourceRevision: revision };
+  });
+  const awakened = syncCoherence(refreshed, DEFAULT_COHERENCE_CONFIG, HOST);
+  assert.equal(awakened.length, 1);
+  assert.deepEqual(await runCoherenceExecutor(HOST, awakened, new Map()), []);
+  assert.equal(persisted().deferral_reason, "inactive-session");
+  assert.equal(persisted().wake_condition, "activation-change");
+  assert.match(persisted().verdict_summary!, /Explicit refresh captures digests, not reviewable code/);
+  assert.match(persisted().verdict_summary!, /cold-session review is unsupported/);
+  assert.equal(getShipBlockingConflicts(IDS[0], DEFAULT_COHERENCE_CONFIG, HOST).length, 1);
+  assert.equal(state.calls.some((call) => call.startsWith("subscribe:") || call === "acquireRuntime"), false);
+  const calls = state.calls.length;
+  assert.deepEqual(await runCoherenceExecutor(HOST, awakened, new Map()), []);
+  assert.equal(state.calls.length, calls);
 });
 
 test("archived running sessions never subscribe", async () => {
@@ -288,6 +413,35 @@ test("failed/missing file reads leave high-risk pairs provisionally blocked, not
   }
 });
 
+test("missing risk authority cannot silently downgrade an existing ship blocker", () => {
+  rows();
+  state.risk = "high";
+  assert.equal(getShipBlockingConflicts(IDS[0]).length, 1);
+  state.risk = undefined;
+  assert.equal(getShipBlockingConflicts(IDS[0]).length, 1);
+});
+
+test("changed passive catalog facts and canceled ownership refuse complete evidence", async () => {
+  state.onRead = () => { state.status = 1; };
+  const changed = await fetchOverlapContent(HOST, IDS[0], "file", [FILE]);
+  assert.equal(changed.status, "deferred");
+  if (changed.status === "deferred") assert.equal(changed.reason, "evidence-changed");
+  assert.equal(state.resident.size, 0);
+  state.calls.length = 0;
+  let current = true;
+  state.onCatalog = () => { current = false; };
+  const canceled = await fetchOverlapContent(HOST, IDS[0], "file", [FILE], { isCurrent: () => current });
+  assert.equal(canceled.status, "deferred");
+  assert.equal(state.calls.some((call) => call.startsWith("subscribe:")), false);
+});
+
+test("evidence byte limits count UTF-8 rather than JavaScript code units", async () => {
+  state.text = "🙂".repeat(2_001);
+  const content = await fetchOverlapContent(HOST, IDS[0], "file", [FILE]);
+  assert.equal(content.status, "deferred");
+  if (content.status === "deferred") assert.equal(content.reason, "evidence-limit");
+});
+
 test("empty, incomplete, truncated, and unready changesets defer without an SDK verdict", async () => {
   const pending = rows();
   for (const setup of [
@@ -299,7 +453,7 @@ test("empty, incomplete, truncated, and unready changesets defer without an SDK 
     state.changesetStatus = "ready";
     state.text = "code";
     setup();
-    db.prepare("UPDATE coherence_conflicts SET review_lease_expires_at_ms = NULL").run();
+    db.prepare("UPDATE coherence_conflicts SET review_lease_expires_at_ms = NULL, wake_condition = NULL").run();
     assert.deepEqual(await runCoherenceExecutor(HOST, pending, new Map()), []);
     assert.equal(persisted().status, "detected");
     assert.equal(state.calls.includes("acquireRuntime"), false);
@@ -328,7 +482,7 @@ test("deletions use previous content and module bounds never include prefix sibl
 
 test("count-identical revision changes reopen an accepted verdict", async () => {
   const current = cards();
-  const pending = syncCoherence(current, DEFAULT_COHERENCE_CONFIG);
+  const pending = syncCoherence(current, DEFAULT_COHERENCE_CONFIG, HOST);
   assert.equal((await runCoherenceExecutor(HOST, pending, new Map()))[0].status, "coherent");
   const oldSignature = persisted().signature;
   assert.equal(persisted().status, "coherent");
@@ -337,7 +491,7 @@ test("count-identical revision changes reopen an accepted verdict", async () => 
   ["createSession", "sendAndWait", "deleteSession", "release"]);
   current[0].sourceRevision = "semantic-edit-v2";
   cache(IDS[0], current[0].sourceRevision);
-  const reopened = syncCoherence(current, DEFAULT_COHERENCE_CONFIG);
+  const reopened = syncCoherence(current, DEFAULT_COHERENCE_CONFIG, HOST);
   assert.equal(reopened.length, 1);
   assert.notEqual(reopened[0].signature, oldSignature);
   assert.equal(persisted().status, "detected");
@@ -365,27 +519,181 @@ test("ship blocking rechecks settled source revisions without waiting for the ne
 
 test("missing enrichment cannot auto-resolve a deferred overlapping pair", async () => {
   const current = cards();
-  syncCoherence(current, DEFAULT_COHERENCE_CONFIG);
+  syncCoherence(current, DEFAULT_COHERENCE_CONFIG, HOST);
   current[0].changesetVerified = false;
   current[0].fileChanges = undefined;
-  syncCoherence(current, DEFAULT_COHERENCE_CONFIG);
+  syncCoherence(current, DEFAULT_COHERENCE_CONFIG, HOST);
   assert.equal(persisted().status, "detected");
+});
+
+test("another host's tick cannot clean up or claim the first host's conflicts", () => {
+  const pending = rows();
+  assert.deepEqual(syncCoherence([], DEFAULT_COHERENCE_CONFIG, "ws://another", {
+    authoritativeSessionUris: new Set(),
+  }), []);
+  assert.equal(persisted().status, "detected");
+  assert.equal(claimForReviewOwner(pending[0].id, pending[0].signature, "foreign", "ws://another"), false);
+  assert.equal(persisted().review_owner_id, null);
+});
+
+test("legacy conflicts with unavailable host binding remain fail-closed ship blockers", () => {
+  rows();
+  state.risk = "high";
+  db.prepare("UPDATE coherence_conflicts SET host_url = NULL").run();
+  syncCoherence([], DEFAULT_COHERENCE_CONFIG, "ws://unrelated", {
+    authoritativeSessionUris: new Set(),
+  });
+  assert.equal(persisted().status, "detected");
+  assert.equal(getShipBlockingConflicts(IDS[0], DEFAULT_COHERENCE_CONFIG, HOST).length, 1);
+});
+
+test("coherence summary forwards the expected host and config without exposing another host's conflicts", () => {
+  rows();
+  state.risk = "high";
+  db.prepare("UPDATE coherence_conflicts SET status = 'conflict'").run();
+  const own = buildCoherenceSummary(IDS[0], undefined, DEFAULT_COHERENCE_CONFIG, HOST);
+  assert.equal(own?.blocking, true);
+  assert.equal(own?.peers.length, 1);
+  assert.equal(buildCoherenceSummary(IDS[0], undefined, DEFAULT_COHERENCE_CONFIG, "ws://unowned"), null);
+  const advisory = buildCoherenceSummary(IDS[0], undefined,
+    { ...DEFAULT_COHERENCE_CONFIG, blockHighRiskShip: false }, HOST);
+  assert.equal(advisory?.blocking, false);
+  assert.equal(advisory?.peers.length, 1);
+  db.prepare("UPDATE coherence_conflicts SET host_url = 'ws://foreign-row'").run();
+  assert.equal(buildCoherenceSummary(IDS[0], undefined, DEFAULT_COHERENCE_CONFIG, HOST), null);
+});
+
+test("raw cache host fallback cannot authorize quarantined coherence display", () => {
+  rows();
+  state.risk = "high";
+  assert.equal(claimSessionOwnership(db, IDS[0], HOST), true);
+  assert.equal(getShipBlockingConflicts(IDS[0]).length, 1);
+  assert.equal(claimSessionOwnership(db, IDS[0], "ws://collision"), false);
+  assert.deepEqual(getShipBlockingConflicts(IDS[0]), []);
+  assert.deepEqual(getShipBlockingConflicts(IDS[0], DEFAULT_COHERENCE_CONFIG, HOST), []);
+  assert.equal(buildCoherenceSummary(IDS[0]), null);
+  assert.equal(buildCoherenceSummary(IDS[0], undefined, DEFAULT_COHERENCE_CONFIG, HOST), null);
+  assert.equal(advanceReviewToShip(IDS[0], DEFAULT_COHERENCE_CONFIG, HOST).advanced, false);
+});
+
+test("mismatched cache fallback cannot reopen settled coherence rows or borrow another host's authority", () => {
+  rows();
+  assert.equal(claimSessionOwnership(db, IDS[0], HOST), true);
+  db.prepare("UPDATE coherence_conflicts SET status = 'coherent', resolved_by = 'reviewer'").run();
+  cache(IDS[0], `${IDS[0]}-v1`, { host: "ws://cache-mismatch" });
+  assert.deepEqual(getShipBlockingConflicts(IDS[0]), []);
+  assert.equal(persisted().status, "coherent");
+  assert.equal(buildCoherenceSummary(IDS[0]), null);
+  assert.equal(buildCoherenceSummary(IDS[0], undefined, DEFAULT_COHERENCE_CONFIG, "ws://cache-mismatch"), null);
+  assert.equal(advanceReviewToShip(IDS[0], DEFAULT_COHERENCE_CONFIG, "ws://cache-mismatch").advanced, false);
+});
+
+test("a filtered or unavailable batch never proves removal; explicit complete catalog removal does", () => {
+  const current = cards();
+  syncCoherence(current, DEFAULT_COHERENCE_CONFIG, HOST);
+  syncCoherence([current[0]], DEFAULT_COHERENCE_CONFIG, HOST);
+  assert.equal(persisted().status, "detected");
+  syncCoherence([], DEFAULT_COHERENCE_CONFIG, HOST);
+  assert.equal(persisted().status, "detected");
+  syncCoherence([current[0]], DEFAULT_COHERENCE_CONFIG, HOST, {
+    authoritativeSessionUris: new Set(IDS),
+  });
+  assert.equal(persisted().status, "detected");
+  syncCoherence([current[0]], DEFAULT_COHERENCE_CONFIG, HOST, {
+    authoritativeSessionUris: new Set([IDS[0]]),
+  });
+  assert.equal(persisted().status, "coherent");
+});
+
+test("a stale verified card snapshot cannot resolve a pair against newer cached sources", () => {
+  const current = cards();
+  syncCoherence(current, DEFAULT_COHERENCE_CONFIG, HOST);
+  current[0].fileChanges = [];
+  cache(IDS[0], "newer-than-snapshot");
+  syncCoherence(current, DEFAULT_COHERENCE_CONFIG, HOST);
+  assert.equal(persisted().status, "detected");
+});
+
+test("quarantined URI ownership rejects current-source reviews, dismissals, and shipping", async () => {
+  const pending = rows();
+  const row = pending[0];
+  assert.equal(claimSessionOwnership(db, IDS[0], HOST), true);
+  assert.equal(claimForReviewOwner(row.id, row.signature, "owner", HOST), true);
+  assert.equal(claimSessionOwnership(db, IDS[0], "ws://collision"), false);
+  assert.equal(isCoherenceReviewCurrent(row.id, row.signature, "owner", HOST), false);
+  assert.equal(completeReview(row.id, row.signature,
+    { status: "coherent", summary: "Unsafe acceptance", findings: [] }, "owner", Date.now(), HOST), false);
+  assert.equal(dismissConflict(IDS[0], IDS[1], HOST), null);
+  assert.equal(advanceReviewToShip(IDS[0], { ...DEFAULT_COHERENCE_CONFIG, enabled: false }, HOST).advanced, false);
+  assert.equal(state.calls.some((call) => call.startsWith("phase:")), false);
+});
+
+test("ship requires an explicit matching host even if coherence checks are disabled", () => {
+  rows();
+  const config = { ...DEFAULT_COHERENCE_CONFIG, enabled: false };
+  // @ts-expect-error Exercise JavaScript callers omitting the required production host.
+  assert.equal(advanceReviewToShip(IDS[0], config).advanced, false);
+  assert.equal(advanceReviewToShip(IDS[0], config, "ws://wrong").advanced, false);
+  assert.equal(advanceReviewToShip(IDS[0], config, HOST).advanced, true);
+  assert.equal(state.calls.filter((call) => call.startsWith("phase:")).length, 1);
+});
+
+test("evidence over limit is explicitly unsupported and never periodically retries or starts the SDK", async () => {
+  const current = cards().map((card) => ({
+    ...card,
+    fileChanges: Array.from({ length: 6 }, (_, index) => ({ path: `/repo/src/x/${index}.ts`, added: 1, removed: 1 })),
+  }));
+  const pending = syncCoherence(current, DEFAULT_COHERENCE_CONFIG, HOST);
+  assert.deepEqual(await runCoherenceExecutor(HOST, pending, new Map()), []);
+  assert.equal(persisted().deferral_reason, "evidence-limit");
+  assert.equal(persisted().wake_condition, "signature-change");
+  assert.match(persisted().verdict_summary!, /Unsupported.*chunked review is not supported/);
+  assert.equal(state.calls.includes("acquireRuntime"), false);
+  const calls = state.calls.length;
+  assert.deepEqual(await runCoherenceExecutor(HOST, pending, new Map()), []);
+  assert.deepEqual(syncCoherence(current, DEFAULT_COHERENCE_CONFIG, HOST), []);
+  assert.equal(state.calls.length, calls);
+});
+
+test("invalid structured reviewer output stops after two attempts for the same signature", async () => {
+  const pending = rows();
+  state.result = { status: "not-a-verdict" };
+  await runCoherenceExecutor(HOST, pending, new Map());
+  assert.equal(persisted().deferral_reason, "invalid-model-output");
+  assert.equal(persisted().failure_attempts, 1);
+  db.prepare("UPDATE coherence_conflicts SET retry_at_ms = 0, review_lease_expires_at_ms = 0").run();
+  await runCoherenceExecutor(HOST, pending, new Map());
+  assert.equal(persisted().failure_attempts, 2);
+  assert.equal(persisted().wake_condition, "manual");
+  await runCoherenceExecutor(HOST, pending, new Map());
+  assert.equal(state.calls.filter((call) => call === "createSession").length, 2);
+  assert.equal(persisted().status, "detected");
+});
+
+test("generation cancellation during the SDK call discards the verdict and releases the runtime", async () => {
+  const pending = rows();
+  const controller = new AbortController();
+  state.onSend = () => controller.abort();
+  assert.deepEqual(await runCoherenceExecutor(HOST, pending, new Map(), { signal: controller.signal }), []);
+  assert.equal(persisted().status, "detected");
+  assert.ok(state.calls.includes("deleteSession"));
+  assert.ok(state.calls.includes("release"));
 });
 
 test("completion checks current sources, host, owner and lease, even before the next sync", async () => {
   const pending = rows();
   const row = pending[0];
   const verdict = { status: "coherent" as const, summary: "Safe", findings: [] };
-  assert.equal(claimForReviewOwner(row.id, row.signature, "owner"), true);
+  assert.equal(claimForReviewOwner(row.id, row.signature, "owner", HOST), true);
   assert.equal(isCoherenceReviewCurrent(row.id, row.signature, "owner", HOST), true);
   assert.equal(isCoherenceReviewCurrent(row.id, row.signature, "other", HOST), false);
   assert.equal(isCoherenceReviewCurrent(row.id, row.signature, "owner", "ws://wrong"), false);
-  assert.equal(completeReview(row.id, row.signature, verdict, "other"), false);
+  assert.equal(completeReview(row.id, row.signature, verdict, "other", Date.now(), HOST), false);
   cache(IDS[0], "changed-before-completion");
-  assert.equal(completeReview(row.id, row.signature, verdict, "owner"), false);
+  assert.equal(completeReview(row.id, row.signature, verdict, "owner", Date.now(), HOST), false);
   cache(IDS[0], `${IDS[0]}-v1`);
   db.prepare("UPDATE coherence_conflicts SET review_lease_expires_at_ms = 1").run();
-  assert.equal(completeReview(row.id, row.signature, verdict, "owner"), false);
+  assert.equal(completeReview(row.id, row.signature, verdict, "owner", Date.now(), HOST), false);
 });
 
 test("source changes during the SDK call discard verdicts and release for retry", async () => {
@@ -399,7 +707,7 @@ test("source changes during the SDK call discard verdicts and release for retry"
 
 test("a human dismissal wins against an in-flight coherence verdict", async () => {
   const pending = rows();
-  state.onSend = () => { dismissConflict(IDS[0], IDS[1]); };
+  state.onSend = () => { dismissConflict(IDS[0], IDS[1], HOST); };
   assert.deepEqual(await runCoherenceExecutor(HOST, pending, new Map()), []);
   assert.equal(persisted().status, "dismissed");
 });
@@ -420,13 +728,15 @@ test("a host mismatch never reads code or starts reviewer work", async () => {
   assert.deepEqual(state.calls, []);
 });
 
-test("an expired deferred cooldown retries and can accept complete current evidence", async () => {
+test("activation wakes an inactive pair; elapsed wall time alone cannot", async () => {
   const pending = rows();
   state.status = 1;
   await runCoherenceExecutor(HOST, pending, new Map());
   state.status = 8;
-  db.prepare("UPDATE coherence_conflicts SET review_lease_expires_at_ms = ?").run(Date.now() - 1);
-  assert.equal((await runCoherenceExecutor(HOST, pending, new Map()))[0].status, "coherent");
+  assert.deepEqual(await runCoherenceExecutor(HOST, pending, new Map()), []);
+  const activeCards = cards().map((card) => ({ ...card, runtime: "running" as const }));
+  const awake = syncCoherence(activeCards, DEFAULT_COHERENCE_CONFIG, HOST);
+  assert.equal((await runCoherenceExecutor(HOST, awake, new Map()))[0].status, "coherent");
   assert.equal(persisted().status, "coherent");
   assert.equal(persisted().review_lease_expires_at_ms, null);
 });

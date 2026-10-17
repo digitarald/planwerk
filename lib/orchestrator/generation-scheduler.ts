@@ -11,14 +11,22 @@ interface InternalGeneration extends SchedulerGeneration {
   readonly tasks: Set<Promise<unknown>>;
   stopRequested: boolean;
   retired: boolean;
+  requested: boolean;
+  options: SchedulerOptions;
 }
 
 interface SchedulerOptions {
   intervalMs: number;
   run(generation: SchedulerGeneration): Promise<void>;
   onError(error: unknown): void;
+  drainTimeoutMs?: number;
 }
 
+/**
+ * Serializes ticks within a generation. Bounded stop retires authority, not
+ * unsettled tasks; cross-generation mutation exclusivity relies on
+ * OperationAdmission retaining slots until real settlement or quarantine.
+ */
 export class SerializedGenerationScheduler {
   private current: InternalGeneration | null = null;
   private generationId = 0;
@@ -40,6 +48,8 @@ export class SerializedGenerationScheduler {
       tasks: new Set(),
       stopRequested: false,
       retired: false,
+      requested: false,
+      options,
     };
     this.current = generation;
 
@@ -76,9 +86,21 @@ export class SerializedGenerationScheduler {
     internal.abortController.abort();
 
     const drain = this.lifecycle.then(async () => {
-      if (internal.activeTick) await internal.activeTick;
-      while (internal.tasks.size > 0) {
-        await Promise.allSettled(Array.from(internal.tasks));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          (async () => {
+            if (internal.activeTick) await internal.activeTick;
+            while (internal.tasks.size > 0) {
+              await Promise.allSettled(Array.from(internal.tasks));
+            }
+          })(),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, internal.options.drainTimeoutMs ?? 1_000);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
       }
       internal.retired = true;
     });
@@ -118,18 +140,29 @@ export class SerializedGenerationScheduler {
     return task;
   }
 
+  requestRun(generation: SchedulerGeneration | null = this.current): void {
+    if (!generation || !this.isCurrent(generation)) return;
+    const internal = generation as InternalGeneration;
+    internal.requested = true;
+    this.requestTick(internal, internal.options);
+  }
+
   private requestTick(
     generation: InternalGeneration,
     options: SchedulerOptions,
   ): void {
     if (!this.isCurrent(generation) || generation.activeTick) return;
+    generation.requested = false;
 
     const tick = Promise.resolve()
-      .then(() => options.run(generation))
+      .then(() => {
+        if (this.isCurrent(generation)) return options.run(generation);
+      })
       .catch(options.onError)
       .finally(() => {
         if (generation.activeTick === tick) {
           generation.activeTick = null;
+          if (generation.requested) this.requestTick(generation, options);
         }
       });
     generation.activeTick = tick;

@@ -87,3 +87,69 @@ test("reconnect waits for detached work owned by the retired generation", async 
   await replacementStarted.promise;
   await scheduler.stop(replacement);
 });
+
+test("stop bounds a stalled nonmutating generation and allows a fresh generation to start", async () => {
+  const scheduler = new SerializedGenerationScheduler();
+  const started = deferred();
+  const never = deferred();
+  const replacementStarted = deferred();
+  const first = scheduler.start({
+    intervalMs: 60_000,
+    drainTimeoutMs: 5,
+    async run() {
+      started.resolve();
+      await never.promise;
+    },
+    onError: assert.fail,
+  });
+  await started.promise;
+  const stopped = scheduler.stop(first);
+  assert.equal(first.signal.aborted, true);
+  assert.equal(scheduler.isCurrent(first), false);
+  const second = scheduler.start({
+    intervalMs: 60_000,
+    async run() { replacementStarted.resolve(); },
+    onError: assert.fail,
+  });
+  await stopped;
+  await replacementStarted.promise;
+  assert.equal(scheduler.isCurrent(second), true);
+  never.resolve();
+  await scheduler.stop(second);
+});
+
+test("event wakeups coalesce during a tick and never execute ticks concurrently", async () => {
+  const scheduler = new SerializedGenerationScheduler();
+  const started = deferred();
+  const release = deferred();
+  const rerun = deferred();
+  let count = 0;
+  let active = 0;
+  let maxActive = 0;
+  const generation = scheduler.start({
+    intervalMs: 60_000,
+    async run() {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      count++;
+      if (count === 1) {
+        started.resolve();
+        await release.promise;
+      } else {
+        rerun.resolve();
+      }
+      active--;
+    },
+    onError: assert.fail,
+  });
+  await started.promise;
+  for (let i = 0; i < 20; i++) scheduler.requestRun(generation);
+  release.resolve();
+  await rerun.promise;
+  await scheduler.stop(generation);
+  assert.equal(count, 2);
+  assert.equal(maxActive, 1);
+  scheduler.requestRun(generation);
+  await Promise.resolve();
+  assert.equal(count, 2);
+});

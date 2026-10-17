@@ -7,9 +7,12 @@ import type { PendingInput } from "../types.ts";
 import { readAuthoritativeRisk } from "./risk-authority.ts";
 import {
   authorizePendingElicitation,
+  currentRiskFactsSnapshot,
   getRiskFactsSnapshot,
+  riskFactsStillMatch,
 } from "./risk-facts.ts";
 import { setCardRiskInDb } from "./risk-persistence.ts";
+import { claimSessionOwnership } from "../db/session-ownership.ts";
 
 const HOST_URL = "vscode-local://desktop";
 const CARD_ID = "card-1";
@@ -43,6 +46,9 @@ function summaryJson(options?: {
   sourceRevision?: string | null;
   planVersion?: string;
   pendingInput?: PendingInput | null;
+  evidenceDigest?: string;
+  manifestRevision?: string;
+  contentRevision?: string;
 }): string {
   return JSON.stringify({
     title: "Small package cleanup",
@@ -58,6 +64,9 @@ function summaryJson(options?: {
         : { sourceRevision: options?.sourceRevision ?? "source-v1" }),
       planVersion: options?.planVersion ?? "plan-v1",
       pendingInput: options?.pendingInput ?? safeInput(),
+      evidenceDigest: options?.evidenceDigest,
+      manifestRevision: options?.manifestRevision,
+      contentRevision: options?.contentRevision,
     },
   });
 }
@@ -67,6 +76,9 @@ function enrichmentJson(options?: {
   sourceRevision?: string;
   planVersion?: string;
   planContent?: string;
+  evidenceDigest?: string;
+  manifestRevision?: string;
+  contentRevision?: string;
 }): string {
   const planContent = options?.planContent ?? "Keep the change small.";
   return JSON.stringify({
@@ -90,6 +102,9 @@ function enrichmentJson(options?: {
     _planwerkSource: {
       sourceRevision: options?.sourceRevision ?? "source-v1",
       planVersion: options?.planVersion ?? "plan-v1",
+      evidenceDigest: options?.evidenceDigest,
+      manifestRevision: options?.manifestRevision,
+      contentRevision: options?.contentRevision,
     },
   });
 }
@@ -222,6 +237,68 @@ test("a new plan source revision changes the digest even when normalized facts m
   const after = snapshot(db);
   assert.deepEqual(after.input, before.input);
   assert.notEqual(after.digest, before.digest);
+  db.close();
+});
+
+test("same-manifest byte evidence changes invalidate risk despite an unchanged observation fence", () => {
+  const db = createDb();
+  const update = (digest: string) => db.prepare("UPDATE session_cache SET summary_json = ?, enrichment_json = ?")
+    .run(summaryJson({ evidenceDigest: digest, manifestRevision: "same-manifest" }),
+      enrichmentJson({ evidenceDigest: digest, manifestRevision: "same-manifest" }));
+  update("captured-a");
+  const before = snapshot(db);
+  assert.equal(before.input.sourceRevision, "captured-a");
+  setCardRiskInDb(db, CARD_ID, "low", ["Small change"], "copilot", before.digest);
+  update("captured-b");
+  const after = snapshot(db);
+  assert.equal(after.input.sourceRevision, "captured-b");
+  assert.equal(after.input.filesChanged, before.input.filesChanged);
+  assert.deepEqual(after.input.filePaths, before.input.filePaths);
+  assert.notEqual(after.digest, before.digest);
+  assert.equal(riskFactsStillMatch(db, before), false);
+  assert.equal(readAuthoritativeRisk(db, CARD_ID, HOST_URL).status, "stale");
+  db.close();
+});
+
+test("adding the explicit manifest alias preserves legacy risk digest compatibility", () => {
+  const db = createDb();
+  db.prepare("UPDATE session_cache SET summary_json = ?, enrichment_json = ?")
+    .run(summaryJson({ contentRevision: "manifest-a" }), enrichmentJson({ contentRevision: "manifest-a" }));
+  const before = snapshot(db);
+  db.prepare("UPDATE session_cache SET summary_json = ?, enrichment_json = ?")
+    .run(summaryJson({ contentRevision: "manifest-a", manifestRevision: "manifest-a" }),
+      enrichmentJson({ contentRevision: "manifest-a", manifestRevision: "manifest-a" }));
+  assert.equal(snapshot(db).digest, before.digest);
+  db.close();
+});
+
+test("mismatched evidence digests and manifests cannot supply complete risk facts", () => {
+  for (const mismatch of [
+    { evidenceDigest: "captured-b", manifestRevision: "same-manifest" },
+    { evidenceDigest: "captured-a", manifestRevision: "different-manifest" },
+    {},
+  ]) {
+    const db = createDb();
+    db.prepare("UPDATE session_cache SET summary_json = ?, enrichment_json = ?")
+      .run(summaryJson({ evidenceDigest: "captured-a", manifestRevision: "same-manifest" }), enrichmentJson(mismatch));
+    const facts = snapshot(db);
+    assert.equal(facts.input.factsComplete, false);
+    assert.equal(facts.input.filePaths, undefined);
+    assert.equal(facts.input.planContent, undefined);
+    db.close();
+  }
+});
+
+test("a URI collision rejects all current risk authority, including snapshots captured before quarantine", () => {
+  const db = createDb();
+  const before = snapshot(db);
+  setCardRiskInDb(db, CARD_ID, "low", ["Small change"], "copilot", before.digest);
+  assert.equal(claimSessionOwnership(db, CARD_ID, "ws://other-host"), false);
+  assert.equal(getRiskFactsSnapshot(db, HOST_URL, CARD_ID), null);
+  assert.equal(getRiskFactsSnapshot(db, "ws://other-host", CARD_ID), null);
+  assert.equal(currentRiskFactsSnapshot(db, CARD_ID), null);
+  assert.equal(riskFactsStillMatch(db, before), false);
+  assert.equal(readAuthoritativeRisk(db, CARD_ID, HOST_URL).status, "facts-unavailable");
   db.close();
 });
 

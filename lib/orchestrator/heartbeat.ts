@@ -3,11 +3,12 @@ import "server-only";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { getDb } from "@/lib/db/schema";
+import { awaitAbortable, isOperationAborted } from "@/lib/abort";
 import {
-  KanbanCard,
-  Phase,
-  RiskLevel,
-  PendingInput,
+  type KanbanCard,
+  type Phase,
+  type RiskLevel,
+  type PendingInput,
   normalizeChangesetRef,
 } from "@/lib/types";
 import { loadConfig, type SkillConfig } from "./skill-config";
@@ -42,6 +43,12 @@ import { getEffectiveCoordinatorMode } from "./coordinator-mode-store";
 import { isCardAutomationEligible } from "./automation-eligibility";
 import { assessRisk } from "./risk-assessor";
 import { reassessAndPersistRisk } from "./risk-reassessment";
+import { OperationAdmission } from "./operation-admission";
+import {
+  assertOperationCurrent,
+  getOperationSignal,
+  withOperationContext,
+} from "./operation-context";
 
 /**
  * Heartbeat action types emitted to the orchestrator feed.
@@ -87,6 +94,7 @@ interface HeartbeatState {
   planBusySince: Map<string, number>; // plan-phase card → first tick seen continuously running
   riskBlockers: Map<string, string>; // card → current missing/stale blocker key
   revisionBlockers: Map<string, string>; // card → current source/plan blocker
+  mutationBlockers: Set<string>;
 }
 
 function createHeartbeatState(): HeartbeatState {
@@ -102,6 +110,7 @@ function createHeartbeatState(): HeartbeatState {
     planBusySince: new Map(),
     riskBlockers: new Map(),
     revisionBlockers: new Map(),
+    mutationBlockers: new Set(),
   };
 }
 
@@ -110,9 +119,15 @@ interface HeartbeatGeneration {
   getHosts: () => HeartbeatHostSnapshot[];
   onAction: (hostUrl: string, action: HeartbeatAction) => void;
   hostStates: Map<string, HeartbeatState>;
+  hostControllers: Map<string, AbortController>;
+  dirty: Map<string, Set<string> | null>;
+  lastHost?: string;
+  nextRecoveryAt: number;
 }
 
 const heartbeatScheduler = new SerializedGenerationScheduler();
+const operationAdmission = new OperationAdmission();
+let reviewCleanupInFlight: Promise<unknown> | null = null;
 const heartbeatGenerationStorage =
   new AsyncLocalStorage<HeartbeatGeneration>();
 const heartbeatGenerations =
@@ -174,6 +189,9 @@ export function startHeartbeat(
     getHosts,
     onAction: actionHandler,
     hostStates: new Map(),
+    hostControllers: new Map(),
+    dirty: new Map(),
+    nextRecoveryAt: 0,
   });
   currentHeartbeatGeneration = token;
 
@@ -196,6 +214,36 @@ export function isHeartbeatRunning(): boolean {
   return heartbeatScheduler.isRunning();
 }
 
+/** Coalesced event wakeups supplement, rather than replace, periodic recovery. */
+export function requestHeartbeatTick(hostUrl?: string, cardId?: string): void {
+  const generation = currentHeartbeatGeneration
+    ? heartbeatGenerations.get(currentHeartbeatGeneration)
+    : undefined;
+  if (!generation) return;
+  if (!hostUrl) {
+    for (const host of generation.getHosts()) generation.dirty.set(host.hostUrl, null);
+  } else if (!cardId) {
+    generation.dirty.set(hostUrl, null);
+  } else if (generation.dirty.get(hostUrl) !== null) {
+    const cards = generation.dirty.get(hostUrl) ?? new Set<string>();
+    cards.add(cardId);
+    generation.dirty.set(hostUrl, cards);
+  }
+  heartbeatScheduler.requestRun(generation.token);
+}
+
+/** Retiring a host revokes old work even if the same URL immediately reconnects. */
+export function invalidateHostWork(hostUrl: string): void {
+  const generation = currentHeartbeatGeneration
+    ? heartbeatGenerations.get(currentHeartbeatGeneration)
+    : undefined;
+  if (!generation) return;
+  generation.hostControllers.get(hostUrl)?.abort();
+  generation.hostControllers.delete(hostUrl);
+  generation.hostStates.delete(hostUrl);
+  requestHeartbeatTick(hostUrl);
+}
+
 function emit(hostUrl: string, action: HeartbeatAction): void {
   const generation = heartbeatGenerationStorage.getStore();
   if (
@@ -205,6 +253,7 @@ function emit(hostUrl: string, action: HeartbeatAction): void {
   ) {
     return;
   }
+  if (getOperationSignal()?.aborted) return;
   generation.onAction(hostUrl, action);
   logAction(action);
 }
@@ -220,22 +269,59 @@ async function runSchedulerTick(
 ): Promise<HeartbeatTickResult[]> {
   const { signal } = generation.token;
   try {
-    await retryPendingReviewChatCleanup(getDb(), disposePeerChat);
+    if (!reviewCleanupInFlight) {
+      const cleanup = retryPendingReviewChatCleanup(getDb(), disposePeerChat);
+      reviewCleanupInFlight = cleanup;
+      const clear = () => {
+        if (reviewCleanupInFlight === cleanup) reviewCleanupInFlight = null;
+      };
+      void cleanup.then(clear, clear);
+    }
+    await awaitAbortable(
+      () => reviewCleanupInFlight!,
+      AbortSignal.any([signal, AbortSignal.timeout(1_000)]),
+    );
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    console.warn("[heartbeat:review-cleanup] Reconciliation failed:", detail);
+    if (!isOperationAborted(error)) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn("[heartbeat:review-cleanup] Reconciliation failed:", detail);
+    }
   }
   if (signal.aborted) return [];
 
-  const hosts = generation.getHosts();
+  const hostsByUrl = new Map<string, Map<string, KanbanCard>>();
+  for (const host of generation.getHosts()) {
+    const cards = hostsByUrl.get(host.hostUrl) ?? new Map<string, KanbanCard>();
+    for (const card of host.cards) cards.set(card.id, card);
+    hostsByUrl.set(host.hostUrl, cards);
+  }
+  const hosts = [...hostsByUrl].map(([hostUrl, cards]) => ({
+    hostUrl,
+    cards: [...cards.values()],
+  }));
+  const previousIndex = hosts.findIndex((host) => host.hostUrl === generation.lastHost);
+  if (previousIndex >= 0) hosts.push(...hosts.splice(0, previousIndex + 1));
+  generation.lastHost = hosts[0]?.hostUrl;
+  const recovery = Date.now() >= generation.nextRecoveryAt;
+  if (recovery) generation.nextRecoveryAt = Date.now() + loadConfig().orchestrator.heartbeatInterval;
+  const dirty = new Map(generation.dirty);
+  generation.dirty.clear();
   const results: HeartbeatTickResult[] = [];
   const activeHosts = new Set(hosts.map(({ hostUrl }) => hostUrl));
   for (const hostUrl of generation.hostStates.keys()) {
-    if (!activeHosts.has(hostUrl)) generation.hostStates.delete(hostUrl);
+    if (!activeHosts.has(hostUrl)) {
+      generation.hostControllers.get(hostUrl)?.abort();
+      generation.hostControllers.delete(hostUrl);
+      generation.hostStates.delete(hostUrl);
+    }
   }
   for (const { hostUrl, cards } of hosts) {
     if (signal.aborted) break;
-    results.push(await runTick(generation, hostUrl, cards));
+    if (!recovery && !dirty.has(hostUrl)) continue;
+    if (!generation.hostControllers.has(hostUrl)) {
+      generation.hostControllers.set(hostUrl, new AbortController());
+    }
+    results.push(await runTick(generation, hostUrl, cards, recovery ? null : dirty.get(hostUrl)));
   }
   return results;
 }
@@ -258,7 +344,11 @@ function logAction(action: HeartbeatAction): void {
 function canEnterPhase(phase: Phase, cards: KanbanCard[], config: ReturnType<typeof loadConfig>): boolean {
   const limit = config.wipLimits[phase];
   if (!limit) return true;
-  const count = cards.filter((c) => c.phase === phase && !c.isArchived).length;
+  const readPhase = getDb().prepare("SELECT phase FROM card_phases WHERE card_id = ?");
+  const count = cards.filter((card) => {
+    const persisted = readPhase.get(card.id) as { phase: Phase } | undefined;
+    return !card.isArchived && (persisted?.phase ?? card.phase) === phase;
+  }).length;
   return count < limit;
 }
 
@@ -269,7 +359,9 @@ async function runTick(
   generation: HeartbeatGeneration,
   hostUrl: string,
   cards: KanbanCard[],
+  dirtyCards?: Set<string> | null,
 ): Promise<HeartbeatTickResult> {
+  const tickHostController = generation.hostControllers.get(hostUrl);
   const state = stateForHost(generation, hostUrl);
   state.lastTickAt = Date.now();
   state.tickCount++;
@@ -293,21 +385,82 @@ async function runTick(
     });
 
   for (const card of activeCards) {
+    if (generation.token.signal.aborted) break;
+    if (dirtyCards && !dirtyCards.has(card.id)) continue;
+    const hostController = generation.hostControllers.get(hostUrl);
+    if (!hostController || hostController.signal.aborted) break;
+    const lease = operationAdmission.acquire(hostUrl, card.id);
+    if (!lease) {
+      if (operationAdmission.isQuarantined(hostUrl, card.id) && !state.mutationBlockers.has(card.id)) {
+        state.mutationBlockers.add(card.id);
+        const action: HeartbeatAction = {
+          type: "escalated",
+          cardId: card.id,
+          reason: "A previous session mutation has an uncertain remote outcome. Automation is paused until confirmed; ambiguous failures require human reconciliation.",
+        };
+        emit(hostUrl, action);
+        actions.push(action);
+      }
+      continue;
+    }
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort("Card operation deadline exceeded."), 60_000);
+    const signal = AbortSignal.any([
+      generation.token.signal,
+      hostController.signal,
+      deadline.signal,
+    ]);
+    const factsDigest = getAuthoritativeRiskSnapshot(hostUrl, card.id)?.digest;
+    const expected = {
+      phase: card.phase,
+      runtime: card.runtime,
+      requestId: card.pendingInput?.requestId,
+      workingDirectory: card.workingDirectory,
+    };
+    const isCurrent = (capability: Parameters<typeof coordinatorModeAllows>[1]) => {
+      if (!heartbeatScheduler.isCurrent(generation.token)) return false;
+      if (generation.hostControllers.get(hostUrl) !== hostController) return false;
+      const current = generation.getHosts()
+        .filter((host) => host.hostUrl === hostUrl)
+        .flatMap((host) => host.cards)
+        .find((candidate) => candidate.id === card.id);
+      if (
+        !current || !isCardAutomationEligible(current) ||
+        current.phase !== expected.phase || current.runtime !== expected.runtime ||
+        current.pendingInput?.requestId !== expected.requestId ||
+        current.workingDirectory !== expected.workingDirectory ||
+        !coordinatorModeAllows(getEffectiveCoordinatorMode(hostUrl, card.id), capability) ||
+        getAuthoritativeRiskSnapshot(hostUrl, card.id)?.digest !== factsDigest
+      ) return false;
+      const phase = getDb().prepare("SELECT phase FROM card_phases WHERE card_id = ?")
+        .get(card.id) as { phase: string } | undefined;
+      return !phase || phase.phase === expected.phase;
+    };
     try {
-      const cardActions = await processCard(
-        hostUrl,
-        card,
-        config,
-        activeCards,
-        state,
+      const cardActions = await awaitAbortable(
+        () => withOperationContext(
+          { signal, hostUrl, cardId: card.id, lease, isCurrent },
+          () => processCard(hostUrl, card, config, cards, state),
+        ),
+        signal,
       );
       actions.push(...cardActions);
     } catch (err) {
+      if (isOperationAborted(err)) continue;
       const msg = `${card.id}: ${err instanceof Error ? err.message : String(err)}`;
       if (process.env.AHP_DEBUG) console.warn("[heartbeat:card-error]", msg);
       errors.push(msg);
+    } finally {
+      clearTimeout(timer);
+      lease.finish();
     }
   }
+  if (
+    generation.token.signal.aborted ||
+    generation.hostControllers.get(hostUrl) !== tickHostController ||
+    generation.hostControllers.get(hostUrl)?.signal.aborted ||
+    !generation.getHosts().some((host) => host.hostUrl === hostUrl)
+  ) return { actions, errors };
 
   // Track stuck cards
   for (const card of activeCards) {
@@ -366,7 +519,7 @@ async function runTick(
   // run here; the LLM review is kicked fire-and-forget so it never blocks the tick.
   if (config.coherence.enabled) {
     try {
-      const escalatable = syncCoherence(activeCards, config.coherence).filter((row) =>
+      const escalatable = syncCoherence(activeCards, config.coherence, hostUrl).filter((row) =>
         coordinatorModeAllows(
           getEffectiveCoordinatorMode(hostUrl, row.cardA),
           "verify",
@@ -378,10 +531,26 @@ async function runTick(
       );
       if (escalatable.length > 0) {
         const ctxById = buildCoherenceCtx(cards);
+        const hostController = generation.hostControllers.get(hostUrl);
+        const sourceDigests = new Map(escalatable.flatMap((row) => [row.cardA, row.cardB])
+          .map((cardId) => [cardId, getAuthoritativeRiskSnapshot(hostUrl, cardId)?.digest]));
+        const signal = AbortSignal.any([
+          generation.token.signal,
+          hostController!.signal,
+        ]);
+        const isCurrent = () => !signal.aborted &&
+          heartbeatScheduler.isCurrent(generation.token) &&
+          generation.hostControllers.get(hostUrl) === hostController &&
+          [...sourceDigests].every(([cardId, digest]) =>
+            generation.getHosts().some((host) => host.hostUrl === hostUrl &&
+              host.cards.some((card) => card.id === cardId && isCardAutomationEligible(card))) &&
+            coordinatorModeAllows(getEffectiveCoordinatorMode(hostUrl, cardId), "verify") &&
+            getAuthoritativeRiskSnapshot(hostUrl, cardId)?.digest === digest);
         // Fire-and-forget: reviewer runs off-tick; verdicts are emitted when ready.
         void trackGenerationTask(
-          runCoherenceExecutor(hostUrl, escalatable, ctxById)
+          runCoherenceExecutor(hostUrl, escalatable, ctxById, { signal, isCurrent })
             .then((outcomes) => {
+              if (!isCurrent()) return;
               for (const o of outcomes) emitCoherenceOutcome(hostUrl, o);
             })
             .catch((err) => {
@@ -493,6 +662,7 @@ function startReviewForMode(
   coordinatorMode: CoordinatorMode,
   pendingRequestId?: string,
 ) {
+  assertOperationCurrent("verify");
   return startReview(
     hostUrl,
     sessionUri,
@@ -501,7 +671,10 @@ function startReviewForMode(
     transition,
     riskLevel,
     changesetRef,
-    reviewDispatchOptions(coordinatorMode, pendingRequestId),
+    {
+      ...reviewDispatchOptions(coordinatorMode, pendingRequestId),
+      signal: getOperationSignal(),
+    },
   );
 }
 
@@ -553,9 +726,7 @@ async function processCard(
   state: HeartbeatState,
 ): Promise<HeartbeatAction[]> {
   const actions: HeartbeatAction[] = [];
-  const coordinatorMode = getEffectiveCoordinatorMode(hostUrl, card.id);
-  const mayVerify = coordinatorModeAllows(coordinatorMode, "verify");
-  const mayInteract = coordinatorModeAllows(coordinatorMode, "interact");
+  assertOperationCurrent();
   let authoritativeRisk = getAuthoritativeCardRisk(card.id, hostUrl);
   let riskAssessmentError: string | null = null;
   if (authoritativeRisk.status !== "current") {
@@ -566,7 +737,10 @@ async function processCard(
           card.id,
           snapshot,
           assessRisk,
-          persistAuthoritativeRisk,
+          (...args) => {
+            assertOperationCurrent();
+            return persistAuthoritativeRisk(...args);
+          },
         );
         authoritativeRisk = getAuthoritativeCardRisk(card.id, hostUrl);
         if (authoritativeRisk.status === "current") {
@@ -584,6 +758,10 @@ async function processCard(
       }
     }
   }
+  assertOperationCurrent();
+  const coordinatorMode = getEffectiveCoordinatorMode(hostUrl, card.id);
+  const mayVerify = coordinatorModeAllows(coordinatorMode, "verify");
+  const mayInteract = coordinatorModeAllows(coordinatorMode, "interact");
   const riskPolicy = riskAutomationPolicy(authoritativeRisk);
   if (!riskPolicy.current || authoritativeRisk.status !== "current") {
     const blockerKey = [
@@ -869,6 +1047,7 @@ async function runBuildPipeline(
       );
 
       // Start (or re-start) the gate
+      assertOperationCurrent("verify");
       const runId = startGateRun({
         cardId: card.id,
         fromPhase: "build",
@@ -876,6 +1055,7 @@ async function runBuildPipeline(
         gateType: gate.gateType,
         gateName: gate.gateName,
         changesetRef,
+        signal: getOperationSignal(),
       });
 
       if (staleRun) {
@@ -892,6 +1072,16 @@ async function runBuildPipeline(
       if (gate.command && card.workingDirectory) {
         executeGateCommand(runId, gate.command, card.workingDirectory, (status) => {
           emit(hostUrl, { type: "gate-completed", cardId: card.id, gateType: gate.gateType, status });
+        }, {
+          signal: getOperationSignal(),
+          isCurrent() {
+            try {
+              assertOperationCurrent("verify");
+              return true;
+            } catch {
+              return false;
+            }
+          },
         });
       } else if (gate.command) {
         completeGateRun(
@@ -982,6 +1172,7 @@ async function runBuildPipeline(
     const nextPhase = getNextPhase("build");
     if (nextPhase && canEnterPhase(nextPhase, allCards, config)) {
       state.pipelineStage.set(card.id, "advancing");
+      assertOperationCurrent("advance");
       setCardPhase(card.id, nextPhase);
       const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "build", to: nextPhase };
       emit(hostUrl, action);
@@ -1127,21 +1318,17 @@ async function runPlanApprovalPipeline(
 
   const approvePlan = async (): Promise<void> => {
     if (!riskStillCurrent()) return;
+    assertOperationCurrent("interact");
     const answers = {
       [approval.questionId]: {
         state: "submitted",
         value: { kind: "selected", value: approval.approveOptionId },
       },
     };
-    // `answerInput` now returns success only when the host actually consumed the
-    // plan-approval (the request left `inputNeeded`) — a bare dispatch+ping can
-    // report a phantom success without confirming the plan. Retry once on a
-    // dispatched-but-not-applied result, then surface a failure so the card
-    // doesn't silently sit in plan while the log claims it was approved.
-    let result = await answerInput(hostUrl, card.id, input.requestId, "accept", answers);
-    if (!result.success && !result.stale) {
-      result = await answerInput(hostUrl, card.id, input.requestId, "accept", answers);
-    }
+    // Only consumption confirms approval. Never retry an unconfirmed mutation:
+    // the host may already have accepted it even though confirmation failed.
+    const result = await answerInput(
+      hostUrl, card.id, input.requestId, "accept", answers, { signal: getOperationSignal() });
 
     if (result.success) {
       const action: HeartbeatAction = { type: "plan-approved", cardId: card.id };
@@ -1328,7 +1515,8 @@ async function runPlanApprovalPipeline(
   if (!coordinatorModeAllows(coordinatorMode, "interact")) return actions;
 
   const feedback = formatPlanGateFeedback(blocking);
-  let result = await submitPlanFeedback(
+  assertOperationCurrent("interact");
+  const result = await submitPlanFeedback(
     hostUrl,
     card.id,
     input.requestId,
@@ -1336,16 +1524,6 @@ async function runPlanApprovalPipeline(
     approval.approveOptionId,
     feedback,
   );
-  if (!result.success && !result.stale) {
-    result = await submitPlanFeedback(
-      hostUrl,
-      card.id,
-      input.requestId,
-      approval.questionId,
-      approval.approveOptionId,
-      feedback,
-    );
-  }
 
   if (result.success) {
     const action: HeartbeatAction = { type: "plan-feedback-delivered", cardId: card.id };
@@ -1451,6 +1629,7 @@ async function runPlanPipeline(
       coordinatorModeAllows(coordinatorMode, "advance") &&
       canEnterPhase("build", allCards, config)
     ) {
+      assertOperationCurrent("advance");
       setCardPhase(card.id, "build");
       const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "plan", to: "build" };
       emit(hostUrl, action);
@@ -1543,6 +1722,7 @@ async function runReviewPipeline(
   );
   for (const gate of artifactPending) {
     if (!hasReadableArtifact(card.artifacts, gate.artifactType!)) continue;
+    assertOperationCurrent("verify");
     const runId = startGateRun({
       cardId: card.id,
       fromPhase: "review",
@@ -1571,7 +1751,8 @@ async function runReviewPipeline(
       coordinatorModeAllows(coordinatorMode, "advance") &&
       canEnterPhase("ship", allCards, config)
     ) {
-      const { advanced, blockedBy } = advanceReviewToShip(card.id, config.coherence);
+      assertOperationCurrent("advance");
+      const { advanced, blockedBy } = advanceReviewToShip(card.id, config.coherence, hostUrl);
       if (advanced) {
         state.coherenceBlocked.delete(card.id);
         const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "review", to: "ship" };

@@ -98,6 +98,8 @@ export async function readActiveSessionState(
 
 export interface StateAccess<TState> {
   getState(): TState | undefined;
+  /** Refuse evidence captured after the authoritative stream ended or failed. */
+  assertCurrent(): void;
   waitFor(
     predicate: (state: TState | undefined) => boolean,
     timeoutMs: number,
@@ -174,6 +176,11 @@ async function withChannelState<TState, TResult>(
   })();
   const access: StateAccess<TState> = {
     getState: () => state,
+    assertCurrent() {
+      throwIfAborted(signal);
+      if (streamError) throw streamError;
+      if (ended) throw new Error("The AHP state stream ended during the operation");
+    },
     async waitFor(predicate, timeoutMs, waitSignal = signal) {
       if (predicate(state)) return true;
       throwIfAborted(waitSignal);

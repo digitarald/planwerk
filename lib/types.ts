@@ -192,7 +192,28 @@ export interface SessionDetails {
   runtimeError?: SessionRuntimeError;
 }
 
+export interface EvidenceCapture {
+  capturedAt: string;
+  source: "live" | "explicit";
+  coverage: "bytes" | "manifest" | "transcript";
+}
+
+export interface CardEvidence {
+  state: "current" | "stale" | "unavailable";
+  capture?: EvidenceCapture;
+}
+
+export interface AutomationWait {
+  reason: "ownership" | "evidence" | "inactive" | "unsupported" | "service" | "review" | "gate";
+  summary: string;
+  nextStep: string;
+  retryAt?: number;
+}
+
 export interface KanbanCard {
+  evidence?: CardEvidence;
+  automationWait?: AutomationWait;
+  ownershipConflict?: boolean;
   id: string;
   title: string;
   phase: Phase;
@@ -217,8 +238,9 @@ export interface KanbanCard {
    *  changes across every agent sharing the working directory — so those counts
    *  (and any changeset ref built from them) are NOT a reliable freshness signal. */
   changesetVerified?: boolean;
-  /** Host-owned revision for the source facts paired with the verified
-   *  session changeset. Code-gate freshness binds to this opaque identity. */
+  /** Gate identity paired with the verified session changeset: captured evidence
+   *  digest when available, otherwise the legacy catalog observation fence.
+   *  A local digest does not establish continuing freshness by itself. */
   sourceRevision?: string;
   /** Opaque freshness ref for the plan artifact (`plan:<hash>`), when a plan is
    *  present. Plan-phase reviews (`plan->build`) key their staleness on this, not
@@ -353,7 +375,7 @@ export function normalizeChangesetRef(ref?: string): string {
  *  - Plan-content refs (`plan:<hash>`) compare against the card's `planContentHash`.
  *    An unknown current plan hash fails closed because prior evidence cannot be
  *    proven current.
- *  - Current code refs compare the host-owned source revision paired with the
+ *  - Current code refs compare the bound source-evidence identity paired with the
  *    verified session changeset. Legacy code-diff refs compare diff dimensions,
  *    but only when the card's counts are session-scoped and verified. */
 export function isGateRunStale(

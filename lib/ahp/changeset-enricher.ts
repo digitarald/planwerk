@@ -2,6 +2,8 @@ import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import type {
   ChangesetFile,
   Changeset,
+  ChangesetState,
+  ContentEncoding,
   SessionState,
 } from "@microsoft/agent-host-protocol";
 import { createHash } from "node:crypto";
@@ -19,6 +21,8 @@ import { readReadyChangesetState } from "./changeset-readiness";
 import { readTextResource } from "./resource-read";
 import { changesetReviewSummary, isChangesetFileReviewed } from "./changeset-review";
 import { classifyArtifactFile, isNonCodeFile } from "./artifact-classification";
+import { throwIfAborted } from "../abort";
+import type { EvidenceCaptureBudget } from "./evidence-budget";
 
 const LOG_PREFIX = "[ahp:changeset]";
 const debug = (...args: unknown[]) => {
@@ -26,6 +30,7 @@ const debug = (...args: unknown[]) => {
 };
 
 export interface ChangesetEnrichment {
+  evidenceCapture?: import("../types").EvidenceCapture;
   artifacts: Artifact[];
   codeFileCount: number;
   totalFileCount: number;
@@ -38,6 +43,9 @@ export interface ChangesetEnrichment {
    *  computing/error, and the session actually exposes a changeset). Callers use
    *  this to decide whether the counts are trustworthy vs. the shared summary. */
   changesetVerified: boolean;
+  /** Actual captured before/after resource bytes and identities. Only deliberate
+   * full evidence reads populate this; it does not prove ongoing freshness. */
+  capturedFilesDigest?: string;
   /** Opaque freshness ref for the plan artifact content (`plan:<hash>`), when a
    *  plan with content is present. */
   planContentHash?: string;
@@ -55,9 +63,6 @@ export function hashPlanContent(content: string): string {
   const digest = createHash("sha1").update(normalized).digest("hex").slice(0, 12);
   return `plan:${digest}`;
 }
-
-
-
 function extractFilePath(file: ChangesetFile): string {
   // Use after.uri for creates/edits, before.uri for deletions
   const uri = file.edit.after?.uri ?? file.edit.before?.uri ?? file.id;
@@ -124,6 +129,67 @@ export async function enrichFromChangeset(
       return { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], additions: 0, deletions: 0, changesetVerified: false };
     }
 
+    return await enrichChangesetState(client, changeset, csState);
+  } catch (err) {
+    debug("enrichment failed for", sessionUri, err);
+    return null;
+  }
+}
+
+/** Classify an already-owned changeset, optionally capturing every file side. */
+export async function enrichChangesetState(
+  client: AhpClient,
+  changeset: Changeset,
+  csState: ChangesetState,
+  captureEvidence = false,
+  signal?: AbortSignal,
+  budget?: EvidenceCaptureBudget,
+): Promise<ChangesetEnrichment> {
+    if (csState.status !== "ready") throw new Error("Session changeset is not ready");
+    budget?.assertFileCount(csState.files.length);
+    const contents = new Map<string, Buffer>();
+    const side = async (value: ChangesetFile["edit"]["after"]) => {
+      if (!value) return null;
+      if (!value.content?.uri) throw new Error("A changeset file has no readable content resource");
+      throwIfAborted(signal);
+      const result = await client.request("resourceRead", {
+        channel: "ahp-root://", uri: value.content.uri,
+        encoding: "base64" as ContentEncoding,
+      });
+      throwIfAborted(signal);
+      const bytes = Buffer.from(result.data, result.encoding === "base64" ? "base64" : "utf-8");
+      budget?.consumeDecodedBytes(bytes.length);
+      contents.set(value.content.uri, bytes);
+      return {
+        uri: value.uri,
+        contentUri: value.content.uri,
+        nonce: value.content.nonce ?? null,
+        contentType: value.content.contentType ?? null,
+        digest: createHash("sha256").update(bytes).digest("hex"),
+      };
+    };
+    const capturedFiles = captureEvidence
+      ? await (async () => {
+        const files = [];
+        for (const file of csState.files) {
+          if (!file.edit.before && !file.edit.after) throw new Error("A changeset file has neither side");
+          files.push({
+            id: file.id,
+            before: await side(file.edit.before),
+            after: await side(file.edit.after),
+            added: file.edit.diff?.added ?? 0,
+            removed: file.edit.diff?.removed ?? 0,
+          });
+        }
+        return files;
+      })()
+      : undefined;
+    const capturedFilesDigest = capturedFiles
+      ? createHash("sha256")
+        .update(JSON.stringify(capturedFiles.sort((a, b) => a.id.localeCompare(b.id))))
+        .digest("hex")
+      : undefined;
+
     // Classify files
     const artifacts: Artifact[] = [];
     const fileChanges: FileChange[] = [];
@@ -159,10 +225,14 @@ export async function enrichFromChangeset(
       let contentRef: string | undefined;
 
       if (file.edit.after?.content?.uri) {
-        try {
-          contentRef = await readTextResource(client, file.edit.after.content.uri);
-        } catch (err) {
-          debug("failed to read content for", path, err);
+        if (captureEvidence) {
+          contentRef = contents.get(file.edit.after.content.uri)?.toString("utf-8");
+        } else {
+          try {
+            contentRef = await readTextResource(client, file.edit.after.content.uri);
+          } catch (err) {
+            debug("failed to read content for", path, err);
+          }
         }
       }
 
@@ -182,7 +252,7 @@ export async function enrichFromChangeset(
     artifacts.push(...resolvedArtifacts);
 
     debug(
-      sessionUri,
+      changeset.uriTemplate,
       `→ ${artifacts.length} artifacts, ${codeFileCount} code files, ${csState.files.length} total`
     );
 
@@ -198,12 +268,9 @@ export async function enrichFromChangeset(
       additions,
       deletions,
       changesetVerified: true,
+      capturedFilesDigest,
       planContentHash,
       planContent,
       changesetReview: changesetReviewSummary(changeset, csState.files),
     };
-  } catch (err) {
-    debug("enrichment failed for", sessionUri, err);
-    return null;
-  }
 }

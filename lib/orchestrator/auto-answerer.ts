@@ -26,6 +26,8 @@ import {
   classifyCopilotFailure,
 } from "./sdk-runtime";
 import type { CopilotRuntimeLease } from "./sdk-runtime-manager";
+import { assertOperationCurrent, getOperationSignal } from "./operation-context";
+import { awaitAbortable } from "@/lib/abort";
 
 const SYSTEM_PROMPT = `You are helping an AI agent session that is waiting for user input. Based on the context provided, generate a reasonable answer to the pending question.
 
@@ -74,6 +76,7 @@ export async function autoAnswer(
   hostUrl: string,
   card: KanbanCard
 ): Promise<AutoAnswerResult> {
+  assertOperationCurrent("interact");
   if (!card.pendingInput) {
     return { answered: false, reason: "No pending input" };
   }
@@ -132,11 +135,13 @@ export async function autoAnswer(
   let runtimeLease: CopilotRuntimeLease<CopilotClient> | undefined;
   try {
     runtimeLease = await acquireCopilotRuntimeClient();
+    assertOperationCurrent("interact");
     client = runtimeLease.client;
     const selectedModel = await selectOrchestratorModel(client, {
       role: "triage",
       risk: initialPolicy.level,
     });
+    assertOperationCurrent("interact");
     const session = await client.createSession({
       model: selectedModel.model,
       reasoningEffort: selectedModel.reasoningEffort,
@@ -145,11 +150,20 @@ export async function autoAnswer(
       skipCustomInstructions: true,
     });
     let responseCompleted = false;
+    const signal = getOperationSignal();
+    const abort = () => {
+      void Promise.resolve().then(() => session.abort()).catch(() => {});
+    };
+    signal?.addEventListener("abort", abort, { once: true });
 
     try {
-      const response = await session.sendAndWait(
-        { prompt: context, source: "system" },
-        15_000
+      assertOperationCurrent("interact");
+      const response = await awaitAbortable(
+        () => session.sendAndWait(
+          { prompt: context, source: "system" },
+          15_000,
+        ),
+        signal,
       );
       responseCompleted = true;
 
@@ -168,6 +182,7 @@ export async function autoAnswer(
       const answers = {
         [question.id]: { state: "submitted", value: built.value },
       };
+      assertOperationCurrent("interact");
       const dispatch = await withAHPClient(hostUrl, async (ahpClient) => {
         const liveState = await readActiveSessionState(ahpClient, card.id);
         const liveInput = mapSessionInputNeeded(liveState?.inputNeeded);
@@ -200,12 +215,14 @@ export async function autoAnswer(
           };
         }
 
+        assertOperationCurrent("interact");
         return answerInputWithClient(
           ahpClient,
           card.id,
           input.requestId,
           "accept",
           answers,
+          { signal: getOperationSignal() },
         );
       });
 
@@ -221,6 +238,7 @@ export async function autoAnswer(
           : "Failed to submit answer to AHP",
       };
     } finally {
+      signal?.removeEventListener("abort", abort);
       const cleanup = await disposeOneShotSession(
         client,
         session,

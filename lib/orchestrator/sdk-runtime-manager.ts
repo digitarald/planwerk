@@ -51,6 +51,35 @@ export interface CopilotRuntimeManagerOptions<TClient extends ManagedCopilotRunt
   resetWindowMs?: number;
   now?: () => number;
   cleanupTimeoutMs?: number;
+  startupTimeoutMs?: number;
+  healthTimeoutMs?: number;
+}
+
+export class CopilotRuntimeDeadlineError extends Error {
+  readonly code = "COPILOT_SDK_RUNTIME_DEADLINE";
+
+  constructor(operation: "startup" | "health", timeoutMs: number) {
+    super(`Copilot SDK ${operation} exceeded the ${timeoutMs}ms deadline`);
+    this.name = "CopilotRuntimeDeadlineError";
+  }
+}
+
+async function withRuntimeDeadline<T>(
+  operation: () => Promise<T>,
+  name: "startup" | "health",
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new CopilotRuntimeDeadlineError(name, timeoutMs)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export type CopilotFailureKind =
@@ -67,6 +96,7 @@ export function classifyCopilotFailure(error: unknown): CopilotFailureKind {
     code === "CTO_SESSION_CLEANUP_TIMEOUT" ||
     name === "CtoSessionCleanupTimeoutError" ||
     code === "COPILOT_SDK_CLEANUP_TIMEOUT" ||
+    code === "COPILOT_SDK_RUNTIME_DEADLINE" ||
     name === "CopilotCleanupTimeoutError"
   ) {
     return "runtime-invalidating";
@@ -134,12 +164,15 @@ export class CopilotRuntimeManager<TClient extends ManagedCopilotRuntimeClient> 
   private readonly resetWindowMs: number;
   private readonly now: () => number;
   private readonly cleanupTimeoutMs: number;
+  private readonly startupTimeoutMs: number;
+  private readonly healthTimeoutMs: number;
   private client: TClient | null = null;
   private generation = 0;
   private readonly clientGeneration = new Map<TClient, number>();
   private readonly activeOperations = new Map<TClient, number>();
   private readonly unhealthyClients = new Set<TClient>();
   private readonly cleanupStarted = new WeakSet<TClient>();
+  private readonly timedOutStartups = new WeakSet<TClient>();
   private transition: Promise<void> = Promise.resolve();
   private state: CopilotRuntimeState = "stopped";
   private resetTimes: number[] = [];
@@ -156,6 +189,8 @@ export class CopilotRuntimeManager<TClient extends ManagedCopilotRuntimeClient> 
     this.resetWindowMs = options.resetWindowMs ?? 60_000;
     this.now = options.now ?? Date.now;
     this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? 30_000;
+    this.startupTimeoutMs = options.startupTimeoutMs ?? 30_000;
+    this.healthTimeoutMs = options.healthTimeoutMs ?? 10_000;
 
     if (this.maxResets < 1) {
       throw new Error("maxResets must be at least 1");
@@ -165,6 +200,14 @@ export class CopilotRuntimeManager<TClient extends ManagedCopilotRuntimeClient> 
     }
     if (!Number.isFinite(this.cleanupTimeoutMs) || this.cleanupTimeoutMs < 1) {
       throw new RangeError("Copilot SDK cleanup timeout must be at least 1ms");
+    }
+    for (const [name, timeout] of [
+      ["startup", this.startupTimeoutMs],
+      ["health", this.healthTimeoutMs],
+    ] as const) {
+      if (!Number.isFinite(timeout) || timeout < 1) {
+        throw new RangeError(`Copilot SDK ${name} timeout must be at least 1ms`);
+      }
     }
   }
 
@@ -203,10 +246,24 @@ export class CopilotRuntimeManager<TClient extends ManagedCopilotRuntimeClient> 
       this.runtimeStatus = undefined;
 
       const client = this.createClient();
+      if (this.timedOutStartups.has(client)) {
+        this.state = "failed";
+        throw new Error("Cannot reuse a Copilot SDK client whose startup timed out.");
+      }
       this.cleanupStarted.delete(client);
+      const startup = Promise.resolve().then(() => client.start());
       try {
-        await client.start();
+        await withRuntimeDeadline(() => startup, "startup", this.startupTimeoutMs);
       } catch (startError) {
+        if (startError instanceof CopilotRuntimeDeadlineError) {
+          this.timedOutStartups.add(client);
+          // A timeout cannot retract startup. If it completes late, retire that
+          // exact client again without touching the replacement generation.
+          void startup.then(
+            () => this.stopClient(client),
+            () => {},
+          ).catch(() => {});
+        }
         this.state = "failed";
         this.lastError = errorMessage(startError);
         try {
@@ -335,10 +392,12 @@ export class CopilotRuntimeManager<TClient extends ManagedCopilotRuntimeClient> 
       if (!this.client) return this.getHealth();
 
       try {
-        const [status, ping] = await Promise.all([
-          this.client.getStatus(),
-          this.client.ping("planwerk-health"),
-        ]);
+        const client = this.client;
+        const [status, ping] = await withRuntimeDeadline(
+          () => Promise.all([client.getStatus(), client.ping("planwerk-health")]),
+          "health",
+          this.healthTimeoutMs,
+        );
         this.lastCheckedAt = this.now();
         this.state = "ready";
         this.lastError = undefined;

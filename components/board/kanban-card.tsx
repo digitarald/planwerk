@@ -290,6 +290,7 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
   const hostUrl = useConnectionStore((s) => s.hostUrl);
   const showPlanSteps = card.planSteps.total > 0;
   const showStats = card.filesChanged > 0;
+  const blockerSummary = card.automationWait?.summary ?? card.gateBlocker;
 
   const setArchived = async (isArchived: boolean) => {
     if (!hostUrl) return;
@@ -377,13 +378,13 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
                     <RuntimeIndicator status={card.runtime} />
                   )}
                   <GateIndicator status={card.gateStatus} />
-                  {card.gateStatus === "pending" && card.gateBlocker && (
+                  {card.gateStatus === "pending" && blockerSummary && (
                     <TooltipHint
                       className="inline-flex min-w-0 shrink items-center gap-0.5 text-[9px] font-medium text-muted-foreground/80"
-                      label={blockedFromAdvancingHint(card.gateBlocker)}
+                      label={blockedFromAdvancingHint(blockerSummary)}
                     >
                       <ShieldAlert className="h-2.5 w-2.5 shrink-0" />
-                      <span className="truncate">{card.gateBlocker}</span>
+                      <span className="truncate">{blockerSummary}</span>
                     </TooltipHint>
                   )}
                   {card.coherence && card.coherence.conflictsWith.length > 0 && (

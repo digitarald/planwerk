@@ -1,4 +1,10 @@
 import type Database from "better-sqlite3";
+import { isSessionOwnedByHost } from "../db/session-ownership.ts";
+import {
+  sourceBindingsMatch,
+  sourceEvidenceRevision,
+  type EvidenceSourceBinding,
+} from "../ahp/source-binding-match.ts";
 
 import type { Phase } from "../types.ts";
 import {
@@ -7,11 +13,7 @@ import {
   sourceChangesetRef,
 } from "../types.ts";
 
-interface SourceBinding {
-  sourceRevision?: unknown;
-  planVersion?: unknown;
-  contentRevision?: unknown;
-}
+type SourceBinding = EvidenceSourceBinding;
 
 interface CachedSummary {
   resource?: unknown;
@@ -69,6 +71,7 @@ export function resolveAuthoritativeGateRevision(
   if (
     !nonEmptyString(row.host_url)
     || (expectedHostUrl !== undefined && row.host_url !== expectedHostUrl)
+    || !isSessionOwnedByHost(db, cardId, row.host_url)
   ) {
     return { ok: false, reason: "current AHP host binding is unavailable or mismatched" };
   }
@@ -88,14 +91,8 @@ export function resolveAuthoritativeGateRevision(
 
   const summarySource = summary._planwerkRiskFacts;
   const enrichmentSource = enrichment._planwerkSource;
-  if (
-    !nonEmptyString(summarySource?.sourceRevision) ||
-    !nonEmptyString(summarySource?.planVersion) ||
-    summarySource.sourceRevision !== enrichmentSource?.sourceRevision ||
-    summarySource.planVersion !== enrichmentSource?.planVersion ||
-    (summarySource.contentRevision ?? null) !==
-      (enrichmentSource?.contentRevision ?? null)
-  ) {
+  const sourceRevision = sourceEvidenceRevision(summarySource);
+  if (!sourceBindingsMatch(summarySource, enrichmentSource) || !sourceRevision) {
     return {
       ok: false,
       reason: "current AHP summary and enrichment revisions are not bound",
@@ -123,7 +120,7 @@ export function resolveAuthoritativeGateRevision(
         reason: "current session changeset revision is unverified",
       };
     }
-    changesetRef = sourceChangesetRef(summarySource.sourceRevision);
+    changesetRef = sourceChangesetRef(sourceRevision);
   }
 
   if (!changesetRef) {
@@ -133,7 +130,7 @@ export function resolveAuthoritativeGateRevision(
   return {
     ok: true,
     changesetRef,
-    sourceRevision: summarySource.sourceRevision,
+    sourceRevision,
     hostUrl: row.host_url,
   };
 }

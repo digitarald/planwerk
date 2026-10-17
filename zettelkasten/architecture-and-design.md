@@ -141,9 +141,23 @@ Config: `coherence.{enabled, module_depth, block_high_risk_ship}` in `planwerk.y
 
 Cached SSE initialization is display-only. The heartbeat receives cards only
 after that host's current bridge generation has projected a live catalog.
-Queued bridge payloads are cloned before projection so later mutations cannot
-erase intermediate states. Producer closure and consumer cancellation both
+Bridge payloads are cloned and projected synchronously so later mutations cannot
+erase intermediate states. Model triage runs separately through a shared bounded
+assessment lane (two independent cards, one assessment per card at a time).
+Identical facts share work; queued obsolete revisions are superseded, and queue
+overflow is explicit and recoverable by reconciliation. Failed SSE triage for the
+same digest has a one-minute cooldown. A late result reprojects current facts
+rather than broadcasting its captured card. Producer closure and consumer cancellation both
 release inbox listeners; failed listeners do not interrupt other subscribers.
+
+Each SSE subscriber receives an epoch and sequence. Browser callbacks from retired
+connections are ignored; gaps require a new snapshot. Cached initialization does
+not mark the host live, and persisted phase/gate truth is already in the server
+snapshot, so the browser does not race it against separate phase hydration HTTP
+requests. Projection may seed a new live card's phase, never advance an existing
+persisted phase. Each Web Streams subscriber queue is capped at eight MiB;
+slow consumers disconnect independently. This bounds the application queue, not
+every TCP/proxy buffer. Oversized snapshots return an explicit terminal error.
 
 Every build offers only AHP `1.0.0`; there is no older-version fallback or retry
 with an untested host version. The SDK dependency is pinned to that release.
@@ -188,6 +202,53 @@ Without an immutable host revision, the timestamp/count digest remains only a
 conservative cache-binding fence, not a content-change notification. Missing
 facts wait for real activity or explicit inspection.
 
+**Refresh evidence** is an intentional operation, available in card details via
+`POST /api/ahp/sessions/evidence`. It may restore a cold session. It invalidates
+old authority, retains residency through collection, and commits only while the
+catalog fence, observed streams, cache token, and refresh generation still match.
+Collection supports up to 256 files and 32 MiB of cumulative decoded resource
+bytes, with a 30-second collection deadline including connection acquisition.
+Unsupported limits return 422; deadline expiry returns 503. AHP resource reads
+have no range parameter, so an unsized individual response can arrive before
+the client rejects it; this is not a pre-transfer bandwidth bound.
+Captured-byte evidence digests are separate from file-metadata/manifest digests.
+They identify the captured evidence, not a guarantee that unsupported hosts can
+report every subsequent edit. No new AHP method or immutable-revision capability
+is inferred from a generic metadata field.
+
+Session URIs remain legacy card identifiers, so a second host claiming an
+existing URI is quarantined rather than overwriting cache/authority. Historical
+phases and audits are preserved, but ambiguous ownership cannot authorize gates,
+risk, coherence, or phase movement. This is a deliberate fail-closed alternative
+to an incomplete cache-only composite-key migration.
+
+Card details use one compact evidence disclosure rather than another dashboard.
+Its summary distinguishes evidence, activity, review-budget, service, gate and
+ownership waits; expanded content explains the supported next step. Capture
+provenance records the actual collection time/method/coverage and survives
+invalidation as stale metadata, never as current gate authority. Refresh warns
+visibly that it can restore a session and change its activity timestamp.
+
+An ownership conflict stays visible as a passive, display-only catalog entry.
+Only that state exposes host recovery controls. The operator chooses a recorded
+host and explicitly confirms invalidating old authority while retaining phase
+and audit history. The ownership API checks the selected host's passive catalog,
+requires a revision CAS and refuses active or ambiguous work. Recovery is
+recorded in `session_ownership_recovery_audit`; reconnect alone cannot clear
+quarantine or reclaim a deliberately rejected host. A new, unknown claimant
+quarantines the URI again. Recovery does not approve gates or collect fresh
+evidence; a deliberate refresh is required afterward.
+
+Heartbeat work has an admitted host/session, source, phase, scope, capability
+and generation. Rechecks precede effects and authoritative commits. Dirty-key
+wakeups coalesce with the periodic sweep; card mutations stay serial and WIP
+admission counts persisted occupancy, not only automation-eligible cards.
+Retiring a generation invalidates authority before bounded draining. An unsettled
+same-session mutation retains its process-local admission slot or quarantine;
+the scheduler timeout alone does not make it safe to retry. Accepted remote
+effects cannot be retracted by client cancellation. Cross-process recovery still
+depends on the existing durable run leases and ambiguity records.
+
 Each observed chat's static changeset catalogue is followed through its own
 channels. Card details show scoped file facts, and board cards show active
 background-work counts. Computing, recomputing, errored, and unavailable
@@ -212,10 +273,20 @@ between hosts or reconnects.
 Coherence signatures include both verified source revisions, not only file
 paths and line counts. Review collection requires complete session-scoped file
 evidence, with current host, source, and lease bindings checked before SDK work
-and verdict commit. Inactive sessions, missing/binary/oversized evidence, and
-reviewer failures defer with a durable 60-second cooldown instead of creating
-a coherent verdict or a human task. Evidence beyond the bounded file/content
-budget remains deferred; this is a conservative limit, not a completed review.
+and verdict commit. Reconciliation is host-scoped; absence from a filtered or
+incomplete eligibility batch is not authoritative removal. Deferrals distinguish
+waiting for activity/new evidence, retryable infrastructure failure, invalid
+model output, and unsupported evidence budgets. Unsupported/oversized reviews
+do not retry model work indefinitely. Evidence beyond the bounded file/content
+budget remains unsupported, not a completed review; lossy chunk summaries cannot
+establish cross-file coherence.
+
+Explicit refresh stores digests, not nonartifact code bytes. It can recover gate
+evidence on an idle card, but cannot itself supply cold-session code to an LLM
+coherence review. Such a pair remains blocked without periodic subscriptions;
+automatic review requires both sessions active, or a human may deliberately
+accept divergence for the current revision. Legacy coherence rows with ambiguous
+host ownership likewise remain blocked pending explicit recovery.
 
 Chat changesets and background work are informational. They never contribute
 to session change totals, gate freshness, phase transitions, or coordinator

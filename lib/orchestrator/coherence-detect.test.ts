@@ -9,6 +9,7 @@ import {
   pairBlocks,
   computeSignature,
   signatureSourceRevisions,
+  coherenceDeferralPolicy,
   type DetectCard,
 } from "./coherence-detect.ts";
 
@@ -27,6 +28,32 @@ test("effectiveRisk treats unknown risk as medium", () => {
   assert.equal(effectiveRisk(undefined), "medium");
   assert.equal(effectiveRisk(null), "medium");
   assert.equal(effectiveRisk("low"), "low");
+});
+
+test("host identity fences detection and signatures even with identical repo and source facts", () => {
+  const a = { ...card("a", [["/repo/src/x/shared.ts", 1, 1]]), hostUrl: "ws://a" };
+  const b = { ...card("b", [["/repo/src/x/shared.ts", 1, 1]]), hostUrl: "ws://b" };
+  assert.deepEqual(detectPairs([a, b], { moduleDepth: 2 }), []);
+  const sameHost = { ...b, hostUrl: a.hostUrl };
+  const pair = detectPairs([a, sameHost], { moduleDepth: 2 })[0];
+  assert.ok(pair);
+  assert.notEqual(pair.signature, computeSignature("file", pair.overlapPaths,
+    { ...a, hostUrl: "ws://replacement" }, { ...b, hostUrl: "ws://replacement" }, 2));
+});
+
+test("deferral policy has deterministic reason-aware wake conditions and bounded failure retries", () => {
+  assert.deepEqual(coherenceDeferralPolicy("inactive-session", 100, 1),
+    { wakeCondition: "activation-change", retryAt: null });
+  assert.deepEqual(coherenceDeferralPolicy("evidence-limit", 1, 1),
+    { wakeCondition: "signature-change", retryAt: null });
+  assert.deepEqual(coherenceDeferralPolicy("infrastructure", 1, 100),
+    { wakeCondition: "retry-time", retryAt: 60_100 });
+  assert.deepEqual(coherenceDeferralPolicy("infrastructure", 3, 100),
+    { wakeCondition: "retry-time", retryAt: 240_100 });
+  assert.deepEqual(coherenceDeferralPolicy("infrastructure", 5, 100),
+    { wakeCondition: "manual", retryAt: null });
+  assert.deepEqual(coherenceDeferralPolicy("invalid-model-output", 2, 100),
+    { wakeCondition: "manual", retryAt: null });
 });
 
 test("file-tier overlap is detected and always escalates", () => {

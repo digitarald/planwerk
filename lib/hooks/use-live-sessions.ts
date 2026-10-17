@@ -6,62 +6,7 @@ import { useBoardStore } from "@/lib/store/board-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
 import { useInboxStore } from "@/lib/store/inbox-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
-import type { GateStatus, KanbanCard, Phase } from "@/lib/types";
-
-/** Fetch persisted phase + gate status for the given cards and reconcile any
- *  that differ from their AHP-derived state, so the board agrees with stored
- *  truth on load. */
-async function hydratePersistedPhases(
-  cards: KanbanCard[],
-  reconcileCard: (id: string, patch: Partial<KanbanCard>) => void
-): Promise<void> {
-  if (cards.length === 0) return;
-  try {
-    const states: Record<
-      string,
-      { phase: Phase; gateStatus: GateStatus }
-    > = {};
-    const batchSize = 40;
-    const requests: Promise<Response>[] = [];
-    for (let index = 0; index < cards.length; index += batchSize) {
-      const ids = cards
-        .slice(index, index + batchSize)
-        .map((card) => card.id)
-        .join(",");
-      requests.push(
-        fetch(`/api/gates/phases?cardIds=${encodeURIComponent(ids)}`),
-      );
-    }
-    for (const res of await Promise.all(requests)) {
-      if (!res.ok) {
-        console.warn(
-          `[gates:hydrate] phase request failed with ${res.status}`,
-        );
-        continue;
-      }
-      const batch = (await res.json()) as {
-        states: Record<string, { phase: Phase; gateStatus: GateStatus }>;
-      };
-      Object.assign(states, batch.states);
-    }
-    for (const card of cards) {
-      const persisted = states[card.id];
-      if (persisted && persisted.phase !== card.phase) {
-        // Reconcile phase and its derived gate status together so a hydrated
-        // phase never shows a gate status from the old (AHP-derived) phase.
-        reconcileCard(card.id, {
-          phase: persisted.phase,
-          gateStatus: persisted.gateStatus,
-        });
-      }
-    }
-  } catch (error) {
-    console.warn(
-      "[gates:hydrate] phase hydration failed:",
-      error instanceof Error ? error.message : error,
-    );
-  }
-}
+import { StreamOrder } from "@/lib/ahp/stream-order";
 
 export function useLiveSessions() {
   const status = useConnectionStore((s) => s.status);
@@ -78,7 +23,6 @@ export function useLiveSessions() {
 
   const setCards = useBoardStore((s) => s.setCards);
   const replaceCard = useBoardStore((s) => s.replaceCard);
-  const reconcileCard = useBoardStore((s) => s.reconcileCard);
   const addCard = useBoardStore((s) => s.addCard);
   const removeCard = useBoardStore((s) => s.removeCard);
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
@@ -114,6 +58,8 @@ export function useLiveSessions() {
 
     console.info("[ahp:sse]", `opening stream →`, sseUrl);
     const es = new EventSource(sseUrl);
+    const order = new StreamOrder();
+    let disposed = false;
     eventSourceRef.current = es;
 
     es.onopen = () => {
@@ -121,8 +67,16 @@ export function useLiveSessions() {
     };
 
     es.onmessage = (event) => {
+      if (disposed || eventSourceRef.current !== es) return;
       try {
         const data = JSON.parse(event.data);
+        const admission = order.accept(data);
+        if (admission === "stale") return;
+        if (admission === "resync") {
+          es.close();
+          setError({ message: "Event stream ordering was lost. Reconnect for current state.", code: "unknown" });
+          return;
+        }
 
         if (data.type === "error") {
           // Server-side connection error (e.g., AHP host unreachable)
@@ -141,10 +95,8 @@ export function useLiveSessions() {
           console.info("[ahp:sse]", `init: ${data.cards.length} cards`);
           setCards(data.cards);
           hasHandshakedRef.current = true;
-          setConnected(data.connection);
-          // Hydrate persisted phases from SQLite so a reload shows the stored
-          // truth (not an AHP-derived default) and matches the gate engine.
-          void hydratePersistedPhases(data.cards, reconcileCard);
+          if (!data.cached) setConnected(data.connection);
+          // The server snapshot already includes persisted phase/gate truth.
           // Connection/monitoring status goes to the pinned status line, not the
           // conversational feed — system state is an instrument, not dialogue.
           setMonitoringStatus(data.cards.length);
@@ -217,6 +169,7 @@ export function useLiveSessions() {
     };
 
     es.onerror = () => {
+      if (disposed || eventSourceRef.current !== es) return;
       if (!hasHandshakedRef.current) {
         // The server sends AHP failures as structured SSE events. Reaching
         // EventSource.onerror before init means the HTTP event stream failed.
@@ -234,10 +187,11 @@ export function useLiveSessions() {
     };
 
     return () => {
+      disposed = true;
       es.close();
-      eventSourceRef.current = null;
+      if (eventSourceRef.current === es) eventSourceRef.current = null;
     };
-  }, [shouldConnect, hostUrl, workspaceScope, setCards, replaceCard, reconcileCard, addCard, removeCard, addFeedItem, setMonitoringStatus, setConnected, setError]);
+  }, [shouldConnect, hostUrl, workspaceScope, setCards, replaceCard, addCard, removeCard, addFeedItem, setMonitoringStatus, setConnected, setError]);
 }
 
 interface HeartbeatActionData {

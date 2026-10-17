@@ -14,6 +14,11 @@ import { visibleChatCatalog } from "./chat-facts";
 import { AHPSessionSummary, AHPStatus, parseAHPStatus } from "./types";
 import type { ChangesetEnrichment } from "./changeset-enricher";
 import {
+  sourceBindingsMatch,
+  sourceEvidenceRevision,
+  type EvidenceSourceBinding,
+} from "./source-binding-match";
+import {
   normalizeToolRiskAssessment,
   toolAuthenticationHandoff,
   toolConfirmationIntent,
@@ -283,50 +288,34 @@ export function mapSessionToCard(
   persistedRisk?: RiskLevel,
   workers?: WorkerActivity[],
 ): KanbanCard {
+  const summarySource = (
+    session as AHPSessionSummary & {
+      _planwerkRiskFacts?: EvidenceSourceBinding;
+    }
+  )._planwerkRiskFacts;
+  const enrichmentSource = (
+    enrichment as (ChangesetEnrichment & {
+      _planwerkSource?: EvidenceSourceBinding;
+    }) | null | undefined
+  )?._planwerkSource;
+  // Live root summaries do not contain persisted bindings. Their timestamp is
+  // only an invalidation fence; this display fallback is not byte-freshness proof.
+  const bindingMatches = summarySource === undefined
+    ? enrichmentSource === undefined || (
+      sourceBindingsMatch(enrichmentSource, enrichmentSource) &&
+      enrichmentSource.planVersion === session.modifiedAt
+    )
+    : sourceBindingsMatch(summarySource, enrichmentSource)
+      && enrichmentSource?.planVersion === session.modifiedAt;
+  if (!bindingMatches) enrichment = null;
   const runtime = mapAHPRuntimeStatus(session.status);
   const artifacts = enrichment?.artifacts ?? inferArtifacts(session);
   const codeFileCount = enrichment?.codeFileCount;
   const phase = inferPhase(session, existingPhase, artifacts, codeFileCount);
   const isArchived = (session.status & AHPStatus.IsArchived) !== 0;
-
-  // Prefer session-scoped diff totals (isolated per agent) when the changeset was
-  // actually read. Fall back to the host's shared working-tree summary otherwise —
-  // but flag it unverified so the gate engine won't trust those counts as a
-  // freshness signal (they accumulate across every agent sharing the dir).
+  // Unbound/stale enrichment cannot supply verified counts or plan content.
   const changesetVerified = enrichment?.changesetVerified === true;
-  const summarySource = (
-    session as AHPSessionSummary & {
-      _planwerkRiskFacts?: {
-        sourceRevision?: unknown;
-        planVersion?: unknown;
-        contentRevision?: unknown;
-      };
-    }
-  )._planwerkRiskFacts;
-  const enrichmentSource = (
-    enrichment as (ChangesetEnrichment & {
-      _planwerkSource?: {
-        sourceRevision?: unknown;
-        planVersion?: unknown;
-        contentRevision?: unknown;
-      };
-    }) | null | undefined
-  )?._planwerkSource;
-  const sourceRevision =
-    changesetVerified &&
-    typeof enrichmentSource?.sourceRevision === "string" &&
-    enrichmentSource.sourceRevision.length > 0 &&
-    (
-      summarySource === undefined ||
-      (
-        summarySource.sourceRevision === enrichmentSource.sourceRevision &&
-        summarySource.planVersion === enrichmentSource.planVersion &&
-        (summarySource.contentRevision ?? null) ===
-          (enrichmentSource.contentRevision ?? null)
-      )
-    )
-      ? enrichmentSource.sourceRevision
-      : undefined;
+  const sourceRevision = changesetVerified ? sourceEvidenceRevision(enrichmentSource) : undefined;
   const additions = changesetVerified ? enrichment!.additions : (session.changes?.additions || 0);
   const deletions = changesetVerified ? enrichment!.deletions : (session.changes?.deletions || 0);
   const filesChanged = changesetVerified ? enrichment!.totalFileCount : (session.changes?.files || 0);
@@ -334,6 +323,10 @@ export function mapSessionToCard(
   return {
     id: session.resource,
     title: session.title,
+    evidence: {
+      state: enrichment ? "current" : session.lastEvidenceCapture ? "stale" : "unavailable",
+      capture: enrichment?.evidenceCapture ?? session.lastEvidenceCapture,
+    },
     phase,
     runtime: isArchived ? "idle" : runtime,
     gateStatus: isArchived ? "passed" : phase === "review" ? "evaluating" : phase === "ship" ? "passed" : "pending",

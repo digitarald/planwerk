@@ -90,7 +90,32 @@ export async function POST(request: NextRequest) {
     }
 
     const direction = toIdx > fromIdx ? "forward" : "backward";
-    setCardPhase(cardId, toPhase);
+    if (currentPhase === "review" && toPhase === "ship") {
+      const source = resolveAuthoritativeGateRevision(getDb(), cardId, currentPhase);
+      if (!source.ok) {
+        return NextResponse.json(
+          { error: "Authoritative revision unavailable", detail: source.reason, retryable: true },
+          { status: 409 },
+        );
+      }
+      const result = advanceReviewToShip(cardId, loadConfig(body.projectPath).coherence, source.hostUrl);
+      if (!result.advanced) {
+        return NextResponse.json(
+          {
+            error: result.reason ?? "Blocked by unresolved coherence conflict",
+            coherenceConflicts: result.blockedBy.map((conflict) => ({
+              with: conflict.cardA === cardId ? conflict.cardB : conflict.cardA,
+              tier: conflict.tier,
+              status: conflict.status,
+              summary: conflict.verdictSummary,
+            })),
+          },
+          { status: 409 },
+        );
+      }
+    } else {
+      setCardPhase(cardId, toPhase);
+    }
     logManualOverride(cardId, currentPhase, toPhase, direction);
 
     return NextResponse.json({
@@ -200,7 +225,7 @@ export async function POST(request: NextRequest) {
     // coherence blocking (high-risk conflicts), not just the vertical gates.
     if (currentPhase === "review" && nextPhase === "ship") {
       const coherenceConfig = loadConfig(body.projectPath).coherence;
-      const { advanced, blockedBy } = advanceReviewToShip(cardId, coherenceConfig);
+      const { advanced, blockedBy } = advanceReviewToShip(cardId, coherenceConfig, authoritativeRevision.hostUrl);
       if (!advanced) {
         return NextResponse.json(
           {

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { dismissConflict } from "@/lib/orchestrator/coherence-engine";
 import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
+import { getDb } from "@/lib/db/schema";
+import { resolveAuthoritativeGateRevision } from "@/lib/orchestrator/gate-revision";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +26,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "cardId and otherCardId required" }, { status: 400 });
   }
 
-  const row = dismissConflict(cardId, otherCardId);
+  const source = resolveAuthoritativeGateRevision(getDb(), cardId, "build");
+  const row = source.ok ? dismissConflict(cardId, otherCardId, source.hostUrl) : null;
   if (!row) {
     return NextResponse.json({ error: "No coherence conflict found for this pair" }, { status: 404 });
   }

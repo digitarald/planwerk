@@ -11,6 +11,7 @@ import {
 import {
   classifyCopilotFailure,
   CopilotRuntimeManager,
+  CopilotRuntimeDeadlineError,
   CopilotRuntimeResetLimitError,
   isCopilotRuntimeInvalidatingFailure,
   type ManagedCopilotRuntimeClient,
@@ -66,6 +67,8 @@ function createHarness(options: {
   resetWindowMs?: number;
   now?: () => number;
   cleanupTimeoutMs?: number;
+  startupTimeoutMs?: number;
+  healthTimeoutMs?: number;
 } = {}) {
   const clients: FakeClient[] = [];
   const manager = new CopilotRuntimeManager({
@@ -78,6 +81,71 @@ function createHarness(options: {
   });
   return { clients, manager };
 }
+
+test("stalled startup has a deadline and cannot install a late client over its replacement", async () => {
+  let release!: () => void;
+  const first = new FakeClient(1);
+  first.waitForStart = new Promise<void>((resolve) => { release = resolve; });
+  const replacement = new FakeClient(2);
+  let creates = 0;
+  const manager = new CopilotRuntimeManager({
+    createClient: () => ++creates === 1 ? first : replacement,
+    startupTimeoutMs: 5,
+  });
+  await assert.rejects(manager.getClient(), CopilotRuntimeDeadlineError);
+  assert.equal(first.stopCalls, 1);
+  assert.equal(await manager.getClient(), replacement);
+  release();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(first.stopCalls, 2);
+  assert.equal(await manager.getClient(), replacement);
+  assert.equal(manager.getHealth().state, "ready");
+  await manager.shutdown();
+});
+
+test("stalled health probes retire the exact client without wedging the serialized manager", async () => {
+  const { manager } = createHarness({ healthTimeoutMs: 5 });
+  const first = await manager.getClient();
+  const originalStatus = first.getStatus.bind(first);
+  let release!: () => void;
+  first.getStatus = () => new Promise((resolve) => {
+    release = () => { void originalStatus().then(resolve); };
+  });
+  const health = await manager.checkHealth();
+  assert.equal(health.healthy, false);
+  assert.match(health.lastError!, /health.*deadline/);
+  const replacement = await manager.getClient();
+  assert.notEqual(replacement, first);
+  release();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(await manager.getClient(), replacement);
+  assert.equal(manager.getHealth().state, "ready");
+  await manager.shutdown();
+});
+
+test("a timed-out startup client cannot be reused while its old startup may still complete", async () => {
+  const client = new FakeClient(1);
+  let release!: () => void;
+  client.waitForStart = new Promise<void>((resolve) => { release = resolve; });
+  const manager = new CopilotRuntimeManager({
+    createClient: () => client,
+    startupTimeoutMs: 5,
+  });
+  await assert.rejects(manager.getClient(), CopilotRuntimeDeadlineError);
+  await assert.rejects(manager.getClient(), /Cannot reuse/);
+  assert.equal(client.startCalls, 1);
+  release();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await manager.shutdown();
+});
+
+test("runtime deadline options reject nonfinite and nonpositive values", () => {
+  for (const value of [0, -1, Infinity, NaN]) {
+    assert.throws(() => createHarness({ startupTimeoutMs: value }), RangeError);
+    assert.throws(() => createHarness({ healthTimeoutMs: value }), RangeError);
+  }
+  assert.equal(classifyCopilotFailure(new CopilotRuntimeDeadlineError("startup", 5)), "runtime-invalidating");
+});
 
 test("SDK and application share JSON-RPC error constructor identities", () => {
   const require = createRequire(import.meta.url);

@@ -5,17 +5,18 @@ import {
   type UsageInfo,
   type ChatState,
 } from "@microsoft/agent-host-protocol";
-import { createHash } from "node:crypto";
 
 import { type AHPSessionSummary, type AHPEvent, AHPStatus, shouldShowSession } from "./types";
 import { classifyError, type ConnectionError } from "./connection-error";
 import { classifyAhpError } from "./rpc-error";
-import { enrichFromChangeset, type ChangesetEnrichment, hashPlanContent } from "./changeset-enricher";
+import { enrichFromChangeset, type ChangesetEnrichment } from "./changeset-enricher";
 import { fetchCopilotCliArtifacts } from "./plan-artifact";
 import { extractModelFromConfig } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
 import { asChatState, asSessionState, withSessionState } from "./snapshot";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT, type CachedSession } from "@/lib/db/session-cache";
+import { getDb } from "@/lib/db/schema";
+import { claimSessionOwnership, isSessionOwnedByHost } from "@/lib/db/session-ownership";
 import { TelemetryTapTransport } from "./telemetry-transport";
 import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
 import { listAllSessions } from "./catalog";
@@ -31,16 +32,29 @@ import {
   shouldReadLiveSessionState,
 } from "./session-read-policy";
 import { withAHPClient } from "./client-operation";
-import type {
-  Artifact,
-  PendingInput,
-  SessionDetails,
-  WorkerActivity,
-} from "@/lib/types";
+import type { PendingInput, WorkerActivity } from "@/lib/types";
 import { observeChatFacts, shouldObserveChat, visibleBackgroundWork } from "./chat-facts";
 import { mapWorkerChats, retainInactiveWorkers, type WorkerChatSummary } from "./worker-activity";
 import { getWorkerActivityHistory, recordWorkerActivity } from "@/lib/orchestrator/worker-activity-store";
 import { readSessionDetailsForState } from "./session-details";
+import {
+  attachAHPSourceRevision,
+  beginEvidenceRead,
+  bindEnrichment,
+  cacheableSummary,
+  enrichmentMatchesSummary,
+  isEvidenceReadCurrent,
+  invalidateEvidenceReads,
+  mergeFreshEnrichment,
+  observeEvidenceRefresh,
+  observeOwnershipRecovery,
+  releaseEvidenceRead,
+  riskFactsSourceBinding,
+  sessionSignature,
+  type SourceAwareSummary,
+} from "./source-binding";
+
+export { mergeFreshEnrichment } from "./source-binding";
 
 // Re-export for consumers that imported from here
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
@@ -70,210 +84,6 @@ function expandLevelTemplate(uri: string, level: string): string {
     .replace("{&level}", `&level=${level}`);
 }
 
-interface RiskFactsSourceBinding {
-  sourceRevision: string;
-  planVersion: string;
-  contentRevision?: string;
-}
-
-interface BoundChangesetEnrichment extends ChangesetEnrichment {
-  _planwerkSource: RiskFactsSourceBinding;
-}
-
-type RiskFactsCachedSummary = AHPSessionSummary & {
-  _planwerkRiskFacts: RiskFactsSourceBinding & {
-    pendingInput: PendingInput | null;
-  };
-};
-
-type SourceAwareSummary = AHPSessionSummary & {
-  _planwerkAHPSourceRevision?: string;
-};
-
-function metaRevision(meta: Record<string, unknown> | undefined): string | undefined {
-  if (!meta) return undefined;
-  const candidates = [
-    meta.sourceRevision,
-    meta.contentRevision,
-    meta.changesetRevision,
-    meta.revision,
-    (meta.changeset as Record<string, unknown> | undefined)?.revision,
-    (meta.content as Record<string, unknown> | undefined)?.revision,
-  ];
-  const revision = candidates.find(
-    (value): value is string | number =>
-      (typeof value === "string" && value.trim().length > 0)
-      || (typeof value === "number" && Number.isFinite(value)),
-  );
-  return revision === undefined ? undefined : `ahp:${String(revision)}`;
-}
-
-function attachAHPSourceRevision(
-  summary: AHPSessionSummary,
-  sdkSummary: { _meta?: Record<string, unknown> },
-): void {
-  const revision = metaRevision(sdkSummary._meta);
-  if (revision) {
-    (summary as SourceAwareSummary)._planwerkAHPSourceRevision = revision;
-  } else if (sdkSummary._meta !== undefined) {
-    delete (summary as SourceAwareSummary)._planwerkAHPSourceRevision;
-  }
-}
-
-function summarySourceRevision(summary: AHPSessionSummary): string {
-  const explicit = (summary as SourceAwareSummary)._planwerkAHPSourceRevision;
-  if (explicit) return explicit;
-  if (!summary.resource || !summary.modifiedAt) return "";
-
-  // A conservative freshness fence, NOT proof that content changed and never
-  // permission to subscribe. Timestamp churn must only invalidate these facts.
-  const changes = summary.changes;
-  return createHash("sha256")
-    .update(JSON.stringify({
-      resource: summary.resource,
-      provider: summary.provider,
-      modifiedAt: summary.modifiedAt,
-      files: changes?.files ?? 0,
-      additions: changes?.additions ?? 0,
-      deletions: changes?.deletions ?? 0,
-    }))
-    .digest("hex");
-}
-
-function enrichmentContentRevision(
-  enrichment: ChangesetEnrichment | null | undefined,
-): string | undefined {
-  if (!enrichment?.changesetVerified) return undefined;
-  return createHash("sha256")
-    .update(JSON.stringify({
-      files: [...enrichment.fileChanges]
-        .map((file) => ({
-          id: file.id ?? "",
-          path: file.path,
-          added: file.added,
-          removed: file.removed,
-        }))
-        .sort((a, b) =>
-          a.id.localeCompare(b.id)
-          || a.path.localeCompare(b.path)
-          || a.added - b.added
-          || a.removed - b.removed
-        ),
-      totalFileCount: enrichment.totalFileCount,
-      additions: enrichment.additions,
-      deletions: enrichment.deletions,
-      planContentHash: enrichment.planContentHash ?? "",
-    }))
-    .digest("hex");
-}
-
-function riskFactsSourceBinding(
-  summary: AHPSessionSummary,
-  enrichment?: ChangesetEnrichment | null,
-): RiskFactsSourceBinding {
-  return {
-    sourceRevision: summarySourceRevision(summary),
-    planVersion: summary.modifiedAt,
-    contentRevision: enrichmentContentRevision(enrichment),
-  };
-}
-
-function cacheableSummary(
-  summary: AHPSessionSummary,
-  pendingInput: PendingInput | undefined,
-  enrichment?: ChangesetEnrichment | null,
-): RiskFactsCachedSummary {
-  return {
-    ...summary,
-    _planwerkRiskFacts: {
-      ...riskFactsSourceBinding(summary, enrichment),
-      pendingInput: pendingInput ?? null,
-    },
-  };
-}
-
-function bindEnrichment(
-  summary: AHPSessionSummary,
-  enrichment: ChangesetEnrichment,
-): BoundChangesetEnrichment {
-  return {
-    ...enrichment,
-    _planwerkSource: riskFactsSourceBinding(summary, enrichment),
-  };
-}
-
-function enrichmentMatchesSummary(
-  summary: AHPSessionSummary,
-  enrichment: ChangesetEnrichment | null | undefined,
-): enrichment is BoundChangesetEnrichment {
-  const source = (enrichment as Partial<BoundChangesetEnrichment> | null | undefined)
-    ?._planwerkSource;
-  const expected = riskFactsSourceBinding(summary);
-  const contentRevision = enrichmentContentRevision(enrichment);
-  return Boolean(
-    source
-    && source.sourceRevision
-    && source.sourceRevision === expected.sourceRevision
-    && source.planVersion === expected.planVersion
-    && source.contentRevision === contentRevision
-  );
-}
-
-function sessionSignature(summary: AHPSessionSummary): string {
-  return JSON.stringify({
-    status: summary.status,
-    title: summary.title ?? "",
-    activity: summary.activity ?? "",
-    sourceRevision: summarySourceRevision(summary),
-  });
-}
-
-export function mergeFreshEnrichment(
-  changesetResult: ChangesetEnrichment | null,
-  sessionArtifacts: Artifact[],
-  sessionDetails?: SessionDetails,
-): ChangesetEnrichment | null {
-  if (
-    !changesetResult &&
-    sessionArtifacts.length === 0 &&
-    !sessionDetails?.lastAgentMessage &&
-    !sessionDetails?.runtimeError
-  ) {
-    return null;
-  }
-
-  const artifacts = [...(changesetResult?.artifacts ?? [])];
-  for (const artifact of sessionArtifacts) {
-    const existingIndex = artifacts.findIndex(
-      (candidate) => candidate.type === artifact.type,
-    );
-    if (existingIndex >= 0) {
-      artifacts.splice(existingIndex, 1, artifact);
-    } else {
-      artifacts.push(artifact);
-    }
-  }
-
-  const planContent = artifacts.find(
-    (artifact) => artifact.type === "plan",
-  )?.contentRef;
-  return {
-    ...(changesetResult ?? {
-      codeFileCount: 0,
-      totalFileCount: 0,
-      fileChanges: [],
-      additions: 0,
-      deletions: 0,
-      changesetVerified: false,
-    }),
-    artifacts,
-    planContent,
-    planContentHash: planContent ? hashPlanContent(planContent) : undefined,
-    lastAgentMessage: sessionDetails?.lastAgentMessage,
-    runtimeError: sessionDetails?.runtimeError,
-  };
-}
-
 export interface AHPBridgeOptions {
   hostUrl: string;
   onEvent: (event: BridgeEvent) => void;
@@ -284,7 +94,7 @@ export interface AHPBridgeOptions {
  * Connects to a real AHP host and bridges notifications as Planwerk events.
  * Returns a cleanup function. Emits events via the onEvent callback.
  */
-export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOptions): Promise<() => void> {
+export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: AHPBridgeOptions): Promise<() => void> {
   const sessions = new Map<string, AHPSessionSummary>();
   // Archived sessions skipped during init/add — re-evaluated if changes arrive later
   const skippedArchived = new Map<string, AHPSessionSummary>();
@@ -306,11 +116,74 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
 
   let disposed = false;
   let client: AhpClient | null = null;
+  const ownsSession = (uri: string) => isSessionOwnedByHost(getDb(), uri, hostUrl);
+  function onEvent(event: BridgeEvent) {
+    if ((event.type === "sessionAdded" || event.type === "sessionSummaryChanged")
+      && !ownsSession(event.session.resource)) {
+      sendEvent({ ...event, enrichment: null, pendingInput: null, workers: [] });
+      return;
+    }
+    if (event.type === "init") {
+      const allowed = new Set(event.sessions.filter((session) => ownsSession(session.resource)).map((session) => session.resource));
+      sendEvent({
+        ...event,
+        enrichments: new Map([...event.enrichments].filter(([uri]) => allowed.has(uri))),
+        pendingInputs: new Map([...event.pendingInputs].filter(([uri]) => allowed.has(uri))),
+        workers: new Map([...event.workers].filter(([uri]) => allowed.has(uri))),
+        connection: {
+          ...event.connection,
+          visibleSessions: event.sessions.length,
+          filteredSessions: event.connection.totalSessions - event.sessions.length,
+        },
+      });
+      return;
+    }
+    sendEvent(event);
+  }
+  const stopEvidenceRefresh = observeEvidenceRefresh(hostUrl, (update) => {
+    const current = sessions.get(update.session.resource);
+    if (disposed || !current || !ownsSession(update.session.resource)
+      || sessionSignature(current) !== sessionSignature(update.session)
+      || current.modifiedAt !== update.session.modifiedAt) return;
+    const summary = { ...update.session } as AHPSessionSummary & { _planwerkRiskFacts?: unknown };
+    // Cached binding belongs to its persisted enrichment, not future live facts.
+    delete summary._planwerkRiskFacts;
+    sessions.set(update.session.resource, summary);
+    if (update.enrichment) enrichments.set(update.session.resource, update.enrichment);
+    else enrichments.delete(update.session.resource);
+    if (update.pendingInput) pendingInputs.set(update.session.resource, update.pendingInput);
+    else if (update.enrichment) pendingInputs.delete(update.session.resource);
+    onEvent({
+      type: "sessionSummaryChanged",
+      session: summary,
+      enrichment: update.enrichment,
+      pendingInput: pendingInputs.get(update.session.resource) ?? null,
+      workers: workersBySession.get(update.session.resource),
+    });
+  });
+  const stopOwnershipRecovery = observeOwnershipRecovery(hostUrl, (update) => {
+    if (disposed) return;
+    const uri = update.session.resource;
+    const current = sessions.get(uri);
+    stopWorkerObserver(uri);
+    enrichments.delete(uri);
+    pendingInputs.delete(uri);
+    workersBySession.delete(uri);
+    invalidateEvidenceReads(hostUrl, uri);
+    if (update.selectedHostUrl === hostUrl) {
+      const summary = { ...update.session, lastEvidenceCapture: current?.lastEvidenceCapture };
+      sessions.set(uri, summary);
+      onEvent({ type: current ? "sessionSummaryChanged" : "sessionAdded", session: summary, enrichment: null, pendingInput: null });
+    } else if (current) {
+      onEvent({ type: "sessionSummaryChanged", session: current, enrichment: null, pendingInput: null, workers: [] });
+    }
+  });
 
   function persistSessionSummary(
     summary: AHPSessionSummary,
     enrichment?: ChangesetEnrichment | null | typeof CLEAR_ENRICHMENT,
   ): void {
+    if (!ownsSession(summary.resource)) return;
     upsertSessionCache(
       hostUrl,
       summary.resource,
@@ -333,6 +206,9 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   function dispose() {
     if (disposed) return;
     disposed = true;
+    stopEvidenceRefresh();
+    stopOwnershipRecovery();
+    for (const uri of sessions.keys()) invalidateEvidenceReads(hostUrl, uri);
     readsController.abort();
     pendingInputs.clear();
     workersBySession.clear();
@@ -365,7 +241,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     if (!session) return;
     const eligible = () => {
       const current = sessions.get(sessionUri);
-      return !disposed && current !== undefined
+      return !disposed && current !== undefined && ownsSession(sessionUri)
         && (current.status & AHPStatus.IsArchived) === 0
         && (shouldReadLiveSessionState(current.status)
           || completionReads.get(sessionUri) === current.status);
@@ -379,6 +255,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     }
 
     pendingEnrichments.add(sessionUri);
+    const readGeneration = beginEvidenceRead(hostUrl, sessionUri);
     let sourceAtStart = riskFactsSourceBinding(session);
     let versionAtStart = enrichmentVersions.get(sessionUri);
 
@@ -418,7 +295,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       .then((result) => {
         if (!result) return;
         const [changesetResult, sessionArtifacts, model, sessionDetails] = result;
-        if (disposed || !sessions.has(sessionUri)) return;
+        if (disposed || !sessions.has(sessionUri) || !ownsSession(sessionUri)
+          || !isEvidenceReadCurrent(hostUrl, sessionUri, readGeneration)) return;
 
         if (model) {
           const current = sessions.get(sessionUri);
@@ -458,7 +336,8 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         });
       })
       .catch((err) => {
-        if (disposed) return;
+        if (disposed || !ownsSession(sessionUri)
+          || !isEvidenceReadCurrent(hostUrl, sessionUri, readGeneration)) return;
         const current = sessions.get(sessionUri);
         if (current) persistSessionSummary(current, CLEAR_ENRICHMENT);
         warn(
@@ -468,6 +347,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
         );
       })
       .finally(() => {
+        releaseEvidenceRead(hostUrl, sessionUri, readGeneration);
         pendingEnrichments.delete(sessionUri);
         // Re-enrich if session changed while we were processing
         if (dirtyEnrichments.has(sessionUri)) {
@@ -514,6 +394,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   }
 
   const stillInputNeeded = (sessionUri: string): boolean => {
+    if (!ownsSession(sessionUri)) return false;
     const s = sessions.get(sessionUri);
     return s !== undefined && shouldReadLiveSessionState(s.status)
       && (s.status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
@@ -753,14 +634,14 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   }
 
   async function observeChat(sessionUri: string, workerId: string): Promise<WorkerActivity["usage"]> {
-    if (!client || disposed) return undefined;
+    if (!client || disposed || !ownsSession(sessionUri)) return undefined;
     const existing = chatObservers.get(workerId);
     if (existing?.sessionUri === sessionUri) return workerUsageByChat.get(workerId);
     const session = sessions.get(sessionUri);
     if (!session || !shouldReadLiveSessionState(session.status)) return undefined;
     if (existing) stopChatObserver(workerId);
     const observer = observeChatFacts(client, workerId, (state, details) => {
-      if (disposed || chatObservers.get(workerId)?.close !== observer.close) return;
+      if (disposed || !ownsSession(sessionUri) || chatObservers.get(workerId)?.close !== observer.close) return;
       const session = sessions.get(sessionUri);
       if (!session) return;
       liveChatStates.set(workerId, { sessionUri, state });
@@ -805,7 +686,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     await Promise.all(chats.filter((chat) => session && shouldObserveChat(
       chat, session.status, session.defaultChat, chatObservers.has(chat.resource),
     )).map((chat) => observeChat(sessionUri, chat.resource)));
-    if (disposed || !sessions.has(sessionUri)) return;
+    if (disposed || !sessions.has(sessionUri) || !ownsSession(sessionUri)) return;
     for (const worker of workers) worker.usage = workerUsageByChat.get(worker.id);
     for (const worker of workers) {
       recordWorkerActivity(sessionUri, worker.id, worker.activity);
@@ -833,6 +714,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     if (
       disposed
       || !client
+      || !ownsSession(sessionUri)
       || (status & AHPStatus.IsArchived) !== 0
     ) {
       stopWorkerObserver(sessionUri);
@@ -845,7 +727,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       await applyWorkerChats(sessionUri, workerChatsBySession.get(sessionUri)!);
     }
     const current = sessions.get(sessionUri);
-    if (disposed || !current || (current.status & AHPStatus.IsArchived) !== 0) {
+    if (disposed || !current || !ownsSession(sessionUri) || (current.status & AHPStatus.IsArchived) !== 0) {
       stopWorkerObserver(sessionUri);
       return;
     }
@@ -861,7 +743,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     workerObservers.set(sessionUri, pendingObserver);
     try {
       const { result, subscription } = await client.subscribe(sessionUri);
-      if (disposed || workerObservers.get(sessionUri) !== pendingObserver) {
+      if (disposed || !ownsSession(sessionUri) || workerObservers.get(sessionUri) !== pendingObserver) {
         subscription.close();
         void client.unsubscribe(sessionUri).catch(() => {});
         return;
@@ -887,7 +769,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       void (async () => {
         try {
           for await (const event of subscription) {
-            if (disposed || workerObservers.get(sessionUri) !== subscription) break;
+            if (disposed || !ownsSession(sessionUri) || workerObservers.get(sessionUri) !== subscription) break;
             if (event.type !== "action") continue;
             sessionState = sessionReducer(sessionState, event.params.action as SessionAction);
             if (["session/chatAdded", "session/chatUpdated", "session/chatRemoved", "session/chatsReordered", "session/defaultChatChanged"].includes(event.params.action.type)) {
@@ -917,6 +799,10 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
   }
 
   if (signal) {
+    if (signal.aborted) {
+      dispose();
+      return dispose;
+    }
     signal.addEventListener("abort", dispose, { once: true });
   }
 
@@ -994,6 +880,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     const allSummaries = await listAllSessions(client);
 
     for (const summary of allSummaries) {
+      const owned = claimSessionOwnership(getDb(), summary.resource, hostUrl);
       const mapped = mapSdkSessionSummary(summary);
       attachAHPSourceRevision(mapped, summary);
       if (!shouldShowSession(summary.status, summary.changes?.files ?? 0)) {
@@ -1002,6 +889,11 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
       }
 
       const cached = cacheByUri.get(mapped.resource);
+      mapped.lastEvidenceCapture = cached?.summary.lastEvidenceCapture ?? cached?.enrichment?.evidenceCapture;
+      if (!owned) {
+        sessions.set(mapped.resource, mapped);
+        continue;
+      }
       const unchangedSummary =
         cached && sessionSignature(cached.summary) === sessionSignature(mapped);
       const planVersionChanged = Boolean(
@@ -1073,7 +965,11 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           : enrichments.get(uri) ?? CLEAR_ENRICHMENT,
       );
     }
-    reconcileSessionCache(hostUrl, new Set(sessions.keys()));
+    const retainedUris = new Set(sessions.keys());
+    for (const cached of cacheByUri.values()) {
+      if (!ownsSession(cached.sessionUri)) retainedUris.add(cached.sessionUri);
+    }
+    reconcileSessionCache(hostUrl, retainedUris);
 
     // Active sessions are already resident/running, so reading their details
     // cannot turn a cold catalog entry into resumed work. InputNeeded is a
@@ -1096,6 +992,32 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
     try {
       for await (const event of rootSub) {
         if (disposed) break;
+        const eventSessionUri = event.type === "sessionAdded" ? event.params.summary.resource
+          : event.type === "sessionSummaryChanged" || event.type === "sessionRemoved"
+            ? event.params.session : undefined;
+        if (eventSessionUri && !(event.type === "sessionRemoved"
+          ? ownsSession(eventSessionUri)
+          : claimSessionOwnership(getDb(), eventSessionUri, hostUrl))) {
+          stopWorkerObserver(eventSessionUri);
+          const current = sessions.get(eventSessionUri);
+          skippedArchived.delete(eventSessionUri);
+          enrichments.delete(eventSessionUri);
+          pendingInputs.delete(eventSessionUri);
+          workersBySession.delete(eventSessionUri);
+          invalidateEvidenceReads(hostUrl, eventSessionUri);
+          if (event.type === "sessionRemoved") {
+            sessions.delete(eventSessionUri);
+            onEvent({ type: "sessionRemoved", resource: eventSessionUri, reason: "removed" });
+          } else {
+            const passive = event.type === "sessionAdded" ? mapSdkSessionSummary(event.params.summary) : current;
+            if (passive && event.type === "sessionSummaryChanged") applySdkSessionSummaryChanges(passive, event.params.changes);
+            if (passive) {
+              sessions.set(eventSessionUri, passive);
+              onEvent({ type: current ? "sessionSummaryChanged" : "sessionAdded", session: passive, enrichment: null });
+            }
+          }
+          continue;
+        }
 
         if (event.type === "sessionAdded") {
           const mapped = mapSdkSessionSummary(event.params.summary);
@@ -1119,6 +1041,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
           stopWorkerObserver(event.params.session);
           const existing = sessions.get(event.params.session);
           sessions.delete(event.params.session);
+          invalidateEvidenceReads(hostUrl, event.params.session);
           completionReads.delete(event.params.session);
           dirtyEnrichments.delete(event.params.session);
           enrichmentVersions.set(event.params.session, (enrichmentVersions.get(event.params.session) ?? 0) + 1);
@@ -1161,6 +1084,7 @@ export async function createAHPBridge({ hostUrl, onEvent, signal }: AHPBridgeOpt
             const planVersionChanged =
               sourceBefore.planVersion !== sourceAfter.planVersion;
             if (changesetSourceChanged || planVersionChanged || contentChanged || runtimeChanged) {
+              invalidateEvidenceReads(hostUrl, sessionUri);
               enrichmentVersions.set(sessionUri, (enrichmentVersions.get(sessionUri) ?? 0) + 1);
               enrichments.delete(sessionUri);
               persistSessionSummary(existing, CLEAR_ENRICHMENT);

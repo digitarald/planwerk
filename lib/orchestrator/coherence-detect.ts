@@ -52,6 +52,7 @@ export interface DetectFile {
  *  (conservative) risk — use {@link effectiveRisk} before passing it in. */
 export interface DetectCard {
   id: string;
+  hostUrl?: string;
   sourceRevision?: string;
   workingDirectory?: string;
   workingDirectories?: string[];
@@ -149,7 +150,7 @@ export function computeSignature(
       })
       .map((f) => [toRelative(f.path, card.workingDirectory), f.added, f.removed] as const)
       .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
-    return [card.id, card.sourceRevision?.trim() ? card.sourceRevision : null, relevant];
+    return [card.id, card.sourceRevision?.trim() ? card.sourceRevision : null, relevant, card.hostUrl ?? null];
   };
   const [a, b] = cardA.id <= cardB.id ? [cardA, cardB] : [cardB, cardA];
   return JSON.stringify(["coherence-v2", tier, [...overlapPaths].sort(), part(a), part(b)]);
@@ -216,6 +217,7 @@ export function detectPairs(cards: DetectCard[], opts: DetectOptions): DetectedP
       for (let j = i + 1; j < ids.length; j++) {
         const a = byId.get(ids[i])!;
         const b = byId.get(ids[j])!;
+        if (a.hostUrl !== b.hostUrl) continue;
         // Same-repo guard: only pair cards in the same working directory.
         const aDirectories = a.workingDirectories ?? (a.workingDirectory ? [a.workingDirectory] : []);
         const bDirectories = b.workingDirectories ?? (b.workingDirectory ? [b.workingDirectory] : []);
@@ -224,6 +226,7 @@ export function detectPairs(cards: DetectCard[], opts: DetectOptions): DetectedP
         const k = `${ka}\u0000${kb}`;
         (into.get(k) ?? into.set(k, new Set()).get(k)!).add(value);
       }
+
     }
   };
 
@@ -279,4 +282,28 @@ export function pairBlocks(
   const highRiskInvolved =
     RISK_ORDER[riskA] >= RISK_ORDER.high || RISK_ORDER[riskB] >= RISK_ORDER.high;
   return highRiskInvolved;
+}
+
+export type CoherenceDeferralReason =
+  | "inactive-session" | "evidence-limit" | "evidence-unavailable"
+  | "source-changed" | "infrastructure" | "invalid-model-output";
+export type CoherenceWakeCondition =
+  | "activation-change" | "signature-change" | "retry-time" | "manual";
+
+export function coherenceDeferralPolicy(
+  reason: CoherenceDeferralReason,
+  attempts: number,
+  now: number,
+): { wakeCondition: CoherenceWakeCondition; retryAt: number | null } {
+  if (reason === "inactive-session") return { wakeCondition: "activation-change", retryAt: null };
+  if (reason === "evidence-limit" || reason === "source-changed") {
+    return { wakeCondition: "signature-change", retryAt: null };
+  }
+  if (attempts >= (reason === "invalid-model-output" ? 2 : 5)) {
+    return { wakeCondition: "manual", retryAt: null };
+  }
+  return {
+    wakeCondition: "retry-time",
+    retryAt: now + Math.min(15 * 60_000, 60_000 * 2 ** Math.max(0, attempts - 1)),
+  };
 }
