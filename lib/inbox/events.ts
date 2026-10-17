@@ -19,7 +19,11 @@ class InboxEventBus {
 
   publish(event: InboxStreamEvent): void {
     for (const listener of this.listeners) {
-      listener(event);
+      try {
+        listener(event);
+      } catch (error) {
+        console.error("[inbox:events] Subscriber failed:", error);
+      }
     }
   }
 }

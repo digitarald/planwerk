@@ -124,13 +124,9 @@ async function tryTriage(
 
 async function projectRemoteEvent(
   hostUrl: string,
-  event: BridgeEvent,
+  event: Exclude<BridgeEvent, ConnectionError>,
   automationScopes: Iterable<Set<string> | null>,
 ): Promise<CardStreamEvent> {
-  if (event.type === "error") {
-    return event;
-  }
-
   if (event.type === "init") {
     const cards = event.sessions.map((s) => {
       const card = safeEnrich(s, event.enrichments.get(s.resource), undefined, event.workers.get(s.resource));
@@ -225,7 +221,9 @@ registerDesktopHosts(() => Array.from(hostStreams.entries(), ([hostUrl, partitio
 })));
 
 function getAutomationHosts() {
-  return Array.from(hostStreams.entries(), ([hostUrl, partition]) => {
+  return Array.from(hostStreams.entries())
+    .filter(([, partition]) => partition.resource.connected)
+    .map(([hostUrl, partition]) => {
     const scopes = Array.from(
       partition.subscribers.values(),
       (subscriber) => subscriber.workspaceScope,
@@ -362,12 +360,10 @@ function applyProjectedEvent(
   }
 }
 
-function terminateHost(partition: HostPartition, message: string): void {
+function terminateHost(partition: HostPartition, error: ConnectionError): void {
   if (!hostStreams.isCurrent(partition)) return;
-  hostStreams.broadcastPartition(
-    partition,
-    classifyError(message, "stream"),
-  );
+  partition.resource.connected = false;
+  hostStreams.broadcastPartition(partition, error);
   hostStreams.closeHost(partition.hostUrl, partition);
   if (hostStreams.size === 0) void stopHeartbeat();
 }
@@ -379,7 +375,14 @@ function startHostBridge(partition: HostPartition): void {
   void createAHPBridge({
     hostUrl: partition.hostUrl,
     signal: partition.resource.abortController.signal,
-    onEvent(event: BridgeEvent) {
+    onEvent(incoming: BridgeEvent) {
+      if (!hostStreams.isCurrent(partition)) return;
+      if (incoming.type === "error") {
+        terminateHost(partition, incoming);
+        return;
+      }
+      // Bridge payloads are plain data; capture their state before queueing.
+      const event = structuredClone(incoming);
       partition.resource.streamWrites = partition.resource.streamWrites
         .then(async () => {
           if (hostStreams.get(partition.hostUrl) !== partition) return;
@@ -438,7 +441,7 @@ function startHostBridge(partition: HostPartition): void {
           }
           terminateHost(
             partition,
-            error instanceof Error ? error.message : "Connection failed",
+            classifyError(error instanceof Error ? error.message : "Connection failed", "stream"),
           );
         });
     },
@@ -451,7 +454,7 @@ function startHostBridge(partition: HostPartition): void {
     }
     terminateHost(
       partition,
-      error instanceof Error ? error.message : "Connection failed",
+      classifyError(error instanceof Error ? error.message : "Connection failed", "stream"),
     );
   });
 }
@@ -484,6 +487,7 @@ function createRemoteStream(
           );
         },
         close() {
+          closeStream();
           controller.close();
         },
       };
