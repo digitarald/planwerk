@@ -14,10 +14,14 @@ import {
   pairBlocks,
   effectiveRisk,
   pairKey,
+  signatureSourceRevisions,
   type DetectCard,
   type DetectedPair,
 } from "./coherence-detect";
 import { WORK_LEASE_MS } from "@/lib/db/work-lease-schema";
+import { resolveAuthoritativeGateRevision } from "./gate-revision";
+
+export const COHERENCE_RETRY_MS = 60_000;
 
 export interface CoherenceConfig {
   enabled: boolean;
@@ -116,6 +120,7 @@ export function syncCoherence(cards: KanbanCard[], config: CoherenceConfig): Coh
 
   const detectCards: DetectCard[] = inFlight.map((c) => ({
     id: c.id,
+    sourceRevision: c.changesetVerified === true ? c.sourceRevision : undefined,
     workingDirectory: c.workingDirectory,
     workingDirectories: c.workingDirectories,
     risk: riskOf(c.id),
@@ -192,6 +197,14 @@ export function syncCoherence(cards: KanbanCard[], config: CoherenceConfig): Coh
       const cardGone =
         !a || !b || a.isArchived || b.isArchived || a.phase === "ship" || b.phase === "ship";
 
+      // Losing live enrichment is not proof that the overlap disappeared.
+      if (!stillDetected && !cardGone &&
+          (a.phase === "build" || a.phase === "review") &&
+          (b.phase === "build" || b.phase === "review") &&
+          (a.changesetVerified !== true || b.changesetVerified !== true)) {
+        continue;
+      }
+
       if (!stillDetected || cardGone) {
         db.prepare(
           `UPDATE coherence_conflicts
@@ -211,9 +224,10 @@ export function syncCoherence(cards: KanbanCard[], config: CoherenceConfig): Coh
     if (!p.escalate) continue;
     const dbRow = db
       .prepare(
-        `SELECT * FROM coherence_conflicts WHERE card_a = ? AND card_b = ? AND status = 'detected'`
+        `SELECT * FROM coherence_conflicts WHERE card_a = ? AND card_b = ? AND status = 'detected'
+           AND COALESCE(review_lease_expires_at_ms, 0) <= ?`
       )
-      .get(p.cardA, p.cardB) as CoherenceRowDb | undefined;
+      .get(p.cardA, p.cardB, Date.now()) as CoherenceRowDb | undefined;
     if (dbRow) escalatable.push(mapRow(dbRow));
   }
 
@@ -233,9 +247,10 @@ export function claimForReviewOwner(
       `UPDATE coherence_conflicts
        SET status = 'reviewing', review_owner_id = ?,
            review_lease_expires_at_ms = ?, updated_at = datetime('now')
-       WHERE id = ? AND status = 'detected' AND signature = ?`
+       WHERE id = ? AND status = 'detected' AND signature = ?
+         AND COALESCE(review_lease_expires_at_ms, 0) <= ?`
     )
-    .run(ownerId, now + leaseMs, rowId, signature);
+    .run(ownerId, now + leaseMs, rowId, signature, now);
   return res.changes > 0;
 }
 
@@ -260,6 +275,48 @@ export function renewCoherenceReviewLease(
   ).changes === 1;
 }
 
+function hasCurrentSources(row: CoherenceRowDb, hostUrl?: string): boolean {
+  const sources = signatureSourceRevisions(row.signature);
+  return [row.card_a, row.card_b].every((cardId) => {
+    const current = resolveAuthoritativeGateRevision(getDb(), cardId, "build", hostUrl);
+    return current.ok && sources.get(cardId) === current.sourceRevision;
+  });
+}
+
+/** Recheck ownership and source facts after each asynchronous boundary. */
+export function isCoherenceReviewCurrent(
+  rowId: number,
+  signature: string,
+  ownerId: string,
+  hostUrl: string,
+  now = Date.now(),
+): boolean {
+  const row = getDb().prepare(`
+    SELECT * FROM coherence_conflicts
+    WHERE id = ? AND status = 'reviewing' AND signature = ?
+      AND review_owner_id = ? AND review_lease_expires_at_ms > ?
+  `).get(rowId, signature, ownerId, now) as CoherenceRowDb | undefined;
+  return Boolean(row && hasCurrentSources(row, hostUrl));
+}
+
+/** Retryable infrastructure/evidence failures are not human review verdicts. */
+export function deferCoherenceReview(
+  rowId: number,
+  signature: string,
+  ownerId: string,
+  reason: string,
+  now = Date.now(),
+): boolean {
+  return getDb().prepare(`
+    UPDATE coherence_conflicts
+    SET status = 'detected', verdict_summary = ?, findings_json = NULL,
+        resolved_at = NULL, resolved_by = NULL, review_owner_id = NULL,
+        review_lease_expires_at_ms = ?, updated_at = datetime('now')
+    WHERE id = ? AND status = 'reviewing' AND signature = ?
+      AND review_owner_id = ? AND review_lease_expires_at_ms > ?
+  `).run(reason, now + COHERENCE_RETRY_MS, rowId, signature, ownerId, now).changes === 1;
+}
+
 /** Race-safe verdict write: only applies if the row is still reviewing the same
  *  signature (a human dismiss or a fresh signature otherwise wins). */
 export function completeReview(
@@ -268,30 +325,37 @@ export function completeReview(
   verdict: { status: "conflict" | "coherent" | "needs-human"; summary: string; findings: string[] },
   ownerId: string,
   now = Date.now(),
+  hostUrl?: string,
 ): boolean {
   const db = getDb();
   const resolved = verdict.status === "coherent";
-  const res = db
-    .prepare(
-      `UPDATE coherence_conflicts
+  return db.transaction(() => {
+    const row = db.prepare(`
+      SELECT * FROM coherence_conflicts WHERE id = ? AND signature = ?
+    `).get(rowId, signature) as CoherenceRowDb | undefined;
+    if (!row || !hasCurrentSources(row, hostUrl)) return false;
+    const res = db
+      .prepare(
+        `UPDATE coherence_conflicts
          SET status = ?, verdict_summary = ?, findings_json = ?,
              resolved_at = ${resolved ? "datetime('now')" : "NULL"},
              resolved_by = ${resolved ? "'reviewer'" : "NULL"},
              updated_at = datetime('now'),
-             review_lease_expires_at_ms = NULL
+             review_lease_expires_at_ms = NULL, review_owner_id = NULL
        WHERE id = ? AND status = 'reviewing' AND signature = ?
          AND review_owner_id = ? AND review_lease_expires_at_ms > ?`
-    )
-    .run(
-      verdict.status,
-      verdict.summary,
-      JSON.stringify(verdict.findings),
-      rowId,
-      signature,
-      ownerId,
-      now,
-    );
-  return res.changes > 0;
+      )
+      .run(
+        verdict.status,
+        verdict.summary,
+        JSON.stringify(verdict.findings),
+        rowId,
+        signature,
+        ownerId,
+        now,
+      );
+    return res.changes > 0;
+  }).immediate();
 }
 
 /** Human "Accept divergence": dismiss the pair for its current signature. A later
@@ -342,6 +406,24 @@ export function getShipBlockingConflicts(
   config: CoherenceConfig = DEFAULT_COHERENCE_CONFIG
 ): CoherenceRow[] {
   if (!config.enabled) return [];
+  const db = getDb();
+  db.transaction(() => {
+    const settled = db.prepare(`
+      SELECT * FROM coherence_conflicts
+      WHERE (card_a = ? OR card_b = ?)
+        AND (status = 'dismissed' OR (status = 'coherent' AND resolved_by = 'reviewer'))
+    `).all(cardId, cardId) as CoherenceRowDb[];
+    for (const row of settled) {
+      if (hasCurrentSources(row)) continue;
+      db.prepare(`
+        UPDATE coherence_conflicts
+        SET status = 'detected', verdict_summary = NULL, findings_json = NULL,
+            resolved_at = NULL, resolved_by = NULL, review_owner_id = NULL,
+            review_lease_expires_at_ms = NULL, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(row.id);
+    }
+  }).immediate();
   return getOpenConflictsForCard(cardId).filter((row) =>
     pairBlocks(row.status, riskOf(row.cardA), riskOf(row.cardB), {
       blockHighRiskShip: config.blockHighRiskShip,

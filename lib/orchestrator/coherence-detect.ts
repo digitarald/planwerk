@@ -52,6 +52,7 @@ export interface DetectFile {
  *  (conservative) risk — use {@link effectiveRisk} before passing it in. */
 export interface DetectCard {
   id: string;
+  sourceRevision?: string;
   workingDirectory?: string;
   workingDirectories?: string[];
   risk: RiskLevel;
@@ -128,8 +129,8 @@ export function shouldEscalate(tier: CoherenceTier, riskA: RiskLevel, riskB: Ris
 /**
  * Deterministic signature for a pair — the staleness key. Changes whenever the
  * shared surface or either card's edits to it change, so a changed signature
- * forces a fresh verdict. Built only from the overlapping surface (not each
- * card's entire diff) so unrelated edits don't thrash the review.
+ * forces a fresh verdict. The host source revision is a conservative fence:
+ * equal paths/counts alone never prove equal code.
  */
 export function computeSignature(
   tier: CoherenceTier,
@@ -138,7 +139,7 @@ export function computeSignature(
   cardB: DetectCard,
   moduleDepth: number
 ): string {
-  const part = (card: DetectCard): string => {
+  const part = (card: DetectCard) => {
     const relevant = card.files
       .filter((f) => {
         if (tier === "file") return overlapPaths.includes(f.path);
@@ -146,12 +147,29 @@ export function computeSignature(
         const key = moduleKeyOf(f.path, card.workingDirectory, moduleDepth);
         return key !== null && overlapPaths.includes(key);
       })
-      .map((f) => `${toRelative(f.path, card.workingDirectory)}:${f.added}:${f.removed}`)
-      .sort();
-    return `${card.id}=${relevant.join(",")}`;
+      .map((f) => [toRelative(f.path, card.workingDirectory), f.added, f.removed] as const)
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    return [card.id, card.sourceRevision?.trim() ? card.sourceRevision : null, relevant];
   };
   const [a, b] = cardA.id <= cardB.id ? [cardA, cardB] : [cardB, cardA];
-  return `${tier}|${[...overlapPaths].sort().join(",")}|${part(a)}|${part(b)}`;
+  return JSON.stringify(["coherence-v2", tier, [...overlapPaths].sort(), part(a), part(b)]);
+}
+
+/** Legacy/count-only signatures cannot authorize a source-bound verdict. */
+export function signatureSourceRevisions(signature: string): Map<string, string> {
+  try {
+    const value: unknown = JSON.parse(signature);
+    if (!Array.isArray(value) || value[0] !== "coherence-v2") return new Map();
+    const sources = new Map<string, string>();
+    for (const part of [value[3], value[4]]) {
+      if (!Array.isArray(part) || typeof part[0] !== "string" ||
+          typeof part[1] !== "string" || !part[1].trim()) return new Map();
+      sources.set(part[0], part[1]);
+    }
+    return sources;
+  } catch {
+    return new Map();
+  }
 }
 
 /**

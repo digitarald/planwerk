@@ -98,11 +98,13 @@ const hooks = registerHooks({
     if (specifier === "./coherence-engine") {
       source = `export function claimForReviewOwner() { return true; }
         export function completeReview() { return true; }
+        export function isCoherenceReviewCurrent() { return true; }
+        export function deferCoherenceReview() { return true; }
         export function renewCoherenceReviewLease() {}`;
     }
     if (specifier === "./coherence-content") {
       source = `export async function fetchOverlapContent() {
-        return {failed:false,files:[{path:"README.md",content:"Documentation",truncated:false}]};
+        return {status:"ready",failed:false,files:[{path:"README.md",content:"Documentation",truncated:false}]};
       }`;
     }
     if (specifier === "@/lib/db/work-lease-schema") {
@@ -226,7 +228,7 @@ test("SDK timeouts still abort one-shot work before deleting and releasing it", 
   assert.deepEqual(state.calls, ["abort", "delete", "release"]);
 });
 
-test("coherence caller uses a typed verdict and escalates contradictory results", async () => {
+test("coherence caller uses a typed verdict and defers contradictory results", async () => {
   const row = {
     id: 1,
     cardA: "a",
@@ -247,10 +249,10 @@ test("coherence caller uses a typed verdict and escalates contradictory results"
   assert.deepEqual(state.calls, ["delete", "release"]);
 
   reset({ status: "coherent", summary: "Looks fine.", findings: ["Collision"] });
-  const [invalid] = await runCoherenceExecutor("ws://localhost", [{
+  const invalid = await runCoherenceExecutor("ws://localhost", [{
     ...row, overlapPaths: [...row.overlapPaths],
   }], new Map());
-  assert.equal(invalid.status, "needs-human");
+  assert.deepEqual(invalid, []);
   assert.deepEqual(state.calls, ["abort", "delete", "release"]);
 });
 

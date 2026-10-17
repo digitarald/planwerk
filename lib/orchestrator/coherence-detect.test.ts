@@ -8,6 +8,7 @@ import {
   effectiveRisk,
   pairBlocks,
   computeSignature,
+  signatureSourceRevisions,
   type DetectCard,
 } from "./coherence-detect.ts";
 
@@ -95,6 +96,19 @@ test("signature is order-independent for the pair", () => {
   const sigAB = computeSignature("file", ["/repo/src/x/foo.ts"], a, b, 2);
   const sigBA = computeSignature("file", ["/repo/src/x/foo.ts"], b, a, 2);
   assert.equal(sigAB, sigBA);
+});
+
+test("equal paths and line counts cannot reuse verdicts across source revisions", () => {
+  const a = { ...card("a", [["/repo/src/x/foo.ts", 10, 2]]), sourceRevision: "source-a" };
+  const b = { ...card("b", [["/repo/src/x/foo.ts", 3, 1]]), sourceRevision: "source-b" };
+  const signature = computeSignature("file", ["/repo/src/x/foo.ts"], a, b, 2);
+  assert.notEqual(signature,
+    computeSignature("file", ["/repo/src/x/foo.ts"], { ...a, sourceRevision: "source-a2" }, b, 2));
+  assert.deepEqual([...signatureSourceRevisions(signature)], [["a", "source-a"], ["b", "source-b"]]);
+  assert.equal(signatureSourceRevisions("file|old-count-only-signature").size, 0);
+  assert.equal(signatureSourceRevisions(computeSignature(
+    "file", ["/repo/src/x/foo.ts"], { ...a, sourceRevision: undefined }, b, 2,
+  )).size, 0);
 });
 
 test("moduleKeyOf ignores bare common roots but keeps deeper modules", () => {

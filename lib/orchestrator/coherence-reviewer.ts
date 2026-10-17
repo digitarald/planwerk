@@ -14,6 +14,8 @@ import {
 import {
   claimForReviewOwner,
   completeReview,
+  deferCoherenceReview,
+  isCoherenceReviewCurrent,
   renewCoherenceReviewLease,
   type CoherenceRow,
 } from "./coherence-engine";
@@ -46,6 +48,13 @@ export interface CoherenceReviewOutcome {
 /** How many pairs a single executor pass will review — bounds LLM cost per tick. */
 const MAX_REVIEWS_PER_PASS = 2;
 
+type PairReviewResult =
+  | {
+      kind: "verdict";
+      verdict: { status: "conflict" | "coherent" | "needs-human"; summary: string; findings: string[] };
+    }
+  | { kind: "deferred"; reason: string };
+
 const SYSTEM_PROMPT = `You are a coherence reviewer for a system that runs multiple AI coding agents in parallel on the same repository.
 
 Two concurrent, independent agent sessions ("Card A" and "Card B") have both edited overlapping code. Each was correct in isolation, but they never saw each other's work. Your job is to judge whether their changes will COHERE (integrate cleanly) or CONFLICT (clash, contradict, or drift architecturally) when both land.
@@ -72,7 +81,7 @@ function renderCardContent(label: string, ctx: ReviewCardCtx, content: CardOverl
     lines.push("(no file content available — degraded evidence)");
   } else {
     for (const f of content.files) {
-      lines.push(`File \`${f.path}\`${f.truncated ? " (truncated)" : ""}:\n\`\`\`\n${f.content}\n\`\`\``);
+      lines.push(`File \`${f.path}\`${f.deleted ? " (deleted; previous content)" : ""}${f.truncated ? " (truncated)" : ""}:\n\`\`\`\n${f.content}\n\`\`\``);
     }
   }
   return lines.join("\n\n");
@@ -107,8 +116,13 @@ function highRiskInvolved(cardA: string, cardB: string): boolean {
 async function reviewPair(
   hostUrl: string,
   row: CoherenceRow,
-  ctxById: Map<string, ReviewCardCtx>
-): Promise<{ status: "conflict" | "coherent" | "needs-human"; summary: string; findings: string[] }> {
+  ctxById: Map<string, ReviewCardCtx>,
+  isCurrent: () => boolean,
+): Promise<PairReviewResult> {
+  const stale: PairReviewResult = {
+    kind: "deferred", reason: "Coherence review deferred: source revision or owner lease changed.",
+  };
+  if (!isCurrent()) return stale;
   const a = ctxById.get(row.cardA) ?? { id: row.cardA, title: row.cardA };
   const b = ctxById.get(row.cardB) ?? { id: row.cardB, title: row.cardB };
 
@@ -117,25 +131,26 @@ async function reviewPair(
     fetchOverlapContent(hostUrl, row.cardB, row.tier, row.overlapPaths),
   ]);
 
-  // Fail-safe: if we couldn't read code for a high-risk pair, don't judge on thin
-  // evidence — keep it blocked as needs-human.
-  if ((aContent.failed || bContent.failed) && highRiskInvolved(row.cardA, row.cardB)) {
+  if (aContent.status !== "ready" || bContent.status !== "ready" ||
+      aContent.files.length === 0 || bContent.files.length === 0) {
     return {
-      status: "needs-human",
-      summary: "Could not read overlapping code for a high-risk pair; needs human review.",
-      findings: [],
+      kind: "deferred",
+      reason: "Coherence review deferred: overlapping session code is unavailable or incomplete.",
     };
   }
+  if (!isCurrent()) return stale;
 
   let client: CopilotClient | undefined;
   let runtimeLease: CopilotRuntimeLease<CopilotClient> | undefined;
   try {
     runtimeLease = await acquireCopilotRuntimeClient();
     client = runtimeLease.client;
+    if (!isCurrent()) return stale;
     const selectedModel = await selectOrchestratorModel(client, {
       role: "review",
       risk: highRiskInvolved(row.cardA, row.cardB) ? "high" : "medium",
     });
+    if (!isCurrent()) return stale;
     const session = await client.createSession({
       model: selectedModel.model,
       reasoningEffort: selectedModel.reasoningEffort,
@@ -145,6 +160,7 @@ async function reviewPair(
     });
     let responseCompleted = false;
     try {
+      if (!isCurrent()) return stale;
       const response = await session.sendAndWait(
         {
           prompt: buildPrompt(row.tier, row.overlapPaths, a, b, aContent, bContent),
@@ -154,7 +170,7 @@ async function reviewPair(
         45_000
       );
       responseCompleted = true;
-      return response;
+      return { kind: "verdict", verdict: response };
     } finally {
       const cleanup = await disposeOneShotSession(
         client,
@@ -185,11 +201,9 @@ async function reviewPair(
     await releaseRuntimeLease(runtimeLease, "[coherence-reviewer]");
   }
 
-  // Reviewer unavailable → don't fabricate a verdict; defer to human.
   return {
-    status: "needs-human",
-    summary: "Coherence reviewer unavailable; needs human review.",
-    findings: [],
+    kind: "deferred",
+    reason: "Coherence reviewer unavailable; review will retry.",
   };
 }
 
@@ -217,17 +231,28 @@ export async function runCoherenceExecutor(
       renewCoherenceReviewLease(row.id, row.signature, ownerId);
     }, Math.max(1, Math.floor(WORK_LEASE_MS / 3)));
     renewal.unref();
-    let verdict;
+    let result: PairReviewResult;
     try {
-      verdict = await reviewPair(hostUrl, row, ctxById);
+      result = await reviewPair(hostUrl, row, ctxById, () =>
+        isCoherenceReviewCurrent(row.id, row.signature, ownerId, hostUrl));
+    } catch (error) {
+      console.warn("[coherence-reviewer] Review deferred:", error);
+      result = { kind: "deferred", reason: "Coherence review unavailable; review will retry." };
     } finally {
       clearInterval(renewal);
     }
+    if (result.kind === "deferred") {
+      deferCoherenceReview(row.id, row.signature, ownerId, result.reason);
+      continue;
+    }
+    const { verdict } = result;
     const applied = completeReview(
       row.id,
       row.signature,
       verdict,
       ownerId,
+      Date.now(),
+      hostUrl,
     );
     if (applied) {
       outcomes.push({
@@ -237,6 +262,11 @@ export async function runCoherenceExecutor(
         status: verdict.status,
         summary: verdict.summary,
       });
+    } else {
+      deferCoherenceReview(
+        row.id, row.signature, ownerId,
+        "Coherence review deferred: source revision or owner lease changed.",
+      );
     }
   }
 
