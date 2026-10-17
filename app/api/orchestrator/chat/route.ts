@@ -32,6 +32,7 @@ import {
 import type { OrchestratorToolResultEvent } from "@/lib/orchestrator/orchestrator-tools";
 import {
   createSdkEventMapper,
+  isPrimarySdkSessionTermination,
   mapSdkFailure,
 } from "@/lib/orchestrator/orchestrator-stream";
 import { selectOrchestratorModel } from "@/lib/orchestrator/model";
@@ -41,6 +42,7 @@ import {
   isCopilotRuntimeInvalidatingFailure,
 } from "@/lib/orchestrator/sdk-runtime";
 import type { CopilotRuntimeLease } from "@/lib/orchestrator/sdk-runtime-manager";
+import { withSdkCleanupTimeout } from "@/lib/orchestrator/sdk-lifecycle";
 import {
   executeToolCall,
   getAuthoritativeApprovalBinding,
@@ -249,6 +251,12 @@ export async function POST(request: NextRequest) {
   try {
     runtimeLease = await acquireCopilotRuntimeClient();
   } catch (error) {
+    if (request.signal.aborted) {
+      return NextResponse.json(
+        { error: "request was cancelled before submission", retryable: true },
+        { status: 499 },
+      );
+    }
     console.warn(
       "[orchestrator-chat] Failed to start Copilot SDK:",
       error instanceof Error ? error.message : error,
@@ -260,6 +268,7 @@ export async function POST(request: NextRequest) {
   const continuityStore = getCtoContinuityStore();
   const sessionManager = new CtoSessionManager(continuityStore);
   const lifecycleAbort = new AbortController();
+  const lifecycleSignal = AbortSignal.any([request.signal, lifecycleAbort.signal]);
   const queuedApprovals: CtoPendingApprovalDecision[] = [];
   let deliverApproval:
     | ((approval: CtoPendingApprovalDecision) => void)
@@ -267,7 +276,7 @@ export async function POST(request: NextRequest) {
   const permissionPolicy = createCtoPermissionPolicy({
     store: continuityStore,
     resolveBinding: getAuthoritativeApprovalBinding,
-    signal: lifecycleAbort.signal,
+    signal: lifecycleSignal,
     onApprovalRequired: (approval) => {
       if (deliverApproval) deliverApproval(approval);
       else queuedApprovals.push(approval);
@@ -275,10 +284,12 @@ export async function POST(request: NextRequest) {
   });
   let sessionHandle: CtoSessionHandle;
   try {
+    request.signal.throwIfAborted();
     const client = runtimeLease.client;
     const selectedModel = await selectOrchestratorModel(client, {
       role: "conversation",
     });
+    request.signal.throwIfAborted();
     const tools = actionsEnabled
       ? createOrchestratorSdkTools({
           dispatch: (toolName, args, auditKey, invocation) =>
@@ -288,7 +299,7 @@ export async function POST(request: NextRequest) {
               idempotencyKey: auditKey,
               sdkSessionId: invocation.sessionId,
               toolCallId: invocation.toolCallId,
-              signal: lifecycleAbort.signal,
+              signal: lifecycleSignal,
             }),
           onResult: (event) => toolResults.set(event.toolCallId, event),
         })
@@ -314,10 +325,20 @@ export async function POST(request: NextRequest) {
       client,
       selectedModel.model,
       sessionConfig,
-      { invalidateRuntime: (reason) => runtimeLease.invalidate(reason) },
+      {
+        invalidateRuntime: (reason) => runtimeLease.invalidate(reason),
+        signal: request.signal,
+      },
     );
   } catch (error) {
     permissionPolicy.cancelPending();
+    if (request.signal.aborted) {
+      await releaseRuntimeLease(runtimeLease, "[orchestrator-chat]");
+      return NextResponse.json(
+        { error: "request was cancelled before submission", retryable: true },
+        { status: 499 },
+      );
+    }
     if (error instanceof CtoSessionLeaseBusyError) {
       await releaseRuntimeLease(runtimeLease, "[orchestrator-chat]");
       return NextResponse.json(
@@ -330,7 +351,15 @@ export async function POST(request: NextRequest) {
       error instanceof Error ? error.message : error,
     );
     if (isCopilotRuntimeInvalidatingFailure(error)) {
-      await runtimeLease.invalidate(error).catch(() => {});
+      await withSdkCleanupTimeout(
+        () => runtimeLease.invalidate(error),
+        "invalidate-runtime",
+      ).catch((invalidationError) => {
+        console.warn(
+          "[orchestrator-chat] Failed to invalidate Copilot SDK runtime:",
+          invalidationError instanceof Error ? invalidationError.message : invalidationError,
+        );
+      });
     }
     await releaseRuntimeLease(runtimeLease, "[orchestrator-chat]");
     return degradedResponse(error, message, cards, selectedCard);
@@ -369,7 +398,10 @@ export async function POST(request: NextRequest) {
       );
       cleanupInvalidationReason ??= cleanupFailure?.error;
       if (cleanupInvalidationReason !== undefined) {
-        await runtimeLease.invalidate(cleanupInvalidationReason).catch((error) => {
+        await withSdkCleanupTimeout(
+          () => runtimeLease.invalidate(cleanupInvalidationReason),
+          "invalidate-runtime",
+        ).catch((error) => {
           console.warn(
             "[orchestrator-chat] Failed to invalidate Copilot SDK runtime:",
             error instanceof Error ? error.message : error
@@ -418,7 +450,7 @@ export async function POST(request: NextRequest) {
         deliverApproval(approval);
       }
       const unsubscribe = session.on((event) => {
-        if (event.type === "session.shutdown" || event.type === "session.error") {
+        if (isPrimarySdkSessionTermination(event)) {
           lifecycleAbort.abort();
           permissionPolicy.cancelPending();
         }
@@ -572,7 +604,10 @@ export async function DELETE(request: NextRequest) {
       );
     }
     if (runtimeLease && isCopilotRuntimeInvalidatingFailure(error)) {
-      await runtimeLease.invalidate(error).catch((resetError) => {
+      await withSdkCleanupTimeout(
+        () => runtimeLease!.invalidate(error),
+        "invalidate-runtime",
+      ).catch((resetError) => {
         console.warn(
           "[orchestrator-chat] Failed to invalidate Copilot SDK runtime after clear failure:",
           resetError instanceof Error ? resetError.message : resetError,

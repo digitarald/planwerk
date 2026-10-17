@@ -13,6 +13,12 @@ import {
   type CopilotCleanupReport,
 } from "./copilot-session.ts";
 import { runLeaseRenewalTick } from "./lease-renewal.ts";
+import {
+  CopilotCleanupTimeoutError,
+  withSdkCleanupTimeout,
+  type SdkCleanupOperation,
+  type SdkCleanupOptions,
+} from "./sdk-lifecycle.ts";
 
 type ManagedSession = Pick<
   CopilotSession,
@@ -43,13 +49,11 @@ export class CtoSessionLeaseLostError extends Error {
   }
 }
 
-export class CtoSessionCleanupTimeoutError extends Error {
-  readonly code = "CTO_SESSION_CLEANUP_TIMEOUT";
+export class CtoSessionCleanupTimeoutError extends CopilotCleanupTimeoutError {
+  override readonly code = "CTO_SESSION_CLEANUP_TIMEOUT";
 
-  constructor(operation: "delete" | "disconnect", timeoutMs: number) {
-    super(
-      `Copilot SDK session ${operation} exceeded the ${timeoutMs}ms cleanup timeout`,
-    );
+  constructor(operation: SdkCleanupOperation, timeoutMs: number) {
+    super(operation, timeoutMs);
     this.name = "CtoSessionCleanupTimeoutError";
   }
 }
@@ -78,6 +82,7 @@ export interface CtoSessionHandle {
 
 export interface CtoSessionOpenOptions {
   invalidateRuntime?: (reason: unknown) => Promise<unknown>;
+  signal?: AbortSignal;
 }
 
 export class CtoSessionManager {
@@ -111,26 +116,39 @@ export class CtoSessionManager {
     );
   }
 
-  private async withCleanupTimeout<T>(
-    operation: Promise<T>,
-    name: "delete" | "disconnect",
+  private get cleanupOptions(): SdkCleanupOptions {
+    return {
+      timeoutMs: this.cleanupTimeoutMs,
+      timeoutError: (operation, timeoutMs) =>
+        new CtoSessionCleanupTimeoutError(operation, timeoutMs),
+    };
+  }
+
+  private withCleanupTimeout<T>(
+    operation: () => Promise<T>,
+    name: SdkCleanupOperation,
   ): Promise<T> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    return withSdkCleanupTimeout(operation, name, this.cleanupOptions);
+  }
+
+  private async invalidateRuntime(
+    reason: unknown,
+    options: CtoSessionOpenOptions,
+    report: CopilotCleanupReport,
+  ): Promise<void> {
+    if (!options.invalidateRuntime) return;
     try {
-      return await Promise.race([
-        operation,
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(
-            () => reject(
-              new CtoSessionCleanupTimeoutError(name, this.cleanupTimeoutMs),
-            ),
-            this.cleanupTimeoutMs,
-          );
-          timer.unref();
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
+      await this.withCleanupTimeout(
+        () => options.invalidateRuntime!(reason),
+        "invalidate-runtime",
+      );
+    } catch (error) {
+      addCleanupFailure(
+        report,
+        "invalidate-runtime",
+        error,
+        "[cto-session-manager]",
+      );
     }
   }
 
@@ -182,24 +200,13 @@ export class CtoSessionManager {
     );
     if (!deletionToken) return report;
 
-    try {
-      const disconnected = await this.withCleanupTimeout(
-        disconnectCopilotSession(
-          session,
-          true,
-          "[cto-session-manager]",
-        ),
-        "disconnect",
-      );
-      report.failures.push(...disconnected.failures);
-    } catch (error) {
-      addCleanupFailure(
-        report,
-        "disconnect",
-        error,
-        "[cto-session-manager]",
-      );
-    }
+    const disconnected = await disconnectCopilotSession(
+      session,
+      true,
+      "[cto-session-manager]",
+      this.cleanupOptions,
+    );
+    report.failures.push(...disconnected.failures);
 
     if (report.failures.length === 0) {
       try {
@@ -252,7 +259,7 @@ export class CtoSessionManager {
 
     try {
       await this.withCleanupTimeout(
-        client.deleteSession(session.sessionId),
+        () => client.deleteSession(session.sessionId),
         "delete",
       );
       if (deletionToken) {
@@ -281,24 +288,13 @@ export class CtoSessionManager {
         error,
         "[cto-session-manager]",
       );
-      try {
-        const fallback = await this.withCleanupTimeout(
-          disconnectCopilotSession(
-            session,
-            true,
-            "[cto-session-manager]",
-          ),
-          "disconnect",
-        );
-        report.failures.push(...fallback.failures);
-      } catch (disconnectError) {
-        addCleanupFailure(
-          report,
-          "disconnect",
-          disconnectError,
-          "[cto-session-manager]",
-        );
-      }
+      const fallback = await disconnectCopilotSession(
+        session,
+        true,
+        "[cto-session-manager]",
+        this.cleanupOptions,
+      );
+      report.failures.push(...fallback.failures);
     }
     return report;
   }
@@ -320,7 +316,7 @@ export class CtoSessionManager {
     }
     try {
       await this.withCleanupTimeout(
-        client.deleteSession(sessionId),
+        () => client.deleteSession(sessionId),
         "delete",
       );
     } catch (error) {
@@ -343,6 +339,7 @@ export class CtoSessionManager {
     config: SessionConfig,
     options: CtoSessionOpenOptions = {},
   ): Promise<CtoSessionHandle> {
+    options.signal?.throwIfAborted();
     const ownerId = randomUUID();
     if (!this.store.acquireLease("primary", ownerId, this.leaseTtlMs)) {
       throw new CtoSessionLeaseBusyError();
@@ -350,6 +347,10 @@ export class CtoSessionManager {
     let activeSession: ManagedSession | undefined;
     let createdSession = false;
     const leaseState: { failure?: unknown } = {};
+    const assertOpen = () => {
+      options.signal?.throwIfAborted();
+      this.assertLease(ownerId, leaseState);
+    };
     const renewalTimer = this.renewalScheduler.set(() => {
       runLeaseRenewalTick(
         leaseState,
@@ -359,7 +360,12 @@ export class CtoSessionManager {
           this.leaseTtlMs,
         ),
         () => {
-          void activeSession?.abort().catch((abortError) => {
+          const session = activeSession;
+          if (!session) return;
+          void this.withCleanupTimeout(
+            () => session.abort(),
+            "abort",
+          ).catch((abortError) => {
             console.warn(
               "[cto-session-manager] Failed to abort after lease renewal failure:",
               abortError instanceof Error ? abortError.message : abortError,
@@ -371,6 +377,7 @@ export class CtoSessionManager {
     }, Math.max(1, Math.floor(this.leaseTtlMs / 3)));
 
     try {
+      assertOpen();
       const persistedBinding = this.store.getSessionBinding();
       if (persistedBinding?.lifecycleState === "deleting") {
         await this.reconcileDeletion(
@@ -379,14 +386,16 @@ export class CtoSessionManager {
           ownerId,
           leaseState,
         );
+        assertOpen();
       }
       const persisted = this.store.getSession();
       let session: ManagedSession | undefined;
       let resumed = false;
 
       if (persisted?.sessionId) {
+        assertOpen();
         const metadata = await client.getSessionMetadata(persisted.sessionId);
-        this.assertLease(ownerId, leaseState);
+        assertOpen();
         if (!metadata) {
           if (!this.store.clearSessionIfLeaseOwner(
             persisted.sessionId,
@@ -397,16 +406,17 @@ export class CtoSessionManager {
           }
         } else {
           try {
+            assertOpen();
             session = await client.resumeSession(
               persisted.sessionId,
               config as ResumeSessionConfig
             );
             activeSession = session;
-            this.assertLease(ownerId, leaseState);
+            assertOpen();
             resumed = true;
           } catch (error) {
             if (!this.invalidSessionError(error)) throw error;
-            this.assertLease(ownerId, leaseState);
+            assertOpen();
             if (!this.store.clearSessionIfLeaseOwner(
               persisted.sessionId,
               "primary",
@@ -419,12 +429,12 @@ export class CtoSessionManager {
       }
 
       if (!session) {
+        assertOpen();
         session = await client.createSession(config);
         activeSession = session;
-        this.assertLease(ownerId, leaseState);
         createdSession = true;
+        assertOpen();
       }
-      this.assertLease(ownerId, leaseState);
       if (!this.store.setSessionIfLeaseOwner(
         session.sessionId,
         modelId,
@@ -464,24 +474,13 @@ export class CtoSessionManager {
             }
 
             if (quarantined) {
-              try {
-                const disconnected = await this.withCleanupTimeout(
-                  disconnectCopilotSession(
-                    session,
-                    abort,
-                    "[cto-session-manager]",
-                  ),
-                  "disconnect",
-                );
-                report.failures.push(...disconnected.failures);
-              } catch (error) {
-                addCleanupFailure(
-                  report,
-                  "disconnect",
-                  error,
-                  "[cto-session-manager]",
-                );
-              }
+              const disconnected = await disconnectCopilotSession(
+                session,
+                abort,
+                "[cto-session-manager]",
+                this.cleanupOptions,
+              );
+              report.failures.push(...disconnected.failures);
 
               if (report.failures.length === 0) {
                 try {
@@ -519,16 +518,11 @@ export class CtoSessionManager {
             }
 
             const unconfirmedDisconnect = report.failures[0];
-            if (unconfirmedDisconnect && options.invalidateRuntime) {
-              await options.invalidateRuntime(unconfirmedDisconnect.error).catch(
-                (invalidationError) => {
-                  console.warn(
-                    "[cto-session-manager] Failed to retire unconfirmed disconnect runtime:",
-                    invalidationError instanceof Error
-                      ? invalidationError.message
-                      : invalidationError,
-                  );
-                },
+            if (unconfirmedDisconnect) {
+              await this.invalidateRuntime(
+                unconfirmedDisconnect.error,
+                options,
+                report,
               );
             }
             try {
@@ -554,12 +548,7 @@ export class CtoSessionManager {
         error instanceof CtoSessionCleanupTimeoutError &&
         options.invalidateRuntime
       ) {
-        await options.invalidateRuntime(error).catch((cleanupError) => {
-          console.warn(
-            "[cto-session-manager] Failed to invalidate timed-out deletion runtime:",
-            cleanupError instanceof Error ? cleanupError.message : cleanupError,
-          );
-        });
+        await this.invalidateRuntime(error, options, { failures: [] });
       }
       if (activeSession) {
         const cleanup = createdSession
@@ -570,17 +559,8 @@ export class CtoSessionManager {
             )
           : await this.cleanupResumedOpenFailure(activeSession, ownerId);
         const invalidationReason = cleanup.failures[0]?.error;
-        if (invalidationReason !== undefined && options.invalidateRuntime) {
-          await options.invalidateRuntime(invalidationReason).catch(
-            (cleanupError) => {
-              console.warn(
-                "[cto-session-manager] Failed to invalidate Copilot SDK runtime:",
-                cleanupError instanceof Error
-                  ? cleanupError.message
-                  : cleanupError,
-              );
-            },
-          );
+        if (invalidationReason !== undefined) {
+          await this.invalidateRuntime(invalidationReason, options, cleanup);
         }
       }
       try {
@@ -629,12 +609,7 @@ export class CtoSessionManager {
         error instanceof CtoSessionCleanupTimeoutError &&
         options.invalidateRuntime
       ) {
-        await options.invalidateRuntime(error).catch((cleanupError) => {
-          console.warn(
-            "[cto-session-manager] Failed to invalidate timed-out deletion runtime:",
-            cleanupError instanceof Error ? cleanupError.message : cleanupError,
-          );
-        });
+        await this.invalidateRuntime(error, options, { failures: [] });
       }
       throw error;
     } finally {

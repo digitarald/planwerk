@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  disconnectCopilotSession,
   disposeOneShotSession,
   invalidateRuntimeForCleanupFailure,
   releaseRuntimeLease,
 } from "./copilot-session.ts";
+import { CopilotCleanupTimeoutError } from "./sdk-lifecycle.ts";
 
 function createSession(calls: string[], overrides: {
   deleteSession?: () => Promise<void>;
@@ -234,4 +236,76 @@ test("runtime lease cleanup failure is surfaced without replacing a domain resul
 
   assert.equal(warnings.length, 1);
   assert.match(String(warnings[0][0]), /Failed to release/);
+});
+
+test("one-shot cleanup bounds every stalled stage and still attempts fallback", async (t) => {
+  const keepAlive = setInterval(() => {}, 1_000);
+  t.after(() => clearInterval(keepAlive));
+  t.mock.method(console, "warn", () => {});
+  const calls: string[] = [];
+  let finishAbort!: () => void;
+  const pendingAbort = new Promise<void>((resolve) => { finishAbort = resolve; });
+  const { client, session } = createSession(calls, {
+    abort: () => pendingAbort,
+    deleteSession: () => new Promise(() => {}),
+    disconnect: () => new Promise(() => {}),
+  });
+
+  const report = await disposeOneShotSession(
+    client, session, true, "[test]", { timeoutMs: 5 },
+  );
+  assert.deepEqual(calls, ["abort", "delete", "disconnect"]);
+  assert.deepEqual(report.failures.map(({ operation }) => operation), [
+    "abort", "delete", "disconnect",
+  ]);
+  assert.ok(report.failures.every(({ error }) => error instanceof CopilotCleanupTimeoutError));
+  let reason: unknown;
+  assert.equal(await invalidateRuntimeForCleanupFailure({
+    client: {},
+    generation: 1,
+    invalidate: async (error) => { reason = error; return true; },
+    release: async () => {},
+  }, report, "[test]"), true);
+  assert.equal(reason, report.failures[0].error);
+
+  finishAbort();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["abort", "delete", "disconnect"]);
+});
+
+test("disconnect proceeds after a stalled abort without claiming confirmed cleanup", async (t) => {
+  const keepAlive = setInterval(() => {}, 1_000);
+  t.after(() => clearInterval(keepAlive));
+  t.mock.method(console, "warn", () => {});
+  const calls: string[] = [];
+  const { session } = createSession(calls, {
+    abort: () => new Promise(() => {}),
+  });
+  const report = await disconnectCopilotSession(
+    session, true, "[test]", { timeoutMs: 5 },
+  );
+  assert.deepEqual(calls, ["abort", "disconnect"]);
+  assert.deepEqual(report.failures.map(({ operation }) => operation), ["abort"]);
+});
+
+test("stalled runtime invalidation and release are bounded and reported", async (t) => {
+  const keepAlive = setInterval(() => {}, 1_000);
+  t.after(() => clearInterval(keepAlive));
+  const warning = t.mock.method(console, "warn", () => {});
+  const lease = {
+    client: {},
+    generation: 1,
+    invalidate: () => new Promise<boolean>(() => {}),
+    release: () => new Promise<void>(() => {}),
+  };
+  assert.equal(await invalidateRuntimeForCleanupFailure(
+    lease,
+    { failures: [{ operation: "abort", error: new CopilotCleanupTimeoutError("abort", 5) }] },
+    "[test]",
+    { timeoutMs: 5 },
+  ), false);
+  const error = await releaseRuntimeLease(lease, "[test]", { timeoutMs: 5 });
+  assert.ok(error instanceof CopilotCleanupTimeoutError);
+  assert.equal(error.operation, "release-runtime");
+  assert.equal(warning.mock.callCount(), 2);
 });

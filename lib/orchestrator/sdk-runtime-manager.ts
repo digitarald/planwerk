@@ -5,6 +5,8 @@ import {
   ResponseError,
 } from "vscode-jsonrpc/node.js";
 
+import { withSdkCleanupTimeout } from "./sdk-lifecycle.ts";
+
 export interface ManagedCopilotRuntimeClient {
   start(): Promise<void>;
   stop(): Promise<Error[]>;
@@ -48,6 +50,7 @@ export interface CopilotRuntimeManagerOptions<TClient extends ManagedCopilotRunt
   maxResets?: number;
   resetWindowMs?: number;
   now?: () => number;
+  cleanupTimeoutMs?: number;
 }
 
 export type CopilotFailureKind =
@@ -62,7 +65,9 @@ export function classifyCopilotFailure(error: unknown): CopilotFailureKind {
   const message = errorMessage(error);
   if (
     code === "CTO_SESSION_CLEANUP_TIMEOUT" ||
-    name === "CtoSessionCleanupTimeoutError"
+    name === "CtoSessionCleanupTimeoutError" ||
+    code === "COPILOT_SDK_CLEANUP_TIMEOUT" ||
+    name === "CopilotCleanupTimeoutError"
   ) {
     return "runtime-invalidating";
   }
@@ -128,6 +133,7 @@ export class CopilotRuntimeManager<TClient extends ManagedCopilotRuntimeClient> 
   private readonly maxResets: number;
   private readonly resetWindowMs: number;
   private readonly now: () => number;
+  private readonly cleanupTimeoutMs: number;
   private client: TClient | null = null;
   private generation = 0;
   private readonly clientGeneration = new Map<TClient, number>();
@@ -149,12 +155,16 @@ export class CopilotRuntimeManager<TClient extends ManagedCopilotRuntimeClient> 
     this.maxResets = options.maxResets ?? 3;
     this.resetWindowMs = options.resetWindowMs ?? 60_000;
     this.now = options.now ?? Date.now;
+    this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? 30_000;
 
     if (this.maxResets < 1) {
       throw new Error("maxResets must be at least 1");
     }
     if (this.resetWindowMs < 1) {
       throw new Error("resetWindowMs must be at least 1");
+    }
+    if (!Number.isFinite(this.cleanupTimeoutMs) || this.cleanupTimeoutMs < 1) {
+      throw new RangeError("Copilot SDK cleanup timeout must be at least 1ms");
     }
   }
 
@@ -193,6 +203,7 @@ export class CopilotRuntimeManager<TClient extends ManagedCopilotRuntimeClient> 
       this.runtimeStatus = undefined;
 
       const client = this.createClient();
+      this.cleanupStarted.delete(client);
       try {
         await client.start();
       } catch (startError) {
@@ -243,7 +254,7 @@ export class CopilotRuntimeManager<TClient extends ManagedCopilotRuntimeClient> 
       // Explicit lease invalidation is an ownership/lifecycle decision. Callers
       // already classify ordinary domain failures before invoking it; unresolved
       // cleanup timeouts must also be able to retire this exact generation.
-      invalidate: (reason) => this.reset(client, reason),
+      invalidate: (reason) => this.reset(client, reason, generation),
       release: async () => {
         if (released) return;
         released = true;
@@ -252,9 +263,15 @@ export class CopilotRuntimeManager<TClient extends ManagedCopilotRuntimeClient> 
     };
   }
 
-  reset(failedClient: TClient | undefined, reason: unknown): Promise<boolean> {
+  reset(
+    failedClient: TClient | undefined,
+    reason: unknown,
+    expectedGeneration?: number,
+  ): Promise<boolean> {
     return this.serialize(async () => {
       if (!failedClient ||
+          (expectedGeneration !== undefined &&
+            this.clientGeneration.get(failedClient) !== expectedGeneration) ||
           (failedClient !== this.client &&
             !this.unhealthyClients.has(failedClient))) {
         return false;
@@ -413,14 +430,22 @@ export class CopilotRuntimeManager<TClient extends ManagedCopilotRuntimeClient> 
   private async stopClient(client: TClient): Promise<void> {
     const errors: Error[] = [];
     try {
-      errors.push(...(await client.stop()));
+      errors.push(...(await withSdkCleanupTimeout(
+        () => client.stop(),
+        "stop",
+        { timeoutMs: this.cleanupTimeoutMs },
+      )));
     } catch (error) {
       errors.push(asError(error));
     }
 
     if (errors.length > 0) {
       try {
-        await client.forceStop();
+        await withSdkCleanupTimeout(
+          () => client.forceStop(),
+          "force-stop",
+          { timeoutMs: this.cleanupTimeoutMs },
+        );
       } catch (error) {
         errors.push(asError(error));
       }

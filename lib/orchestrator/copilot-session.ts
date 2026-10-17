@@ -1,6 +1,10 @@
 import type { CopilotClient, CopilotSession } from "@github/copilot-sdk";
 
 import {
+  withSdkCleanupTimeout,
+  type SdkCleanupOptions,
+} from "./sdk-lifecycle.ts";
+import {
   classifyCopilotFailure,
   isCopilotRuntimeInvalidatingFailure,
   type CopilotRuntimeLease,
@@ -20,6 +24,7 @@ export type CopilotCleanupOperation =
   | "disconnect"
   | "quarantine"
   | "restore"
+  | "invalidate-runtime"
   | "renew-lease"
   | "release-lease";
 
@@ -49,7 +54,9 @@ function logCleanupFailure(
               ? "quarantine Copilot SDK session"
               : operation === "restore"
                 ? "restore Copilot SDK session binding"
-                : `${operation} Copilot SDK session`
+                : operation === "invalidate-runtime"
+                  ? "invalidate Copilot SDK runtime"
+                  : `${operation} Copilot SDK session`
     }:`,
     error instanceof Error ? error.message : error,
   );
@@ -85,12 +92,17 @@ export async function invalidateRuntimeForCleanupFailure<TClient>(
   runtimeLease: CopilotRuntimeLease<TClient>,
   report: CopilotCleanupReport,
   logPrefix: string,
+  options: SdkCleanupOptions = {},
 ): Promise<boolean> {
   const failure = getRuntimeInvalidatingCleanupFailure(report);
   if (!failure) return false;
 
   try {
-    return await runtimeLease.invalidate(failure.error);
+    return await withSdkCleanupTimeout(
+      () => runtimeLease.invalidate(failure.error),
+      "invalidate-runtime",
+      options,
+    );
   } catch (error) {
     console.warn(
       `${logPrefix} Failed to invalidate Copilot SDK runtime after ${failure.operation} failure:`,
@@ -103,9 +115,15 @@ export async function invalidateRuntimeForCleanupFailure<TClient>(
 export async function releaseRuntimeLease(
   runtimeLease: Pick<CopilotRuntimeLease<unknown>, "release"> | undefined,
   logPrefix: string,
+  options: SdkCleanupOptions = {},
 ): Promise<unknown | undefined> {
+  if (!runtimeLease) return undefined;
   try {
-    await runtimeLease?.release();
+    await withSdkCleanupTimeout(
+      () => runtimeLease.release(),
+      "release-runtime",
+      options,
+    );
     return undefined;
   } catch (error) {
     console.warn(
@@ -120,18 +138,19 @@ export async function disconnectCopilotSession(
   session: DisconnectableSession,
   abortInFlight: boolean,
   logPrefix: string,
+  options: SdkCleanupOptions = {},
 ): Promise<CopilotCleanupReport> {
   const report: CopilotCleanupReport = { failures: [] };
   if (abortInFlight) {
     try {
-      await session.abort();
+      await withSdkCleanupTimeout(() => session.abort(), "abort", options);
     } catch (error) {
       addCleanupFailure(report, "abort", error, logPrefix);
     }
   }
 
   try {
-    await session.disconnect();
+    await withSdkCleanupTimeout(() => session.disconnect(), "disconnect", options);
   } catch (error) {
     addCleanupFailure(report, "disconnect", error, logPrefix);
   }
@@ -143,22 +162,27 @@ export async function disposeOneShotSession(
   session: DisposableSession,
   abortInFlight: boolean,
   logPrefix: string,
+  options: SdkCleanupOptions = {},
 ): Promise<CopilotCleanupReport> {
   const report: CopilotCleanupReport = { failures: [] };
   if (abortInFlight) {
     try {
-      await session.abort();
+      await withSdkCleanupTimeout(() => session.abort(), "abort", options);
     } catch (error) {
       addCleanupFailure(report, "abort", error, logPrefix);
     }
   }
 
   try {
-    await client.deleteSession(session.sessionId);
+    await withSdkCleanupTimeout(
+      () => client.deleteSession(session.sessionId),
+      "delete",
+      options,
+    );
   } catch (error) {
     addCleanupFailure(report, "delete", error, logPrefix);
     try {
-      await session.disconnect();
+      await withSdkCleanupTimeout(() => session.disconnect(), "disconnect", options);
     } catch (disconnectError) {
       addCleanupFailure(report, "disconnect", disconnectError, logPrefix);
     }

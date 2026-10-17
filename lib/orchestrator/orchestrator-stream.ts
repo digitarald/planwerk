@@ -19,6 +19,11 @@ export type OrchestratorStreamEvent =
       actionsDisabled: boolean;
     };
 
+export function isPrimarySdkSessionTermination(event: SessionEvent): boolean {
+  return !event.agentId &&
+    (event.type === "session.shutdown" || event.type === "session.error");
+}
+
 export function createSdkEventMapper(
   toolResults: ReadonlyMap<string, OrchestratorToolResultEvent>,
 ) {

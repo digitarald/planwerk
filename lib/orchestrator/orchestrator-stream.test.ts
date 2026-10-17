@@ -5,6 +5,7 @@ import type { SessionEvent } from "@github/copilot-sdk";
 
 import {
   createSdkEventMapper,
+  isPrimarySdkSessionTermination,
   mapSdkFailure,
 } from "./orchestrator-stream.ts";
 
@@ -131,4 +132,33 @@ test("typed SDK and thrown failures are explicit and action-disabled", () => {
     errorType: "TypeError",
     actionsDisabled: true,
   });
+});
+
+test("child session errors and shutdowns do not cancel the primary lifecycle", () => {
+  const mapper = createSdkEventMapper(new Map());
+  const lifecycle = new AbortController();
+  for (const type of ["session.error", "session.shutdown"]) {
+    const event = sdkEvent({
+      type,
+      agentId: "child-agent",
+      data: { errorType: "child-failed", message: "Child failed" },
+    });
+    if (isPrimarySdkSessionTermination(event)) lifecycle.abort();
+    assert.equal(mapper.map(event), null);
+  }
+  assert.equal(lifecycle.signal.aborted, false);
+  assert.equal(mapper.error, null);
+  assert.deepEqual(mapper.map(sdkEvent({
+    type: "assistant.message",
+    data: { messageId: "primary-message", content: "Primary continued" },
+  })), { type: "text", content: "Primary continued" });
+});
+
+test("only primary session termination disables the primary lifecycle", () => {
+  for (const type of ["session.error", "session.shutdown"]) {
+    assert.equal(isPrimarySdkSessionTermination(sdkEvent({ type })), true);
+  }
+  assert.equal(isPrimarySdkSessionTermination(sdkEvent({
+    type: "assistant.message", data: { content: "hello" },
+  })), false);
 });

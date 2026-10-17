@@ -15,6 +15,7 @@ import {
   isCopilotRuntimeInvalidatingFailure,
   type ManagedCopilotRuntimeClient,
 } from "./sdk-runtime-manager.ts";
+import { CopilotCleanupTimeoutError } from "./sdk-lifecycle.ts";
 
 class FakeClient implements ManagedCopilotRuntimeClient {
   readonly id: number;
@@ -64,6 +65,7 @@ function createHarness(options: {
   maxResets?: number;
   resetWindowMs?: number;
   now?: () => number;
+  cleanupTimeoutMs?: number;
 } = {}) {
   const clients: FakeClient[] = [];
   const manager = new CopilotRuntimeManager({
@@ -448,4 +450,94 @@ test("deduplicates cleanup across repeated retired generations", async () => {
     clients.map((client) => client.stopCalls),
     Array.from({ length: 10 }, () => 1)
   );
+});
+
+test("runtime stop and force-stop deadlines unblock lease release and replacement", async (t) => {
+  const keepAlive = setInterval(() => {}, 1_000);
+  t.after(() => clearInterval(keepAlive));
+  const { manager } = createHarness({ cleanupTimeoutMs: 5 });
+  const retired = await manager.acquireClient();
+  let rejectStop!: (error: Error) => void;
+  retired.client.stop = () => {
+    retired.client.stopCalls++;
+    return new Promise<Error[]>((_resolve, reject) => { rejectStop = reject; });
+  };
+  retired.client.forceStop = () => {
+    retired.client.forceStopCalls++;
+    return new Promise<void>(() => {});
+  };
+  await retired.invalidate(new Error("retire generation"));
+  const replacement = await manager.acquireClient();
+  await assert.rejects(retired.release(), (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors.map((failure) => failure.operation), ["stop", "force-stop"]);
+    assert.ok(error.errors.every((failure) => failure instanceof CopilotCleanupTimeoutError));
+    assert.ok(error.errors.every(isCopilotRuntimeInvalidatingFailure));
+    return true;
+  });
+  await retired.release();
+  assert.equal(retired.client.stopCalls, 1);
+  assert.equal(retired.client.forceStopCalls, 1);
+  rejectStop(new Error("late stop failure"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(await manager.getClient(), replacement.client);
+  assert.equal(await retired.invalidate(new Error("late cleanup failure")), false);
+  assert.equal(replacement.client.stopCalls, 0);
+  await replacement.release();
+  await manager.shutdown();
+});
+
+test("shutdown deadlines preserve explicit failures and do not poison serialized startup", async (t) => {
+  const keepAlive = setInterval(() => {}, 1_000);
+  t.after(() => clearInterval(keepAlive));
+  const { manager } = createHarness({ cleanupTimeoutMs: 5 });
+  const client = await manager.getClient();
+  client.stop = () => new Promise<Error[]>(() => {});
+  await assert.rejects(manager.shutdown(), AggregateError);
+  assert.equal(client.forceStopCalls, 1);
+  assert.equal(manager.getHealth().state, "failed");
+  const replacement = await manager.getClient();
+  assert.notEqual(replacement, client);
+  await manager.shutdown();
+});
+
+test("failed startup cleanup has bounded stop and force-stop and permits retry", async (t) => {
+  const keepAlive = setInterval(() => {}, 1_000);
+  t.after(() => clearInterval(keepAlive));
+  const broken = new FakeClient(1);
+  const startError = new Error("startup failed");
+  broken.startError = startError;
+  broken.stop = () => new Promise<Error[]>(() => {});
+  broken.forceStop = () => new Promise<void>(() => {});
+  const replacement = new FakeClient(2);
+  let attempts = 0;
+  const manager = new CopilotRuntimeManager({
+    createClient: () => attempts++ === 0 ? broken : replacement,
+    cleanupTimeoutMs: 5,
+  });
+  await assert.rejects(manager.getClient(), (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.errors[0], startError);
+    assert.ok(error.errors[1] instanceof AggregateError);
+    assert.deepEqual(error.errors[1].errors.map((failure: CopilotCleanupTimeoutError) =>
+      failure.operation), ["stop", "force-stop"]);
+    return true;
+  });
+  assert.equal(await manager.getClient(), replacement);
+  await manager.shutdown();
+});
+
+test("stale leases cannot invalidate a later generation of the same client object", async () => {
+  const client = new FakeClient(1);
+  const manager = new CopilotRuntimeManager({ createClient: () => client });
+  const stale = await manager.acquireClient();
+  await stale.release();
+  await manager.shutdown();
+  const replacement = await manager.acquireClient();
+  assert.ok(replacement.generation > stale.generation);
+  assert.equal(await stale.invalidate(new Error("late failure")), false);
+  assert.equal(manager.getHealth().healthy, true);
+  await replacement.invalidate(new Error("current failure"));
+  await replacement.release();
+  assert.equal(client.stopCalls, 2);
 });

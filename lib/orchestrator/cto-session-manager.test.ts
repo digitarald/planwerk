@@ -1163,3 +1163,195 @@ test("normal release renews throughout a slow disconnect", async () => {
   assert.equal(scheduler.activeCount, 0);
   db.close();
 });
+
+test("pre-cancelled opens never acquire a lease or dispatch SDK work", async () => {
+  const { db, store, client, calls } = harness();
+  const cancellation = new AbortController();
+  cancellation.abort();
+  await assert.rejects(
+    new CtoSessionManager(store).open(client, "model-1", config, {
+      signal: cancellation.signal,
+    }),
+    { name: "AbortError" },
+  );
+  assert.deepEqual(calls, []);
+  assert.equal(store.acquireLease("primary", "next-owner", 100), true);
+  store.releaseLease("primary", "next-owner");
+  db.close();
+});
+
+for (const metadataResult of [undefined, { sessionId: "persisted" }]) {
+  test(`cancellation after metadata (${Boolean(metadataResult)}) cannot resume or replace`, async () => {
+    const { db, store, client, calls } = harness();
+    store.setSession("persisted", "model-1");
+    const metadata = deferred<unknown | undefined>();
+    client.getSessionMetadata = () => metadata.promise;
+    const cancellation = new AbortController();
+    const scheduler = manualRenewalScheduler();
+    const opening = new CtoSessionManager(store, 120_000, undefined, scheduler).open(
+      client, "model-1", config, { signal: cancellation.signal },
+    );
+    cancellation.abort();
+    metadata.resolve(metadataResult);
+    await assert.rejects(opening, { name: "AbortError" });
+    assert.deepEqual(calls, []);
+    assert.equal(store.getSession()?.sessionId, "persisted");
+    assert.equal(scheduler.activeCount, 0);
+    assert.equal(store.acquireLease("primary", "next-owner", 100), true);
+    store.releaseLease("primary", "next-owner");
+    db.close();
+  });
+}
+
+test("cancelled invalid-resume failure cannot dispatch replacement creation", async () => {
+  const { db, store, client, calls } = harness();
+  store.setSession("persisted", "model-1");
+  client.getSessionMetadata = async () => ({ sessionId: "persisted" });
+  const resume = deferred<never>();
+  client.resumeSession = () => resume.promise;
+  const cancellation = new AbortController();
+  const opening = new CtoSessionManager(store).open(client, "model-1", config, {
+    signal: cancellation.signal,
+  });
+  await Promise.resolve();
+  cancellation.abort();
+  resume.reject(new Error("session not found"));
+  await assert.rejects(opening, { name: "AbortError" });
+  assert.deepEqual(calls, []);
+  assert.equal(store.getSession()?.sessionId, "persisted");
+  db.close();
+});
+
+test("cancellation after resume cleans up without deleting durable continuity", async () => {
+  const { db, store, client, calls, makeSession } = harness();
+  store.setSession("persisted", "model-1");
+  client.getSessionMetadata = async () => ({ sessionId: "persisted" });
+  const resume = deferred<ReturnType<typeof makeSession>>();
+  client.resumeSession = () => resume.promise;
+  const cancellation = new AbortController();
+  const opening = new CtoSessionManager(store).open(client, "model-1", config, {
+    signal: cancellation.signal,
+  });
+  await Promise.resolve();
+  cancellation.abort();
+  resume.resolve(makeSession("persisted"));
+  await assert.rejects(opening, { name: "AbortError" });
+  assert.deepEqual(calls, ["abort:persisted", "disconnect:persisted"]);
+  assert.equal(store.getSession()?.sessionId, "persisted");
+  db.close();
+});
+
+test("cancellation after creation deletes the unbound owned session", async () => {
+  const { db, store, client, calls, makeSession, sessions } = harness();
+  const creation = deferred<ReturnType<typeof makeSession>>();
+  client.createSession = () => creation.promise;
+  const cancellation = new AbortController();
+  const opening = new CtoSessionManager(store).open(client, "model-1", config, {
+    signal: cancellation.signal,
+  });
+  cancellation.abort();
+  sessions.add("orphan");
+  creation.resolve(makeSession("orphan"));
+  await assert.rejects(opening, { name: "AbortError" });
+  assert.deepEqual(calls, ["delete:orphan"]);
+  assert.equal(store.getSessionBinding(), null);
+  assert.equal(sessions.has("orphan"), false);
+  assert.equal(store.acquireLease("primary", "next-owner", 100), true);
+  store.releaseLease("primary", "next-owner");
+  db.close();
+});
+
+test("lease loss after creation deletes only the orphan, not a replacement binding", async () => {
+  const { db, client, calls, makeSession, sessions } = harness();
+  let now = 10_000;
+  const staleStore = new CtoContinuityStore(db, () => now);
+  const replacementStore = new CtoContinuityStore(db, () => now);
+  const creation = deferred<ReturnType<typeof makeSession>>();
+  client.createSession = () => creation.promise;
+  const scheduler = manualRenewalScheduler();
+  let invalidations = 0;
+  const opening = new CtoSessionManager(
+    staleStore, 50, undefined, scheduler, 5,
+  ).open(client, "model-1", config, {
+    invalidateRuntime: async () => { invalidations++; },
+  });
+  now += 51;
+  assert.equal(replacementStore.acquireLease("primary", "replacement-owner", 50), true);
+  replacementStore.setSession("replacement", "model-2");
+  sessions.add("orphan");
+  sessions.add("replacement");
+  creation.resolve(makeSession("orphan"));
+
+  await assert.rejects(opening, CtoSessionLeaseLostError);
+  assert.deepEqual(calls, ["delete:orphan"]);
+  assert.equal(sessions.has("orphan"), false);
+  assert.equal(sessions.has("replacement"), true);
+  assert.equal(replacementStore.getSession()?.sessionId, "replacement");
+  assert.equal(replacementStore.hasLease("primary", "replacement-owner"), true);
+  assert.equal(scheduler.activeCount, 0);
+  assert.equal(invalidations, 0);
+  replacementStore.releaseLease("primary", "replacement-owner");
+  db.close();
+});
+
+test("cancellation after deletion reconciliation cannot create a new coordinator", async () => {
+  const { db, store, client, calls, sessions } = harness();
+  store.setSession("quarantined", "model-1");
+  assert.equal(store.acquireLease("primary", "old-owner", 1_000), true);
+  assert.equal(store.quarantineSessionForDeletion(
+    "quarantined", "primary", "old-owner", "deletion-token",
+  ), true);
+  store.releaseLease("primary", "old-owner");
+  sessions.add("quarantined");
+  const deletion = deferred();
+  const originalDelete = client.deleteSession;
+  client.deleteSession = async (sessionId) => {
+    await deletion.promise;
+    await originalDelete(sessionId);
+  };
+  const cancellation = new AbortController();
+  const opening = new CtoSessionManager(store).open(client, "model-1", config, {
+    signal: cancellation.signal,
+  });
+  cancellation.abort();
+  deletion.resolve();
+  await assert.rejects(opening, { name: "AbortError" });
+  assert.deepEqual(calls, ["delete:quarantined"]);
+  assert.equal(store.getSessionBinding(), null);
+  db.close();
+});
+
+test("stalled abort and invalidation cannot retain the coordinator SQLite lease", async (t) => {
+  const keepAlive = setInterval(() => {}, 1_000);
+  t.after(() => clearInterval(keepAlive));
+  t.mock.method(console, "warn", () => {});
+  const { db, store, client, calls } = harness();
+  t.after(() => db.close());
+  const scheduler = manualRenewalScheduler();
+  const createSession = client.createSession;
+  client.createSession = async (currentConfig) => {
+    const session = await createSession(currentConfig);
+    session.abort = () => {
+      calls.push("stalled-abort");
+      return new Promise(() => {});
+    };
+    return session;
+  };
+  const handle = await new CtoSessionManager(
+    store, 50, undefined, scheduler, 5,
+  ).open(client, "model-1", config, {
+    invalidateRuntime: () => new Promise(() => {}),
+  });
+  const releasing = handle.release({ abort: true });
+  assert.equal(handle.release(), releasing);
+  const report = await releasing;
+  assert.deepEqual(report.failures.map(({ operation }) => operation), [
+    "abort", "invalidate-runtime",
+  ]);
+  assert.ok(report.failures.every(({ error }) => error instanceof CtoSessionCleanupTimeoutError));
+  assert.deepEqual(calls, ["create:created-1", "stalled-abort", "disconnect:created-1"]);
+  assert.equal(store.getSessionBinding()?.lifecycleState, "deleting");
+  assert.equal(scheduler.activeCount, 0);
+  assert.equal(store.acquireLease("primary", "next-owner", 100), true);
+  store.releaseLease("primary", "next-owner");
+});
