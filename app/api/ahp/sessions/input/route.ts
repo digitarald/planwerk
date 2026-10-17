@@ -5,12 +5,12 @@ import type {
 } from "@microsoft/agent-host-protocol";
 
 import {
-  chatInputAnswerChanged,
-  chatInputCompleted,
   chatToolCallConfirmed,
   chatToolCallResultConfirmed,
 } from "@/lib/ahp/actions";
-import { readSessionState } from "@/lib/ahp/snapshot";
+import { withSessionState } from "@/lib/ahp/snapshot";
+import { dispatchInputCompletion } from "@/lib/ahp/session-messenger";
+import { dispatchAndConfirm, MessageDispatchAmbiguousError } from "@/lib/ahp/dispatch-confirmation";
 import { ahpErrorResponse } from "@/lib/ahp/api-error";
 import {
   findChatInputEntry,
@@ -68,8 +68,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    return await withAHPClient(hostUrl, async (client) => {
-      const sessionState = await readSessionState(client, sessionUri);
+    return await withAHPClient(hostUrl, (client) => withSessionState(client, sessionUri, async (sessionState, access) => {
       const inputNeeded = sessionState?.inputNeeded;
       if (!hasObservedInputNeeded(inputNeeded)) {
         return NextResponse.json(
@@ -88,6 +87,19 @@ export async function POST(request: NextRequest) {
           { status: 403 },
         );
       }
+      const confirmRemoval = async () => {
+        try {
+          return await access.waitFor(
+            (state) => isInputObservedRemoved(state?.inputNeeded, requestId),
+            3_000,
+          );
+        } catch (error) {
+          throw new MessageDispatchAmbiguousError(
+            "The input response was dispatched, but its consumption could not be verified.",
+            { cause: error },
+          );
+        }
+      };
 
       // ── Tool-call confirmation ──────────────────────────────────────────────
       if (isToolConfirmation) {
@@ -120,11 +132,12 @@ export async function POST(request: NextRequest) {
               selectedOptionId: decision.selectedOptionId,
             });
 
-        client.dispatch(tc.chat, action);
-        await new Promise((resolve) => setTimeout(resolve, 300));
-
-        const after = await readSessionState(client, sessionUri);
-        const inputRemoved = isInputObservedRemoved(after?.inputNeeded, requestId);
+        await dispatchAndConfirm(
+          client, tc.chat, action,
+          "The tool confirmation may have been dispatched before confirmation failed.",
+          request.signal,
+        );
+        const inputRemoved = await confirmRemoval();
         debug("tool confirmation inputRemoved:", inputRemoved);
         return NextResponse.json({ ok: true, inputRemoved });
       }
@@ -139,20 +152,13 @@ export async function POST(request: NextRequest) {
       }
       const chatUri = chatEntry.chat;
 
-      if (body.answers) {
-        for (const [questionId, answer] of Object.entries(body.answers)) {
-          client.dispatch(chatUri, chatInputAnswerChanged(requestId, questionId, answer));
-        }
-      }
-      client.dispatch(chatUri, chatInputCompleted(requestId, body.response!, body.answers));
-
-      await new Promise((resolve) => setTimeout(resolve, 300));
-
-      const after = await readSessionState(client, sessionUri);
-      const inputRemoved = isInputObservedRemoved(after?.inputNeeded, requestId);
+      await dispatchInputCompletion(
+        client, chatUri, requestId, body.response!, body.answers, request.signal,
+      );
+      const inputRemoved = await confirmRemoval();
       debug("elicitation inputRemoved:", inputRemoved);
       return NextResponse.json({ ok: true, inputRemoved });
-    });
+    }, request.signal), request.signal);
   } catch (err) {
     console.error("[ahp:input] error:", err instanceof Error ? err.message : err);
     return ahpErrorResponse(err, "Failed to submit input");

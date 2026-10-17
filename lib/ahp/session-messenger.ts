@@ -2,24 +2,19 @@ import "server-only";
 
 import { assertDefaultChatWritable } from "./chat-facts";
 
-import {
-  sessionReducer,
-  type SessionAction,
-  type SessionChatInputRequest,
-  type SessionState,
-  type Turn,
-} from "@microsoft/agent-host-protocol";
 import type {
-  AhpClient,
-  Subscription,
-} from "@microsoft/agent-host-protocol/client";
+  SessionChatInputRequest,
+  SessionState,
+  Turn,
+} from "@microsoft/agent-host-protocol";
+import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 
 import {
   awaitAbortableBoundary,
   throwIfAborted,
 } from "../abort.ts";
 import { withAHPClient } from "./client-operation";
-import { asSessionState, readChatState, readRootState, readSessionState } from "./snapshot";
+import { readChatState, readRootState, withSessionState } from "./snapshot";
 import { AHPStatus, parseAHPStatus } from "./types";
 import { buildPlanFeedbackAnswer } from "./answer-value";
 import {
@@ -56,26 +51,6 @@ const debug = (...args: unknown[]) => {
 };
 
 /**
- * Extract the defaultChat URI and session status from a session subscription.
- */
-async function getSessionContext(
-  client: AhpClient,
-  sessionUri: string,
-  requireWritable = false,
-): Promise<{ chatUri: string | null; status: number; isInProgress: boolean }> {
-  const sessionState = await readSessionState(client, sessionUri);
-  const status = sessionState?.status ?? 0;
-  const parsed = parseAHPStatus(status);
-
-  const chatUri = sessionState?.defaultChat ?? null;
-  if (chatUri && requireWritable && sessionState) {
-    await assertDefaultChatWritable(client, sessionState);
-  }
-
-  return { chatUri, status, isInProgress: parsed.isInProgress };
-}
-
-/**
  * Inject a user message into an AHP session.
  *
  * If the session is idle → dispatches chat/turnStarted (starts a new turn).
@@ -99,20 +74,18 @@ export async function injectMessageWithClient(
   queued?: boolean;
 }> {
   throwIfAborted(signal);
-  const { chatUri, isInProgress } = await awaitAbortableBoundary(
-    () => getSessionContext(client, sessionUri, true),
-    signal,
-  );
-
-  if (!chatUri) {
-    debug("No chat channel found for", sessionUri);
-    return { turnId: "", success: false };
-  }
-
-  const messageId = crypto.randomUUID();
-
-  if (isInProgress) {
-    // Session is active — queue the message for delivery after current turn
+  return withSessionState(client, sessionUri, async (sessionState, access) => {
+    if (!sessionState?.defaultChat) {
+      debug("No chat channel found for", sessionUri);
+      return { turnId: "", success: false };
+    }
+    const chatUri = sessionState.defaultChat;
+    await awaitAbortableBoundary(
+      () => assertDefaultChatWritable(client, sessionState),
+      signal,
+    );
+    const { isInProgress } = parseAHPStatus(access.getState()?.status ?? sessionState.status);
+    const messageId = crypto.randomUUID();
     beforeDispatch?.({
       chatUri,
       turnId: messageId,
@@ -121,31 +94,16 @@ export async function injectMessageWithClient(
     await dispatchAndConfirm(
       client,
       chatUri,
-      chatQueuedMessage(messageId, message),
-      "The queued message may have been dispatched before the transport failed.",
+      isInProgress ? chatQueuedMessage(messageId, message) : chatTurnStarted(messageId, message),
+      isInProgress
+        ? "The queued message may have been dispatched before the transport failed."
+        : "The message may have been dispatched before the transport failed.",
       signal,
     );
 
-    debug("Queued message for", sessionUri, "id:", messageId);
-    return { turnId: messageId, chatUri, success: true, queued: true };
-  }
-
-  // Session is idle — start a new turn directly
-  beforeDispatch?.({
-    chatUri,
-    turnId: messageId,
-    disposablePeerChat: false,
-  });
-  await dispatchAndConfirm(
-    client,
-    chatUri,
-    chatTurnStarted(messageId, message),
-    "The message may have been dispatched before the transport failed.",
-    signal,
-  );
-
-  debug("Injected message into", sessionUri, "turnId:", messageId);
-  return { turnId: messageId, chatUri, success: true };
+    debug(isInProgress ? "Queued message for" : "Injected message into", sessionUri, messageId);
+    return { turnId: messageId, chatUri, success: true, ...(isInProgress ? { queued: true } : {}) };
+  }, signal);
 }
 
 export function injectMessage(
@@ -208,20 +166,17 @@ export async function startPeerChatReview(
   },
 ): Promise<PeerChatReviewStart> {
   const signal = options?.signal;
-  return withAHPClient(hostUrl, async (client) => {
+  return withAHPClient(hostUrl, (client) => withSessionState(client, sessionUri, async (initialState, access) => {
     let reviewChatUri: string | undefined;
     let reviewChatCreated = false;
 
     try {
       throwIfAborted(signal);
-      const [sessionState, rootState] = await awaitAbortableBoundary(
-        () =>
-          Promise.all([
-            readSessionState(client, sessionUri),
-            readRootState(client),
-          ]),
+      const rootState = await awaitAbortableBoundary(
+        () => readRootState(client),
         signal,
       );
+      const sessionState = access.getState() ?? initialState;
       if (!sessionState) {
         return { success: false, reason: "Session state is unavailable." };
       }
@@ -281,7 +236,7 @@ export async function startPeerChatReview(
       console.warn("[ahp:review] Failed to start peer chat:", reason);
       return { success: false, reason };
     }
-  }, signal);
+  }, signal), signal);
 }
 
 export async function disposePeerChat(
@@ -301,16 +256,44 @@ function findChatInput(
   return findChatInputEntry(inputNeeded ?? undefined, requestId) as SessionChatInputRequest | undefined;
 }
 
+export async function dispatchInputCompletion(
+  client: AhpClient,
+  chatUri: string,
+  requestId: string,
+  response: "accept" | "decline" | "cancel",
+  answers?: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<void> {
+  let dispatched = false;
+  const ambiguousMessage = "The input answer may have been dispatched before confirmation failed.";
+  try {
+    for (const [questionId, answer] of Object.entries(answers ?? {})) {
+      throwIfAborted(signal);
+      client.dispatch(chatUri, chatInputAnswerChanged(requestId, questionId, answer));
+      dispatched = true;
+    }
+    await dispatchAndConfirm(
+      client, chatUri, chatInputCompleted(requestId, response, answers),
+      ambiguousMessage, signal,
+    );
+  } catch (error) {
+    if (dispatched && !(error instanceof MessageDispatchAmbiguousError)) {
+      throw new MessageDispatchAmbiguousError(ambiguousMessage, { cause: error });
+    }
+    throw error;
+  }
+}
+
 /**
  * Answer a pending *elicitation* (chatInput-kind) request on an AHP session.
  * Dispatches inputAnswerChanged + inputCompleted to the request's owning chat,
- * then **verifies the host actually consumed it** by re-reading
+ * then **verifies the host actually consumed it** by observing
  * `SessionState.inputNeeded` and confirming the request is gone.
  *
  * `client.ping()` only flushes the transport — it does not confirm the host
  * applied the answer — so a plain dispatch+ping can report a phantom success
- * even when the plan/question was never confirmed. We therefore poll the
- * post-dispatch state (bounded) and key success on removal, mirroring the
+ * even when the plan/question was never confirmed. We therefore reduce the
+ * retained subscription (bounded) and key success on removal, mirroring the
  * `inputRemoved` check in `app/api/ahp/sessions/input/route.ts`. This is what
  * lets the orchestrator's plan-approval pipeline trust `success` before it logs
  * `plan-approved`.
@@ -344,69 +327,47 @@ export async function answerInputWithClient(
   },
 ): Promise<{ success: boolean; stale?: boolean }> {
   const verifyTimeoutMs = options?.verifyTimeoutMs ?? 3_000;
-  const pollMs = options?.pollIntervalMs ?? 400;
   const signal = options?.signal;
 
   throwIfAborted(signal);
-  const sessionState = await awaitAbortableBoundary(
-    () => readSessionState(client, sessionUri),
-    signal,
-  );
-  const inputNeeded = sessionState?.inputNeeded;
+  return withSessionState(client, sessionUri, async (sessionState, access) => {
+    const inputNeeded = sessionState?.inputNeeded;
 
-  if (!hasObservedInputNeeded(inputNeeded)) {
-    debug("Input aggregate unavailable; not dispatching:", requestId);
-    return { success: false };
-  }
-
-  const chatEntry = findChatInput(inputNeeded, requestId);
-  if (!chatEntry) {
-    debug("Input request not found (stale):", requestId);
-    return { success: false, stale: true };
-  }
-
-  const chatUri = chatEntry.chat;
-
-  // Dispatch answers
-  if (answers) {
-    for (const [questionId, answer] of Object.entries(answers)) {
-      throwIfAborted(signal);
-      client.dispatch(chatUri, chatInputAnswerChanged(requestId, questionId, answer));
+    if (!hasObservedInputNeeded(inputNeeded)) {
+      debug("Input aggregate unavailable; not dispatching:", requestId);
+      return { success: false };
     }
-  }
 
-  // Dispatch completion
-  throwIfAborted(signal);
-  client.dispatch(chatUri, chatInputCompleted(requestId, response, answers));
-
-    // Flush the dispatch, then verify the host actually consumed the request.
-    // `ping` alone only proves the frames reached the server — not that the
-    // answer was applied — so poll `inputNeeded` (bounded) for the request to
-    // disappear before reporting success.
-  await client.ping();
-
-  const isRemoved = (state: SessionState | undefined): boolean =>
-    isInputObservedRemoved(state?.inputNeeded, requestId);
-
-  const deadline = Date.now() + verifyTimeoutMs;
-  let applied = false;
-  for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
-    const after = await readSessionState(client, sessionUri);
-    if (isRemoved(after)) {
-      applied = true;
-      break;
+    const chatEntry = findChatInput(inputNeeded, requestId);
+    if (!chatEntry) {
+      debug("Input request not found (stale):", requestId);
+      return { success: false, stale: true };
     }
-    if (Date.now() >= deadline) break;
-  }
 
-  if (!applied) {
-    debug("Answer dispatched but request not consumed (not applied):", requestId, "on", sessionUri);
-    return { success: false };
-  }
+    await dispatchInputCompletion(
+      client, chatEntry.chat, requestId, response, answers, signal,
+    );
+    let applied: boolean;
+    try {
+      applied = await access.waitFor(
+        (state) => isInputObservedRemoved(state?.inputNeeded, requestId),
+        verifyTimeoutMs,
+      );
+    } catch (error) {
+      throw new MessageDispatchAmbiguousError(
+        "The input answer was dispatched, but its consumption could not be verified.",
+        { cause: error },
+      );
+    }
 
-  debug("Answered input", requestId, "on", sessionUri, "(applied)");
-  return { success: true };
+    if (!applied) {
+      debug("Answer dispatched but request not consumed (not applied):", requestId, "on", sessionUri);
+      return { success: false };
+    }
+
+    debug("Answered input", requestId, "on", sessionUri, "(applied)");
+    return { success: true };
+  }, signal);
 }
 
 export function answerInput(
@@ -459,45 +420,6 @@ export function submitPlanFeedback(
 }
 
 /**
- * Poll session status until idle or timeout.
- * Resolves when the session's summary.status includes Idle (and not InProgress/InputNeeded).
- */
-export async function waitForIdle(
-  hostUrl: string,
-  sessionUri: string,
-  options?: { timeoutMs?: number; pollIntervalMs?: number }
-): Promise<{ idle: boolean; timedOut?: boolean }> {
-  const timeoutMs = options?.timeoutMs ?? 300_000; // 5 minutes default
-  const basePollMs = options?.pollIntervalMs ?? 3_000; // 3s initial poll
-  const maxPollMs = 30_000; // cap at 30s
-  const deadline = Date.now() + timeoutMs;
-  let currentPollMs = basePollMs;
-
-  return withAHPClient(hostUrl, async (client) => {
-    while (Date.now() < deadline) {
-      const sessionState = await readSessionState(client, sessionUri);
-      const status = sessionState?.status ?? 0;
-      const parsed = parseAHPStatus(status);
-
-      if (parsed.isIdle && !parsed.isInProgress && !parsed.isInputNeeded) {
-        return { idle: true };
-      }
-
-      if (parsed.isError) {
-        return { idle: true };
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, currentPollMs));
-      // Exponential backoff: 3s → 4.5s → 6.75s → ... capped at 30s
-      currentPollMs = Math.min(currentPollMs * 1.5, maxPollMs);
-    }
-
-    debug("waitForIdle timed out for", sessionUri);
-    return { idle: false, timedOut: true };
-  });
-}
-
-/**
  * Fetch the last N turns from a session to read agent output.
  *
  * Turns live on the chat channel, so resolve the session's defaultChat and read
@@ -512,13 +434,14 @@ export async function fetchLastTurns(
   sessionUri: string,
   limit: number = 5
 ): Promise<{ turns: Turn[]; hasMore: boolean }> {
-  return withAHPClient(hostUrl, async (client) => {
-    const { chatUri } = await getSessionContext(client, sessionUri);
-    const chatState = await readChatState(client, chatUri ?? sessionUri);
+  return withAHPClient(hostUrl, (client) => withSessionState(client, sessionUri, async (session) => {
+    const chatState = session?.defaultChat
+      ? await readChatState(client, session.defaultChat)
+      : undefined;
     const allTurns = chatState?.turns ?? [];
     const turns = limit > 0 ? allTurns.slice(-limit) : allTurns;
     return { turns, hasMore: Boolean(chatState?.turnsNextCursor) };
-  });
+  }));
 }
 
 /**
@@ -560,31 +483,6 @@ export async function fetchChatTurnById(
 }
 
 /**
- * Get the current status of a session from its summary.
- */
-export async function getSessionStatus(
-  hostUrl: string,
-  sessionUri: string
-): Promise<{
-  status: number;
-  isIdle: boolean;
-  isError: boolean;
-  isInProgress: boolean;
-  isInputNeeded: boolean;
-} | null> {
-  return withAHPClient(hostUrl, async (client) => {
-    const sessionState = await readSessionState(client, sessionUri);
-    const status = sessionState?.status ?? 0;
-    const parsed = parseAHPStatus(status);
-
-    return {
-      status,
-      ...parsed,
-    };
-  });
-}
-
-/**
  * Archive (or unarchive) a session via the client-dispatchable
  * `session/isArchivedChanged` action so the change propagates to every AHP client.
  *
@@ -603,99 +501,46 @@ export async function setSessionArchived(
   hostUrl: string,
   sessionUri: string,
   isArchived: boolean,
-  options?: { readyTimeoutMs?: number; verifyTimeoutMs?: number }
+  options?: { readyTimeoutMs?: number; verifyTimeoutMs?: number; signal?: AbortSignal }
 ): Promise<{ success: boolean; status: number; verified: boolean }> {
   const readyTimeoutMs = options?.readyTimeoutMs ?? 15_000;
   const verifyTimeoutMs = options?.verifyTimeoutMs ?? 8_000;
   const targetArchived = isArchived;
 
-  return withAHPClient(hostUrl, async (client) => {
-    const matchesTarget = (status: number) =>
-      ((status & AHPStatus.IsArchived) !== 0) === targetArchived;
+  const signal = options?.signal;
+  return withAHPClient(hostUrl, (client) => withSessionState(client, sessionUri, async (_initial, access) => {
+    const isReady = (state: SessionState | undefined): state is SessionState =>
+      state?.lifecycle === "ready" && Number.isInteger(state.status) && state.status >= 0;
+    const matchesTarget = (state: SessionState | undefined) =>
+      isReady(state) && ((state.status & AHPStatus.IsArchived) !== 0) === targetArchived;
+    const result = (verified: boolean) => ({
+      success: verified,
+      status: access.getState()?.status ?? 0,
+      verified,
+    });
 
-    const initial = await client.subscribe(sessionUri);
-    let subscription: Subscription = initial.subscription;
-    let state = asSessionState(initial.result.snapshot);
+    if (!await access.waitFor(isReady, readyTimeoutMs)) return result(false);
+    if (matchesTarget(access.getState())) return result(true);
 
-    const waitForState = async (
-      predicate: (current: SessionState | undefined) => boolean,
-      deadline: number,
-    ): Promise<boolean> => {
-      while (!predicate(state) && Date.now() < deadline) {
-        const timeout = Symbol("timeout");
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const remainingMs = Math.max(0, deadline - Date.now());
-        const next = await Promise.race([
-          subscription.next(),
-          new Promise<typeof timeout>((resolve) => {
-            timer = setTimeout(() => resolve(timeout), remainingMs);
-          }),
-        ]);
-        if (timer) clearTimeout(timer);
-
-        if (next === timeout) {
-          await subscription.close();
-          subscription = client.attachSubscription(sessionUri);
-          return false;
-        }
-        if (next.done) return false;
-        if (next.value.type === "action" && state) {
-          state = sessionReducer(
-            state,
-            next.value.params.action as SessionAction,
-          );
-        }
-      }
-      return predicate(state);
-    };
-
+    await dispatchAndConfirm(
+      client, sessionUri, sessionIsArchivedChanged(isArchived),
+      "The archive update may have been dispatched before confirmation failed.", signal,
+    );
     try {
-      // 1. Readiness gate — wait until the host reports the session loaded.
-      await waitForState(
-        (current) => current?.lifecycle === "ready",
-        Date.now() + readyTimeoutMs,
+      if (await access.waitFor(matchesTarget, verifyTimeoutMs / 2)) return result(true);
+      // Never retry a mutation against a session whose lifecycle is now unknown.
+      if (!isReady(access.getState())) return result(false);
+      await dispatchAndConfirm(
+        client, sessionUri, sessionIsArchivedChanged(isArchived),
+        "The archive update may have been dispatched before confirmation failed.", signal,
       );
-
-      // Already in the desired state — nothing to dispatch.
-      if (matchesTarget(state?.status ?? 0)) {
-        debug("setSessionArchived: already in target state", sessionUri, state?.status ?? 0);
-        return { success: true, status: state?.status ?? 0, verified: true };
-      }
-
-      // 2. Dispatch the archive/unarchive action on the session channel.
-      client.dispatch(sessionUri, sessionIsArchivedChanged(isArchived));
-      await client.ping();
-
-      // 3. Verify the summary actually reflects the change (with one re-dispatch).
-      const verifyDeadline = Date.now() + verifyTimeoutMs;
-      const firstAttemptDeadline = verifyDeadline - verifyTimeoutMs / 2;
-      if (!await waitForState(
-        (current) => matchesTarget(current?.status ?? 0),
-        firstAttemptDeadline,
-      )) {
-        debug("setSessionArchived: re-dispatching", sessionUri);
-        client.dispatch(sessionUri, sessionIsArchivedChanged(isArchived));
-        await client.ping();
-        await waitForState(
-          (current) => matchesTarget(current?.status ?? 0),
-          verifyDeadline,
-        );
-      }
-
-      const lastStatus = state?.status ?? 0;
-      if (matchesTarget(lastStatus)) {
-        debug("setSessionArchived: verified", sessionUri, lastStatus);
-        return { success: true, status: lastStatus, verified: true };
-      }
-
-      debug("setSessionArchived: unverified after timeout", sessionUri, lastStatus);
-      return { success: false, status: lastStatus, verified: false };
-    } finally {
-      try {
-        await subscription.close();
-      } finally {
-        await client.unsubscribe(sessionUri).catch(() => {});
-      }
+      return result(await access.waitFor(matchesTarget, verifyTimeoutMs / 2));
+    } catch (error) {
+      if (error instanceof MessageDispatchAmbiguousError) throw error;
+      throw new MessageDispatchAmbiguousError(
+        "The archive update was dispatched, but its application could not be verified.",
+        { cause: error },
+      );
     }
-  });
+  }, signal), signal);
 }

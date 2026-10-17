@@ -10,8 +10,9 @@ import {
   isStaticChangesetUri,
 } from "@/lib/ahp/changeset-review";
 import { findSessionChangeset } from "@/lib/ahp/changeset-enricher";
-import { readReadyChangesetState } from "@/lib/ahp/changeset-readiness";
-import { readSessionState } from "@/lib/ahp/snapshot";
+import { CHANGESET_READY_TIMEOUT_MS } from "@/lib/ahp/changeset-readiness";
+import { withChangesetState, withSessionState } from "@/lib/ahp/snapshot";
+import { dispatchAndConfirm, MessageDispatchAmbiguousError } from "@/lib/ahp/dispatch-confirmation";
 import { withAHPClient } from "@/lib/ahp/client-operation";
 import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
 
@@ -65,8 +66,7 @@ export async function POST(request: NextRequest) {
   const fileIds = files as string[];
 
   try {
-    return await withAHPClient(hostUrl, async (client) => {
-      const session = await readSessionState(client, sessionUri);
+    return await withAHPClient(hostUrl, (client) => withSessionState(client, sessionUri, async (session, sessionAccess) => {
       const changeset = session?.changesets ? findSessionChangeset(session.changesets) : undefined;
 
       if (!changeset || !isStaticChangesetUri(changeset.uriTemplate)) {
@@ -83,87 +83,114 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      const before = await readReadyChangesetState(client, changeset.uriTemplate);
-      if (!before) {
-        return NextResponse.json(
-          {
-            error: "Changeset is not ready",
-            stale: true,
-          },
-          { status: 409 },
+      return withChangesetState(client, changeset.uriTemplate, async (initial, access) => {
+        if (initial?.status === "computing" || initial?.status === "recomputing") {
+          await access.waitFor(
+            (state) => state?.status === "ready" || state?.status === "error",
+            CHANGESET_READY_TIMEOUT_MS,
+          );
+        }
+        const before = access.getState();
+        if (!before || before.status !== "ready") {
+          return NextResponse.json(
+            { error: "Changeset is not ready", stale: true },
+            { status: 409 },
+          );
+        }
+
+        const currentIds = new Set(before.files.map((file) => file.id));
+        if (fileIds.some((fileId) => !currentIds.has(fileId))) {
+          debug("review request contains stale file IDs:", sessionUri);
+          return NextResponse.json(
+            { error: "One or more files changed", stale: true, ...reviewResponse(changeset, before.files) },
+            { status: 409 },
+          );
+        }
+
+        const currentSession = sessionAccess.getState();
+        const currentChangeset = currentSession?.changesets
+          ? findSessionChangeset(currentSession.changesets)
+          : undefined;
+        if (
+          currentChangeset?.uriTemplate !== changeset.uriTemplate
+          || !changesetSupportsReview(currentChangeset)
+        ) {
+          return NextResponse.json(
+            { error: "Changeset changed before updating review state", stale: true },
+            { status: 409 },
+          );
+        }
+
+        if (fileIds.every((fileId) => {
+          const file = before.files.find((candidate) => candidate.id === fileId);
+          return file !== undefined && isChangesetFileReviewed(file) === reviewed;
+        })) {
+          return NextResponse.json({ ok: true, noop: true, ...reviewResponse(changeset, before.files) });
+        }
+
+        await dispatchAndConfirm(
+          client, changeset.uriTemplate,
+          changesetFilesReviewChanged(fileIds, reviewed),
+          "The file review update may have been dispatched before confirmation failed.",
+          request.signal,
         );
-      }
 
-      const currentIds = new Set(before.files.map((file) => file.id));
-      if (fileIds.some((fileId) => !currentIds.has(fileId))) {
-        debug("review request contains stale file IDs:", sessionUri);
-        return NextResponse.json(
-          { error: "One or more files changed", stale: true, ...reviewResponse(changeset, before.files) },
-          { status: 409 },
-        );
-      }
+        try {
+          await access.waitFor(
+            (state) => state?.status === "error" || (state?.status === "ready" && fileIds.every((id) => {
+              const file = state.files.find((candidate) => candidate.id === id);
+              return file !== undefined && isChangesetFileReviewed(file) === reviewed;
+            })),
+            3_000,
+          );
+        } catch (error) {
+          throw new MessageDispatchAmbiguousError(
+            "The file review update was dispatched, but its application could not be verified.",
+            { cause: error },
+          );
+        }
+        const afterSession = sessionAccess.getState();
+        const authoritativeChangeset = afterSession?.changesets
+          ? findSessionChangeset(afterSession.changesets)
+          : undefined;
+        if (
+          !authoritativeChangeset ||
+          !isStaticChangesetUri(authoritativeChangeset.uriTemplate) ||
+          authoritativeChangeset.uriTemplate !== changeset.uriTemplate
+        ) {
+          return NextResponse.json(
+            { error: "Changeset changed while updating review state", stale: true },
+            { status: 409 },
+          );
+        }
 
-      if (fileIds.every((fileId) => {
-        const file = before.files.find((candidate) => candidate.id === fileId);
-        return file !== undefined && isChangesetFileReviewed(file) === reviewed;
-      })) {
-        return NextResponse.json({ ok: true, noop: true, ...reviewResponse(changeset, before.files) });
-      }
+        const after = access.getState();
+        if (!after || after.status !== "ready") {
+          return NextResponse.json(
+            { error: "Changeset changed while updating review state", stale: true },
+            { status: 409 },
+          );
+        }
 
-      client.dispatch(
-        changeset.uriTemplate,
-        changesetFilesReviewChanged(fileIds, reviewed),
-      );
-
-      // Let the host echo its authoritative state, then reconcile rather than
-      // trusting the optimistic client write-ahead state.
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      const afterSession = await readSessionState(client, sessionUri);
-      const authoritativeChangeset = afterSession?.changesets
-        ? findSessionChangeset(afterSession.changesets)
-        : undefined;
-      if (
-        !authoritativeChangeset ||
-        !isStaticChangesetUri(authoritativeChangeset.uriTemplate) ||
-        authoritativeChangeset.uriTemplate !== changeset.uriTemplate
-      ) {
-        return NextResponse.json(
-          { error: "Changeset changed while updating review state", stale: true },
-          { status: 409 },
-        );
-      }
-
-      const after = await readReadyChangesetState(client, authoritativeChangeset.uriTemplate);
-      if (!after) {
-        return NextResponse.json(
-          {
-            error: "Changeset changed while updating review state",
-            stale: true,
-          },
-          { status: 409 },
-        );
-      }
-
-      const afterById = new Map(after.files.map((file) => [file.id, file]));
-      const applied = fileIds.every(
-        (fileId) => {
+        const afterById = new Map(after.files.map((file) => [file.id, file]));
+        const applied = fileIds.every((fileId) => {
           const file = afterById.get(fileId);
           return file !== undefined && isChangesetFileReviewed(file) === reviewed;
-        },
-      );
-      if (!applied) {
-        return NextResponse.json(
-          {
-            error: "Review update was not applied",
-            stale: true,
-            ...reviewResponse(authoritativeChangeset, after.files),
-          },
-          { status: 409 },
-        );
-      }
+        });
+        if (!applied) {
+          return NextResponse.json(
+            {
+              error: "Review update was not applied",
+              stale: true,
+              ...reviewResponse(authoritativeChangeset, after.files),
+            },
+            { status: 409 },
+          );
+        }
 
-      return NextResponse.json({ ok: true, ...reviewResponse(authoritativeChangeset, after.files) });
-    });
+        return NextResponse.json({ ok: true, ...reviewResponse(authoritativeChangeset, after.files) });
+      }, request.signal);
+    }, request.signal), request.signal);
   } catch (err) {
     console.error("[ahp:review] error:", err instanceof Error ? err.message : err);
     return ahpErrorResponse(err, "Failed to update file review state");

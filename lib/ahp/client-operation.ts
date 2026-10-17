@@ -21,7 +21,7 @@ export function withAHPClient<TResult>(
 ): Promise<TResult> {
   throwIfAborted(signal);
   return withOwnedClient(
-    async () => (await connectInitializedAhpClient(hostUrl)).client,
+    async () => (await connectInitializedAhpClient(hostUrl, { signal })).client,
     async (client) => {
       throwIfAborted(signal);
       return operation(client);

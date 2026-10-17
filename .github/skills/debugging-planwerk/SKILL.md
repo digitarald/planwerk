@@ -206,6 +206,32 @@ not list/resume sessions, and `cto-session-manager.ts` only checks metadata and
 resumes the SQLite-bound coordinator ID under its existing lease. It must not
 discover continuity by scanning global `~/.copilot` history.
 
+For startup automation, inspect the SSE host partition's `resource.connected`.
+Cached initialization is display-only; `getAutomationHosts` excludes a host until
+the current live catalog has been projected. Bridge events are cloned before
+queueing to preserve intermediate runtime states. Server-side stream closure
+must remove inbox listeners just as consumer cancellation does.
+
+Explicit operations retain session residency through dependent chat/changeset
+reads and reduce host echoes for confirmation instead of re-subscribing to poll.
+Missing/unready snapshots cannot verify archive state. Cancellation closes the
+owned client, while post-dispatch uncertainty stays an ambiguous operation.
+SDK abort/delete/disconnect and runtime stop/force-stop each have bounded cleanup;
+timeouts retire the exact leased runtime generation. A child-agent error/shutdown
+does not cancel the primary coordinator's policy.
+
+Discovery is single-flight and each candidate has a 15-second total probe
+deadline. Both local and remote WebSocket handshakes have 15-second deadlines;
+ordinary RPC requests keep their SDK timeout. Artifact negative caches belong
+to one bridge generation across its temporary clients. A miss on another host
+or a previous connection must not hide a current plan.
+
+For coherence, inspect the versioned source-bound signature and
+`review_lease_expires_at_ms`. Missing/incomplete session-scoped evidence or SDK
+failure returns a detected pair with a 60-second cooldown, not `coherent` or an
+automatic human escalation. Oversized evidence remains deferred. Ship checks
+reopen stale settled verdicts rather than reuse a count-identical old review.
+
 Cold cards without a current authoritative gate revision are parked by the
 heartbeat: they do not enter automation, coherence, or WIP counts. Missing
 enrichment and revision facts are retryable system conditions, not human work;

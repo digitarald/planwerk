@@ -1,7 +1,7 @@
 import type { StateAction } from "@microsoft/agent-host-protocol";
 import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 
-import { throwIfAborted } from "../abort.ts";
+import { awaitAbortable, throwIfAborted } from "../abort.ts";
 
 export class MessageDispatchAmbiguousError extends Error {
   readonly chatUri?: string;
@@ -38,7 +38,7 @@ export async function dispatchAndConfirm(
   client.dispatch(channel, action);
 
   try {
-    await client.ping();
+    await awaitAbortable(() => client.ping(), signal);
   } catch (error) {
     throw new MessageDispatchAmbiguousError(ambiguousMessage, {
       cause: error,

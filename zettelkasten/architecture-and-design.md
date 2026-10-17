@@ -139,6 +139,12 @@ Config: `coherence.{enabled, module_depth, block_high_risk_ship}` in `planwerk.y
 
 ### AHP 1.0 runtime facts
 
+Cached SSE initialization is display-only. The heartbeat receives cards only
+after that host's current bridge generation has projected a live catalog.
+Queued bridge payloads are cloned before projection so later mutations cannot
+erase intermediate states. Producer closure and consumer cancellation both
+release inbox listeners; failed listeners do not interrupt other subscribers.
+
 Every build offers only AHP `1.0.0`; there is no older-version fallback or retry
 with an untested host version. The SDK dependency is pinned to that release.
 
@@ -188,6 +194,28 @@ background-work counts. Computing, recomputing, errored, and unavailable
 changesets do not expose current files. Templated per-turn and comparison views
 are not expanded. Shared changeset channels use reference-counted ownership;
 only the last observer releases the server subscription.
+
+Explicit AHP operations retain parent residency through dependent reads and
+dispatch, and reduce authoritative echoes for input, archive, resume, and file
+review confirmation. Cancellation closes the operation's exclusive client;
+post-dispatch uncertainty is reported as ambiguous rather than safely retryable.
+Missing/unready snapshots never count as verified archive state.
+
+Desktop discovery shares one probe batch across concurrent callers. Each probe
+has a 15-second total deadline, with bounded cleanup; local and remote WebSocket
+handshakes also have a 15-second deadline. Cancelling a discovery waiter does
+not cancel another caller's shared probes. Ordinary RPC request timeouts retain
+the SDK default unless explicitly supplied. Provider-specific artifact misses
+are scoped to one bridge generation across its transient clients, not shared
+between hosts or reconnects.
+
+Coherence signatures include both verified source revisions, not only file
+paths and line counts. Review collection requires complete session-scoped file
+evidence, with current host, source, and lease bindings checked before SDK work
+and verdict commit. Inactive sessions, missing/binary/oversized evidence, and
+reviewer failures defer with a durable 60-second cooldown instead of creating
+a coherent verdict or a human task. Evidence beyond the bounded file/content
+budget remains deferred; this is a conservative limit, not a completed review.
 
 Chat changesets and background work are informational. They never contribute
 to session change totals, gate freshness, phase transitions, or coordinator
@@ -263,6 +291,13 @@ for those existing workflows. See `lib/ahp/chat-facts.ts` and
 ---
 
 ### CTO SDK continuity and authority
+
+SDK cleanup is bounded per abort, delete, disconnect, stop, and force-stop step;
+a hung step cannot prevent later cleanup attempts. Cleanup timeout failures
+retire the exact leased runtime generation. Coordinator creation records local
+ownership before checking lease/cancellation again, so a newly created unbound
+orphan is deleted without touching a replacement binding. Child-agent
+error/shutdown events do not cancel the primary coordinator's action policy.
 
 The CTO uses one restart-safe Copilot SDK conversation whose ID is stored in
 SQLite. The shared SDK runtime uses `mode: "empty"` and an explicit

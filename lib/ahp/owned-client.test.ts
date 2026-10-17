@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 
 import { withOwnedClient } from "./owned-client.ts";
+import { dispatchAndConfirm, MessageDispatchAmbiguousError } from "./dispatch-confirmation.ts";
 
 interface FakeClient {
   id: number;
@@ -141,4 +143,94 @@ test("cancellation during connection skips the operation and still shuts down th
   );
   assert.equal(operations, 0);
   assert.equal(client.shutdownCalls, 1);
+});
+
+test("cancellation closes only the client owned by the pending operation", async () => {
+  const controller = new AbortController();
+  const client = fakeClient(1);
+  const other = fakeClient(2);
+  let fail!: (error: Error) => void;
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => { started = resolve; });
+  client.shutdown = async () => {
+    client.shutdownCalls++;
+    fail(new Error("owned connection closed"));
+  };
+  const result = withOwnedClient(
+    async () => client,
+    async () => {
+      started();
+      return new Promise<void>((_, reject) => { fail = reject; });
+    },
+    () => assert.fail("cleanup should succeed"),
+    controller.signal,
+  );
+  await running;
+  controller.abort();
+  await assert.rejects(result, /owned connection closed/);
+  assert.equal(client.shutdownCalls, 1);
+  assert.equal(other.shutdownCalls, 0);
+});
+
+test("pending dispatch cancellation preserves ambiguity through owned cleanup", async () => {
+  const controller = new AbortController();
+  const client = fakeClient(1);
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => { started = resolve; });
+  const result = withOwnedClient(
+    async () => client,
+    async () => dispatchAndConfirm({
+      dispatch() { started(); },
+      ping() { return new Promise<void>(() => {}); },
+    } as unknown as Pick<AhpClient, "dispatch" | "ping">,
+    "chat:1", { type: "test" } as never, "possibly delivered", controller.signal),
+    () => assert.fail("cleanup should succeed"),
+    controller.signal,
+  );
+  await running;
+  controller.abort();
+  await assert.rejects(result, MessageDispatchAmbiguousError);
+  assert.equal(client.shutdownCalls, 1);
+});
+
+test("abort does not replace a mutation result already confirmed by the operation", async () => {
+  const controller = new AbortController();
+  const client = fakeClient(1);
+  const result = await withOwnedClient(
+    async () => client,
+    async () => {
+      controller.abort();
+      return { confirmed: true };
+    },
+    () => assert.fail("cleanup should succeed"),
+    controller.signal,
+  );
+  assert.deepEqual(result, { confirmed: true });
+  assert.equal(client.shutdownCalls, 1);
+});
+
+test("shutdown and an uncooperative operation are bounded on cancellation", async () => {
+  const controller = new AbortController();
+  const errors: unknown[] = [];
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => { started = resolve; });
+  const result = withOwnedClient(
+    async () => ({ shutdown: () => new Promise<void>(() => {}) }),
+    async () => { started(); return new Promise<void>(() => {}); },
+    (error) => errors.push(error),
+    controller.signal,
+  );
+  await running;
+  controller.abort();
+  await assert.rejects(result, { name: "AbortError" });
+  assert.equal(errors.length, 1);
+});
+
+test("a throwing cleanup reporter cannot replace the operation error", async () => {
+  const operationError = new Error("original operation failure");
+  await assert.rejects(withOwnedClient(
+    async () => fakeClient(1, new Error("cleanup failure")),
+    async () => { throw operationError; },
+    () => { throw new Error("reporter failure"); },
+  ), (error) => error === operationError);
 });

@@ -1,14 +1,24 @@
 import "server-only";
 
-import type { AhpClient } from "@microsoft/agent-host-protocol/client";
-import type {
-  ChatState,
-  RootState,
-  SessionState,
-  Snapshot,
+import type { AhpClient, Subscription } from "@microsoft/agent-host-protocol/client";
+import {
+  chatReducer,
+  changesetReducer,
+  sessionReducer,
+  type ChatAction,
+  type ChangesetAction,
+  type ChangesetState,
+  type SessionAction,
+  type ChatState,
+  type RootState,
+  type SessionState,
+  type Snapshot,
+  type StateAction,
 } from "@microsoft/agent-host-protocol";
+import { awaitAbortable, awaitWithTimeout, throwIfAborted } from "../abort.ts";
 import { listAllSessions } from "./catalog";
 import { shouldReadLiveSessionState } from "./session-read-policy";
+import { asChangesetState } from "./changeset-readiness";
 
 /**
  * Typed access to AHP channel snapshots.
@@ -54,9 +64,11 @@ export function asChatState(snapshot: Snapshot | undefined): ChatState | undefin
 /** One-shot read of the host root state and agent capabilities. */
 export async function readRootState(client: AhpClient): Promise<RootState | undefined> {
   const { result, subscription } = await client.subscribe("ahp-root://");
-  void subscription.close();
-  await client.unsubscribe("ahp-root://").catch(() => {});
-  return asRootState(result.snapshot);
+  try {
+    return asRootState(result.snapshot);
+  } finally {
+    await releaseSubscription(client, "ahp-root://", subscription);
+  }
 }
 
 /**
@@ -69,10 +81,7 @@ export async function readSessionState(
   client: AhpClient,
   sessionUri: string,
 ): Promise<SessionState | undefined> {
-  const { result, subscription } = await client.subscribe(sessionUri);
-  void subscription.close();
-  await client.unsubscribe(sessionUri).catch(() => {});
-  return asSessionState(result.snapshot);
+  return withSessionState(client, sessionUri, async (state) => state);
 }
 
 /** Background reads must first establish activity from the passive catalog. */
@@ -87,22 +96,174 @@ export async function readActiveSessionState(
   return readSessionState(client, sessionUri);
 }
 
-/** Keep residency owned until dependent chat/changeset reads have finished. */
-export async function withSessionState<T>(
+export interface StateAccess<TState> {
+  getState(): TState | undefined;
+  waitFor(
+    predicate: (state: TState | undefined) => boolean,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+}
+
+export type SessionStateAccess = StateAccess<SessionState>;
+
+async function releaseSubscription(
+  client: AhpClient,
+  uri: string,
+  subscription: Subscription,
+  signal?: AbortSignal,
+): Promise<void> {
+  const cleanup = Promise.allSettled([
+    awaitWithTimeout(() => subscription.close(), 1_000, "AHP subscription close timed out"),
+    awaitWithTimeout(() => client.unsubscribe(uri), 1_000, "AHP unsubscribe timed out"),
+  ]).then((results) => {
+    for (const result of results) {
+      if (result.status === "rejected") {
+        console.warn("[ahp:snapshot] Subscription cleanup failed:", result.reason);
+      }
+    }
+  });
+  try {
+    await awaitAbortable(() => cleanup, signal);
+  } catch (error) {
+    // The owned connection is closing on abort. Do not hold up a confirmed
+    // result behind unsubscribe acknowledgements from that closed transport.
+    if (!signal?.aborted) throw error;
+  }
+}
+
+async function withChannelState<TState, TResult>(
+  client: AhpClient,
+  uri: string,
+  narrow: (snapshot: Snapshot | undefined) => TState | undefined,
+  reduce: (state: TState, action: StateAction) => TState,
+  operation: (state: TState | undefined, access: StateAccess<TState>) => Promise<TResult>,
+  signal?: AbortSignal,
+): Promise<TResult> {
+  throwIfAborted(signal);
+  const { result, subscription } = await client.subscribe(uri);
+  let state = narrow(result.snapshot);
+  let ended = false;
+  let streamError: unknown;
+  const listeners = new Set<() => void>();
+  const notify = () => { for (const listener of listeners) listener(); };
+  const stopped = Symbol("stopped");
+  let stopDrain!: () => void;
+  const stop = new Promise<typeof stopped>((resolve) => {
+    stopDrain = () => resolve(stopped);
+  });
+  // The SDK subscription contains host echoes, not optimistic local dispatches.
+  const drain = (async () => {
+    try {
+      while (!ended) {
+        // SDK reader.return() detaches without waking an already pending next().
+        const next = await Promise.race([subscription.next(), stop]);
+        if (next === stopped || ended || next.done) break;
+        const event = next.value;
+        if (event.type === "action" && state) {
+          state = reduce(state, event.params.action);
+          notify();
+        }
+      }
+    } catch (error) {
+      streamError = error;
+    } finally {
+      ended = true;
+      notify();
+    }
+  })();
+  const access: StateAccess<TState> = {
+    getState: () => state,
+    async waitFor(predicate, timeoutMs, waitSignal = signal) {
+      if (predicate(state)) return true;
+      throwIfAborted(waitSignal);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let check: (() => void) | undefined;
+      try {
+        const matched = await awaitAbortable(() => new Promise<boolean>((resolve, reject) => {
+          check = () => {
+            try {
+              if (predicate(state)) resolve(true);
+              else {
+                throwIfAborted(waitSignal);
+                if (streamError) reject(streamError);
+                else if (ended) resolve(false);
+              }
+            } catch (error) {
+              reject(error);
+            }
+          };
+          listeners.add(check);
+          timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+          check();
+        }), waitSignal);
+        // Confirmed state wins over cancellation; an ended stream or timeout
+        // is not a confirmed mutation and must retain abort semantics.
+        if (!matched) throwIfAborted(waitSignal);
+        return matched;
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (check) listeners.delete(check);
+      }
+    },
+  };
+  try {
+    throwIfAborted(signal);
+    return await operation(state, access);
+  } finally {
+    ended = true;
+    stopDrain();
+    await drain;
+    await releaseSubscription(client, uri, subscription, signal);
+  }
+}
+
+/** Keep residency and the authoritative action stream until dependent work ends. */
+export function withSessionState<T>(
   client: AhpClient,
   sessionUri: string,
-  operation: (state: SessionState | undefined) => Promise<T>,
+  operation: (state: SessionState | undefined, access: SessionStateAccess) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
-  const { result, subscription } = await client.subscribe(sessionUri);
-  try {
-    return await operation(asSessionState(result.snapshot));
-  } finally {
-    try {
-      await subscription.close();
-    } finally {
-      await client.unsubscribe(sessionUri);
-    }
-  }
+  return withChannelState(
+    client, sessionUri, asSessionState,
+    (state, action) => {
+      const next = sessionReducer(state, action as SessionAction);
+      // The reducer omits an empty aggregate. After observing removal from a
+      // known aggregate, retain that authoritative empty state, not "unknown".
+      return action.type === "session/inputNeededRemoved"
+        && Array.isArray(state.inputNeeded) && next.inputNeeded === undefined
+        ? { ...next, inputNeeded: [] }
+        : next;
+    },
+    operation, signal,
+  );
+}
+
+export function withChatState<T>(
+  client: AhpClient,
+  chatUri: string,
+  operation: (state: ChatState | undefined, access: StateAccess<ChatState>) => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  return withChannelState(
+    client, chatUri, asChatState,
+    (state, action) => chatReducer(state, action as ChatAction),
+    operation, signal,
+  );
+}
+
+export function withChangesetState<T>(
+  client: AhpClient,
+  uri: string,
+  operation: (state: ChangesetState | undefined, access: StateAccess<ChangesetState>) => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  return withChannelState(
+    client, uri, asChangesetState,
+    (state, action) => changesetReducer(state, action as ChangesetAction),
+    operation, signal,
+  );
 }
 
 /**
@@ -113,9 +274,7 @@ export async function withSessionState<T>(
 export async function readChatState(
   client: AhpClient,
   chatUri: string,
+  signal?: AbortSignal,
 ): Promise<ChatState | undefined> {
-  const { result, subscription } = await client.subscribe(chatUri);
-  void subscription.close();
-  await client.unsubscribe(chatUri).catch(() => {});
-  return asChatState(result.snapshot);
+  return withChatState(client, chatUri, async (state) => state, signal);
 }
