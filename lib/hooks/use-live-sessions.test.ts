@@ -11,6 +11,7 @@ const state = {
   changes: [] as Array<{ kind: string; id?: string }>,
   liveConnections: 0,
   initStarts: [] as number[],
+  hideDone: true,
 };
 const key = "__planwerkLiveSessionsTest";
 Object.defineProperty(globalThis, key, { value: state, configurable: true });
@@ -34,11 +35,13 @@ const hooks = registerHooks({
     let source: string | undefined;
     if (specifier === "react") source = `export function useRef(value){return {current:value};} export function useEffect(effect){const cleanup=effect();if(cleanup) ${s}.effects.push(cleanup);}`;
     if (specifier === "@/lib/store/board-store") source = `
-      const state={cards:[],workspaceFilters:new Set(),
-        setCards(cards){${s}.changes.push({kind:"init",id:cards[0]?.id});},
+      const state={cards:[],workspaceFilters:new Set(),get hideDone(){return ${s}.hideDone;},
+        setArchivedCount(){},
+        setCards(cards){state.cards=cards;${s}.changes.push({kind:"init",id:cards[0]?.id});},
         replaceCard(id){${s}.changes.push({kind:"replace",id});},
-        addCard(card){${s}.changes.push({kind:"add",id:card.id});},
-        removeCard(id){${s}.changes.push({kind:"remove",id});},getCard(){return undefined;}};
+        addCard(card){state.cards.push(card);${s}.changes.push({kind:"add",id:card.id});},
+        removeCard(id){state.cards=state.cards.filter(card=>card.id!==id);${s}.changes.push({kind:"remove",id});},
+        getCard(id){return state.cards.find(card=>card.id===id);}};
       export const useBoardStore=selector=>selector(state);
       useBoardStore.getState=()=>state;`;
     if (specifier === "@/lib/store/connection-store") source = `
@@ -109,4 +112,25 @@ test("reconnect init timing starts at the stream drop, including reconnect wait"
   stream.emit({ type: "init", epoch: "reconnected", sequence: 1, cards: [] });
   assert.deepEqual(state.initStarts, [100, 1000]);
   assert.equal(stream.closed, false);
+});
+
+test("archive snapshots merge with active cards and removals cannot delete the other view", () => {
+  for (const cleanup of state.effects.splice(0)) cleanup();
+  state.changes.length = 0;
+  state.hideDone = false;
+  useLiveSessions();
+  const [primary, archive] = FakeEventSource.instances.slice(-2);
+  assert.equal(primary.url.includes("view=archived"), false);
+  assert.equal(archive.url.includes("view=archived"), true);
+  const activeCard = { id: "active", isArchived: false };
+  const archivedCard = { id: "archived", isArchived: true };
+  archive.emit({ type: "init", epoch: "archive", sequence: 1, cards: [archivedCard] });
+  primary.emit({ type: "init", epoch: "active", sequence: 1, cards: [activeCard] });
+  primary.emit({ type: "cardRemoved", epoch: "active", sequence: 2, cardId: "archived" });
+  archive.emit({ type: "cardRemoved", epoch: "archive", sequence: 2, cardId: "active" });
+  assert.equal(state.changes.some((change) => change.kind === "remove"), false);
+  archive.emit({ type: "cardRemoved", epoch: "archive", sequence: 3, cardId: "archived" });
+  primary.emit({ type: "cardRemoved", epoch: "active", sequence: 3, cardId: "active" });
+  assert.deepEqual(state.changes.filter((change) => change.kind === "remove").map((change) => change.id), ["archived", "active"]);
+  state.hideDone = true;
 });

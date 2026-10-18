@@ -96,6 +96,30 @@ Intentional architectural choice:
 
 Think of it as a desktop app using Next.js for its UI layer.
 
+#### AHP client practices
+
+- Keep one root catalog observer per logical host, shared by board subscribers.
+  Follow catalog pagination; track ownership and source revisions independently
+  from which cards the user displays.
+- Treat session/chat subscriptions as operations that can restore provider state,
+  not passive reads. Cold and archived sessions stay catalog-only. Live reads
+  require an active session, one observed completion, or an explicit authorized
+  action; use the existing read-policy and operation-client helpers.
+- Separate catalog metadata from expensive card projection. The default
+  `/api/ahp/events` stream projects non-archived cards and an `archivedCount`.
+  An optional `view=archived` stream projects archives from catalog/cache facts
+  only when the user shows them. Both streams share the same host bridge; toggling
+  archives neither reconnects AHP nor authorizes automation.
+- Cache archive projections within a host generation and invalidate them on
+  catalog updates. Archive/unarchive/removal events update both views; the client
+  merges snapshots and applies removals only to their originating view.
+- Keep cached snapshots display-only, archive projection read-only, model work
+  off the event-delivery path, and unchanged cache rows untouched on reconnect.
+  Do not trade revision/ownership checks for speed or make history current by
+  changing timestamps.
+- Retain per-subscriber ordering and byte budgets. A slow archive reader must
+  not disconnect the active board or another host.
+
 ### 8. DnD Is Gate-Aware (Not Free Movement)
 
 Dragging a card forward logs a "manual override" to the orchestrator feed and marks the card with a warning. Moving backward is always allowed (rework). This preserves the gate enforcement model while still giving users escape hatches.

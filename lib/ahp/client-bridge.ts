@@ -957,6 +957,13 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
 
     // Cache all sessions and remove stale entries
     for (const [uri, session] of sessions) {
+      const enrichment = enrichments.get(uri) ?? null;
+      const cached = cacheByUri.get(uri);
+      if (cached
+        && JSON.stringify(cached.summary) === JSON.stringify(cacheableSummary(session, pendingInputs.get(uri), enrichment))
+        && JSON.stringify(cached.enrichment) === JSON.stringify(enrichment)) {
+        continue;
+      }
       persistSessionSummary(
         session,
         staleEnrichmentUris.has(uri)

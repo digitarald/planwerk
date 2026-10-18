@@ -10,6 +10,26 @@ import { StreamOrder } from "@/lib/ahp/stream-order";
 import { uiElapsed, uiMark, uiMeasure, uiSpan } from "@/lib/diagnostics/ui-performance-client";
 
 export function useLiveSessions() {
+  const hideDone = useBoardStore((s) => s.hideDone);
+  const snapshotHost = useRef<string | null>(null);
+  useSessionStream(false, true, snapshotHost);
+  useSessionStream(true, !hideDone, snapshotHost);
+
+  useEffect(() => {
+    if (hideDone) {
+      const state = useBoardStore.getState();
+      if (state.cards.some((card) => card.isArchived)) {
+        state.setCards(state.cards.filter((card) => !card.isArchived));
+      }
+    }
+  }, [hideDone]);
+}
+
+function useSessionStream(
+  archivedOnly: boolean,
+  enabled: boolean,
+  snapshotHost: { current: string | null },
+) {
   const status = useConnectionStore((s) => s.status);
   const hostUrl = useConnectionStore((s) => s.hostUrl);
   const workspaceFilters = useBoardStore((s) => s.workspaceFilters);
@@ -23,6 +43,7 @@ export function useLiveSessions() {
   const hasHandshakedRef = useRef(false);
 
   const setCards = useBoardStore((s) => s.setCards);
+  const setArchivedCount = useBoardStore((s) => s.setArchivedCount);
   const replaceCard = useBoardStore((s) => s.replaceCard);
   const addCard = useBoardStore((s) => s.addCard);
   const removeCard = useBoardStore((s) => s.removeCard);
@@ -36,7 +57,7 @@ export function useLiveSessions() {
   // EventSource right after the handshake. Root-channel notifications are
   // ephemeral and not replayed, so that reopen was dropping anything the host
   // emitted in the gap.
-  const shouldConnect = status === "connected" || status === "reconnecting";
+  const shouldConnect = enabled && (status === "connected" || status === "reconnecting");
   const workspaceScope = JSON.stringify(Array.from(workspaceFilters).sort());
 
   useEffect(() => {
@@ -57,6 +78,7 @@ export function useLiveSessions() {
     if (hostUrl) {
       sseUrl += `?host=${encodeURIComponent(hostUrl)}`;
       sseUrl += `&workspaceScope=${encodeURIComponent(workspaceScope)}`;
+      if (archivedOnly) sseUrl += "&view=archived";
     }
 
     console.info("[ahp:sse]", `opening stream →`, sseUrl);
@@ -97,16 +119,22 @@ export function useLiveSessions() {
           return;
         }
 
+        if (typeof data.archivedCount === "number") setArchivedCount(data.archivedCount);
         if (data.type === "init") {
           uiElapsed("sse.init", connectionStarted, { cards: data.cards.length, cached: Number(Boolean(data.cached)) });
           console.info("[ahp:sse]", `init: ${data.cards.length} cards`);
-          setCards(data.cards);
+          const existing = snapshotHost.current === hostUrl ? useBoardStore.getState().cards : [];
+          snapshotHost.current = hostUrl;
+          setCards([
+            ...existing.filter((card) => Boolean(card.isArchived) !== archivedOnly),
+            ...data.cards,
+          ]);
           hasHandshakedRef.current = true;
-          if (!data.cached) setConnected(data.connection);
+          if (!data.cached && !archivedOnly) setConnected(data.connection);
           // The server snapshot already includes persisted phase/gate truth.
           // Connection/monitoring status goes to the pinned status line, not the
           // conversational feed — system state is an instrument, not dialogue.
-          setMonitoringStatus(data.cards.length);
+          if (!archivedOnly) setMonitoringStatus(data.cards.length);
         } else if (data.type === "cardChanged") {
           const card = data.card;
           const existing = useBoardStore.getState().getCard(card.id);
@@ -144,7 +172,8 @@ export function useLiveSessions() {
             addCard(card);
           }
         } else if (data.type === "cardRemoved") {
-          removeCard(data.cardId);
+          const card = useBoardStore.getState().getCard(data.cardId);
+          if (!card || Boolean(card.isArchived) === archivedOnly) removeCard(data.cardId);
         } else if (data.type === "inboxAdded" || data.type === "inboxChanged") {
           if (data.item) {
             useInboxStore.getState().reconcileItem(data.item);
@@ -202,7 +231,7 @@ export function useLiveSessions() {
       es.close();
       if (eventSourceRef.current === es) eventSourceRef.current = null;
     };
-  }, [shouldConnect, hostUrl, workspaceScope, setCards, replaceCard, addCard, removeCard, addFeedItem, setMonitoringStatus, setConnected, setError]);
+  }, [shouldConnect, hostUrl, workspaceScope, archivedOnly, snapshotHost, setCards, setArchivedCount, replaceCard, addCard, removeCard, addFeedItem, setMonitoringStatus, setConnected, setError]);
 }
 
 interface HeartbeatActionData {

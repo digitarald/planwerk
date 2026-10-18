@@ -272,6 +272,23 @@ test("archiving fences dirty retries and late enrichment; archived startup is pa
   stop();
 });
 
+test("unchanged archived catalog entries do not rewrite the session cache on reconnect", async () => {
+  const status = AHPStatus.IsArchived | AHPStatus.Idle;
+  const dispose = await start(status);
+  const previous = active.cached.get(uri)!;
+  dispose();
+  active = harness(status);
+  active.seededCache.push({
+    sessionUri: uri, ...previous, updatedAt: "2026-10-15T00:00:00Z",
+  });
+  const stop = await createAHPBridge({ hostUrl: "ws://fake", onEvent: (event) => active.emitted.push(event) });
+  await tick();
+  assert.deepEqual(active.reads, []);
+  assert.equal(active.cached.size, 0, "identical facts must not rotate the cache token or write to SQLite");
+  assert.equal(active.emitted.some((event) => event.type === "init" && event.sessions.length === 1), true);
+  stop();
+});
+
 test("disposal during connection acquisition prevents queued subscriptions and shuts down", async () => {
   active = harness(AHPStatus.InProgress);
   const wait = deferred<void>();

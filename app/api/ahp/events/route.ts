@@ -13,7 +13,7 @@ import {
   HostStreamRegistry,
   type HostStreamPartition,
 } from "@/lib/ahp/host-stream-registry";
-import { AHPSessionSummary } from "@/lib/ahp/types";
+import { AHPSessionSummary, AHPStatus, shouldShowSession } from "@/lib/ahp/types";
 import { getCachedSession, getCachedSessions } from "@/lib/db/session-cache";
 import { triageCard } from "@/lib/orchestrator/triage";
 import {
@@ -41,7 +41,7 @@ export const dynamic = "force-dynamic";
 type CardStreamEvent =
   | { type: "init"; cards: KanbanCard[]; cached?: boolean; connection?: AhpEndpointDiagnostics & { protocolVersion: string; totalSessions: number; visibleSessions: number; filteredSessions: number } }
   | { type: "cardChanged"; card: KanbanCard; triage?: TriageEvent; pendingInputCleared?: boolean }
-  | { type: "cardRemoved"; cardId: string }
+  | { type: "cardRemoved"; cardId: string; archivedSession?: ArchivedSession }
   | { type: "heartbeat"; action: HeartbeatAction }
   | InboxStreamEvent
   | ConnectionError;
@@ -51,6 +51,20 @@ interface TriageEvent {
   factors: string[];
   requiredGates: string[];
   requiresHumanApproval: boolean;
+}
+
+interface ArchivedSession {
+  session: AHPSessionSummary;
+  enrichment?: ChangesetEnrichment | null;
+  workers?: KanbanCard["workers"];
+  card?: KanbanCard;
+}
+
+function archiveCard(entry: ArchivedSession, hostUrl: string): KanbanCard {
+  return entry.card ??= safeEnrich(entry.session, entry.enrichment, {
+    hostUrl,
+    recordStatus: false,
+  }, entry.workers);
 }
 
 function safeEnrich(
@@ -82,6 +96,7 @@ async function tryTriage(
   isCurrent: () => boolean = () => true,
 ): Promise<TriageEvent | undefined> {
   if (!isWorkspaceEnabled(card)) return undefined;
+  if (card.isArchived) return undefined;
   if (!isCardInAnyAutomationScope(card, automationScopes)) return undefined;
   if (!TRIAGE_PHASES.includes(card.phase)) return undefined;
 
@@ -122,10 +137,20 @@ async function tryTriage(
 function projectRemoteEvent(
   event: Exclude<BridgeEvent, ConnectionError>,
   hostUrl: string,
+  archives: Map<string, ArchivedSession>,
 ): CardStreamEvent {
   if (event.type === "init") {
     const startedAt = performance.now();
-    const cards = event.sessions.filter(isWorkspaceEnabled).map((s) => {
+    archives.clear();
+    const cards = event.sessions.filter(isWorkspaceEnabled).filter((session) => {
+      if (!(session.status & AHPStatus.IsArchived)) return true;
+      archives.set(session.resource, {
+        session,
+        enrichment: event.enrichments.get(session.resource),
+        workers: event.workers.get(session.resource),
+      });
+      return false;
+    }).map((s) => {
       const card = safeEnrich(s, event.enrichments.get(s.resource), { hostUrl }, event.workers.get(s.resource));
       const pi = event.pendingInputs.get(s.resource);
       if (pi) card.pendingInput = pi;
@@ -138,13 +163,14 @@ function projectRemoteEvent(
       type: "init", cards,
       connection: {
         ...event.connection,
-        visibleSessions: cards.length,
-        filteredSessions: event.connection.totalSessions - cards.length,
+        visibleSessions: cards.length + archives.size,
+        filteredSessions: event.connection.totalSessions - cards.length - archives.size,
       },
     };
   }
 
   if (event.type === "sessionRemoved") {
+    archives.delete(event.resource);
     return {
       type: "cardRemoved",
       cardId: event.resource,
@@ -152,8 +178,17 @@ function projectRemoteEvent(
   }
 
   if (!isWorkspaceEnabled(event.session)) {
+    archives.delete(event.session.resource);
     return { type: "cardRemoved", cardId: event.session.resource };
   }
+  if (event.session.status & AHPStatus.IsArchived) {
+    const archivedSession: ArchivedSession = {
+      session: event.session, enrichment: event.enrichment, workers: event.workers,
+    };
+    archives.set(event.session.resource, archivedSession);
+    return { type: "cardRemoved", cardId: event.session.resource, archivedSession };
+  }
+  archives.delete(event.session.resource);
   const card = safeEnrich(event.session, event.enrichment, { hostUrl }, event.workers);
   // Attach pending input if available (null means explicitly cleared)
   if (event.pendingInput !== undefined) {
@@ -188,6 +223,7 @@ interface HostConnectionResource {
   connected: boolean;
   triagePending: Set<string>;
   triageAttempts: Map<string, { digest: string; at: number }>;
+  archives: Map<string, ArchivedSession>;
 }
 
 type HostPartition = HostStreamPartition<
@@ -207,6 +243,7 @@ const hostStreams = new HostStreamRegistry<
     connected: false,
     triagePending: new Set(),
     triageAttempts: new Map(),
+    archives: new Map(),
   }),
   (resource) => resource.abortController.abort(),
 );
@@ -423,8 +460,11 @@ function startHostBridge(partition: HostPartition): void {
           const projected = projectRemoteEvent(
             event,
             partition.hostUrl,
+            partition.resource.archives,
           );
           if (!hostStreams.isCurrent(partition)) return;
+          const removedActiveCard = projected.type === "cardRemoved"
+            && partition.cards.some((card) => card.id === projected.cardId);
           try {
             if (
               event.type === "sessionRemoved" &&
@@ -438,6 +478,10 @@ function startHostBridge(partition: HostPartition): void {
             } else if (projected.type === "init") {
               for (const card of projected.cards) {
                 projectCardToInbox(partition.hostUrl, card);
+              }
+            } else if (projected.type === "cardRemoved" && projected.archivedSession) {
+              if (removedActiveCard) {
+                projectArchivedSessionToInbox(partition.hostUrl, projected.archivedSession.session);
               }
             } else if (projected.type === "cardChanged") {
               const previousCard = partition.cards.find(
@@ -463,7 +507,7 @@ function startHostBridge(partition: HostPartition): void {
           hostStreams.broadcastPartition(partition, projected);
           if (projected.type === "init") requestHeartbeatTick(partition.hostUrl);
           if (projected.type === "cardChanged") requestHeartbeatTick(partition.hostUrl, projected.card.id);
-          if (projected.type === "cardRemoved") requestHeartbeatTick(partition.hostUrl, projected.cardId);
+          if (projected.type === "cardRemoved" && removedActiveCard) requestHeartbeatTick(partition.hostUrl, projected.cardId);
           if (projected.type === "cardChanged") scheduleTriage(partition, projected.card);
       } catch (error) {
           if (
@@ -494,7 +538,8 @@ function startHostBridge(partition: HostPartition): void {
 
 function createRemoteStream(
   hostUrl: string,
-  workspaceScope: Set<string> | null
+  workspaceScope: Set<string> | null,
+  archivedOnly: boolean,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const streamId = nextStreamId++;
@@ -518,11 +563,29 @@ function createRemoteStream(
     start(controller) {
       const subscriber = {
         id: streamId,
-        workspaceScope,
+        workspaceScope: archivedOnly ? null : workspaceScope,
         send(event: CardStreamEvent) {
           if (closed) return;
+          const archives = hostStreams.get(hostUrl)?.resource.archives;
+          let outgoing: CardStreamEvent = event;
+          if (archivedOnly) {
+            if (event.type === "init") {
+              outgoing = {
+                ...event,
+                cards: Array.from(archives?.values() ?? [], (entry) => archiveCard(entry, hostUrl)),
+              };
+            } else if (event.type === "cardRemoved" && event.archivedSession) {
+              outgoing = { type: "cardChanged", card: archiveCard(event.archivedSession, hostUrl) };
+            } else if (event.type === "cardChanged") {
+              outgoing = { type: "cardRemoved", cardId: event.card.id };
+            } else if (event.type !== "cardRemoved" && event.type !== "error") {
+              return;
+            }
+          } else if (event.type === "cardRemoved") {
+            outgoing = { type: "cardRemoved", cardId: event.cardId };
+          }
           const startedAt = performance.now();
-          const frame = encoder.encode(`data: ${JSON.stringify({ ...event, epoch, sequence: ++sequence })}\n\n`);
+          const frame = encoder.encode(`data: ${JSON.stringify({ ...outgoing, archivedCount: archives?.size ?? 0, epoch, sequence: ++sequence })}\n\n`);
           if (frame.byteLength > maxBufferedBytes) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({
               type: "error", code: "unknown",
@@ -554,17 +617,27 @@ function createRemoteStream(
         hostUrl,
         subscriber,
       );
-      unsubscribeInbox = inboxEvents.subscribe((event) => {
-        if (inboxEventMatchesHost(event, hostUrl)) {
-          subscriber.send(event);
-        }
-      });
+      if (!archivedOnly) {
+        unsubscribeInbox = inboxEvents.subscribe((event) => {
+          if (inboxEventMatchesHost(event, hostUrl)) {
+            subscriber.send(event);
+          }
+        });
+      }
 
       if (firstForHost) {
         const startedAt = performance.now();
         try {
           partition.cards = getCachedSessions(hostUrl)
-            .filter((cached) => isWorkspaceEnabled(cached.summary)).map((cached) =>
+            .filter((cached) => shouldShowSession(cached.summary.status, cached.summary.changes?.files)
+              && isWorkspaceEnabled(cached.summary))
+            .filter((cached) => {
+              if (!(cached.summary.status & AHPStatus.IsArchived)) return true;
+              partition.resource.archives.set(cached.summary.resource, {
+                session: cached.summary, enrichment: cached.enrichment,
+              });
+              return false;
+            }).map((cached) =>
             safeEnrich(cached.summary, cached.enrichment, {
               recordStatus: false,
               hostUrl,
@@ -604,7 +677,8 @@ export async function GET(request: NextRequest) {
   const hostUrl = request.nextUrl.searchParams.get("host");
   console.info("[ahp:sse]", hostUrl ? `remote stream → ${hostUrl}` : "no host (empty board)");
   const workspaceScope = parseWorkspaceScope(request.nextUrl.searchParams.get("workspaceScope"));
-  const stream = hostUrl ? createRemoteStream(hostUrl, workspaceScope) : createEmptyStream();
+  const archivedOnly = request.nextUrl.searchParams.get("view") === "archived";
+  const stream = hostUrl ? createRemoteStream(hostUrl, workspaceScope, archivedOnly) : createEmptyStream();
 
   return new NextResponse(stream, {
     headers: {

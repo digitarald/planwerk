@@ -15,6 +15,8 @@ interface BoardState {
   detailCardId: string | null;
   workspaceFilters: Set<string>;
   hideDone: boolean;
+  archivedCount: number;
+  setArchivedCount: (count: number) => void;
   setDetailCard: (id: string | null) => void;
   setCards: (cards: KanbanCard[]) => void;
   replaceCard: (id: string, card: KanbanCard) => void;
@@ -194,7 +196,7 @@ export function selectHasUnassigned(state: BoardState): boolean {
 
 /** Count of archived cards (for the toggle badge) */
 export function selectArchivedCount(state: BoardState): number {
-  return state.cards.filter((c) => c.isArchived).length;
+  return state.archivedCount;
 }
 
 export const useBoardStore = create<BoardState>()(
@@ -204,6 +206,9 @@ export const useBoardStore = create<BoardState>()(
       detailCardId: null,
       workspaceFilters: new Set(),
       hideDone: true,
+      archivedCount: 0,
+      setArchivedCount: (archivedCount) => set((state) =>
+        state.archivedCount === archivedCount ? state : { archivedCount }),
       setDetailCard: (id) => set({ detailCardId: id }),
       setCards: (cards) =>
         uiMeasure("board.set-cards", () => set((state) => ({

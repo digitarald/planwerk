@@ -222,6 +222,18 @@ and no longer races SSE against phase hydration HTTP calls. Cached snapshots do
 not count as a live connection. Server-side stream closure
 must remove inbox listeners just as consumer cancellation does.
 
+The default SSE stream projects non-archived cards only and includes an
+`archivedCount` derived from enabled archive catalog entries with code changes.
+The browser opens a separate `view=archived` stream only while archives are shown.
+It shares the existing host bridge, projects catalog/cache facts without live
+session reads or status/phase writes, and has no automation scope. Archive
+projections are cached per host generation and invalidated by catalog events.
+The active partition's `cards` never includes archives. Check both streams when
+debugging archive/unarchive races: snapshots merge by view, removals are
+view-scoped, and hiding archives closes only the archive stream. Identical
+summary/enrichment cache rows are not rewritten on reconnect.
+See `zettelkasten/architecture-and-design.md` for the AHP client practices.
+
 Each subscriber's Web Streams queue has an eight-MiB byte budget. A slow reader
 disconnects without stopping other subscribers; an oversized snapshot is an
 explicit terminal error. This is not a promise about proxy/TCP buffering. The
@@ -520,7 +532,8 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
 - `app/api/ahp/events/route.ts` — SSE bridge + triage entry point. Each connected board
   sends its selected workspace paths as `workspaceScope`; all automation is limited to
   the union of cards visible in those connected tabs **for the same originating AHP
-  host**. Card snapshots, bridge connections, heartbeat operations, action broadcasts,
+  host**. The optional archive stream never contributes automation scope.
+  Card snapshots, bridge connections, heartbeat operations, action broadcasts,
   and reprojection are host-partitioned; disconnecting one tab does not stop another
   subscriber or host. An unfiltered tab intentionally permits all workspaces. A malformed
   supplied scope fails closed, while an omitted
