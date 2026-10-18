@@ -1,14 +1,21 @@
 "use client";
 
+import { Profiler, useEffect, type ProfilerOnRenderCallback } from "react";
 import { BoardOverview, BoardPhaseStrip } from "@/components/board/board-overview";
 import { CardDetailModal } from "@/components/board/card-detail-modal";
 import { KanbanBoard } from "@/components/board/kanban-board";
 import { InboxWorkspace } from "@/components/inbox/inbox-workspace";
 import { useBoardStore } from "@/lib/store/board-store";
 import { useUIStore } from "@/lib/store/ui-store";
+import { uiMark, uiReactRender } from "@/lib/diagnostics/ui-performance-client";
+
+const recordBoardRender: ProfilerOnRenderCallback = (_id, _phase, actualDuration, _baseDuration, startTime) => {
+  uiReactRender(actualDuration, startTime);
+};
 
 export function AgentWorkspace() {
   const workspaceMode = useUIStore((state) => state.workspaceMode);
+  useEffect(() => { uiMark("workspace.commit"); }, [workspaceMode]);
   const detailCard = useBoardStore((state) =>
     state.detailCardId
       ? state.cards.find((card) => card.id === state.detailCardId)
@@ -16,7 +23,7 @@ export function AgentWorkspace() {
   );
 
   const workspace = workspaceMode === "board"
-    ? <KanbanBoard />
+    ? <Profiler id="board" onRender={recordBoardRender}><KanbanBoard /></Profiler>
     : workspaceMode === "inbox"
       ? <InboxWorkspace />
       : (

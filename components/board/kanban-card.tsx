@@ -1,7 +1,7 @@
 "use client";
 
 import { Draggable } from "@hello-pangea/dnd";
-import type { CSSProperties } from "react";
+import { memo, type CSSProperties } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -282,7 +282,7 @@ function formatRelativeTime(timestamp: number): string {
   return `${days}d`;
 }
 
-export function KanbanCard({ card, index }: KanbanCardProps) {
+export const KanbanCard = memo(function KanbanCard({ card, index }: KanbanCardProps) {
   const setDetailCard = useBoardStore((state) => state.setDetailCard);
   const updateCard = useBoardStore((state) => state.updateCard);
   const showWorkspaceTags = useBoardStore(selectShowWorkspaceTags);
@@ -482,4 +482,4 @@ export function KanbanCard({ card, index }: KanbanCardProps) {
       }}
     </Draggable>
   );
-}
+});

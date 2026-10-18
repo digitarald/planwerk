@@ -24,6 +24,8 @@ async function fixture() {
       res.end(JSON.stringify({unread: 7, open: 9, connected: true, running: 2}));
     });
     server.listen(Number(process.env.PORT), process.env.HOSTNAME);
+    console.log("fixture ready", process.env.PLANWERK_RUN_ID);
+    console.error("Bearer " + process.env.PLANWERK_DESKTOP_TOKEN);
   `);
   return resources;
 }
@@ -41,13 +43,20 @@ async function availablePort() {
 
 test("owned backend becomes ready and is stopped without leaving its listener behind", async () => {
   const resources = await fixture();
-  const backend = new Backend({ resources, dataDir: resources, port: await availablePort(), onExit: assert.fail });
+  const backend = new Backend({ resources, dataDir: resources, port: await availablePort(), onExit: assert.fail, runId: "fixture-launch" });
   try {
     await backend.start();
     assert.deepEqual(await backend.status(), { unread: 7, open: 9, connected: true, running: 2 });
     assert.equal((await fetch(`${backend.origin}/api/desktop/status`)).status, 403);
     await backend.stop();
     await assert.rejects(fetch(backend.origin));
+    const text = await readFile(join(resources, "server.log"), "utf8");
+    const records = text.trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(records.every((record) => record.runId === "fixture-launch"));
+    assert.ok(records.some((record) => record.body === "Bearer [REDACTED]"));
+    const timing = records.find((record) => record.metric === "backend.ready");
+    assert.ok(timing && Number.isFinite(timing.durationMs) && timing.durationMs >= 0);
+    assert.match(text, /fixture ready/);
   } finally {
     await backend.stop();
     await rm(resources, { recursive: true, force: true });

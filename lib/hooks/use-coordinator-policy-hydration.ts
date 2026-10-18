@@ -5,6 +5,7 @@ import { useEffect, useMemo } from "react";
 import { useBoardStore } from "@/lib/store/board-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
 import { useCoordinatorPolicyStore } from "@/lib/store/coordinator-policy-store";
+import { uiElapsed } from "@/lib/diagnostics/ui-performance-client";
 
 /**
  * Board policy is global and always readable. A connected host only adds the
@@ -21,10 +22,11 @@ export function useCoordinatorPolicyHydration() {
   );
 
   useEffect(() => {
+    const startedAt = performance.now();
     const hasSessionScope = status === "connected" && Boolean(hostUrl);
     void hydrate(
       hasSessionScope ? hostUrl : null,
       hasSessionScope && cardIdKey ? cardIdKey.split("\u0000") : [],
-    );
+    ).then(() => uiElapsed("coordinator.hydrate", startedAt));
   }, [status, hostUrl, cardIdKey, hydrate]);
 }

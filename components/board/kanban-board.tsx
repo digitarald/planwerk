@@ -2,12 +2,14 @@
 
 import { DragDropContext, type DropResult } from "@hello-pangea/dnd";
 import { Archive, MonitorCheck } from "lucide-react";
+import { useEffect } from "react";
 
 import { KanbanColumn } from "@/components/board/kanban-column";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import { useBoardStore } from "@/lib/store/board-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
 import { COLUMNS, PHASE_ORDER, type GateStatus, type KanbanCard, type Phase } from "@/lib/types";
+import { uiAfterPaint, uiMark } from "@/lib/diagnostics/ui-performance-client";
 
 interface TransitionArgs {
   cardId: string;
@@ -104,6 +106,10 @@ export function KanbanBoard() {
   const reconcileCard = useBoardStore((state) => state.reconcileCard);
   const addFeedItem = useOrchestratorStore((state) => state.addFeedItem);
   const diagnostics = useConnectionStore((state) => state.diagnostics);
+  useEffect(() => {
+    uiMark("board.commit", { cards: cards.length });
+    return uiAfterPaint("board.paint-opportunity", { cards: cards.length });
+  }, [cards]);
 
   const handleDragEnd = (result: DropResult) => {
     if (!result.destination) return;

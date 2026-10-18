@@ -21,10 +21,16 @@ export type OtlpNotificationHandler = (notification: OtlpNotification) => void;
  * default case. This wrapper lets us capture them without modifying the SDK.
  */
 export class TelemetryTapTransport implements AhpTransport {
+  private readonly inner: AhpTransport;
+  private readonly onOtlp: OtlpNotificationHandler;
+
   constructor(
-    private readonly inner: AhpTransport,
-    private readonly onOtlp: OtlpNotificationHandler
-  ) {}
+    inner: AhpTransport,
+    onOtlp: OtlpNotificationHandler
+  ) {
+    this.inner = inner;
+    this.onOtlp = onOtlp;
+  }
 
   send(message: JsonRpcMessage | string): Promise<void> | void {
     return this.inner.send(message);
@@ -66,8 +72,8 @@ export class TelemetryTapTransport implements AhpTransport {
           params: params as OtlpNotification["params"],
         });
       }
-    } catch {
-      // Inspection is best-effort; never block the transport
+    } catch (error) {
+      console.warn("[ahp:telemetry] Could not inspect host telemetry:", error);
     }
   }
 }

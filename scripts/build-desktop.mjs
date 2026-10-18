@@ -1,8 +1,8 @@
-import { spawnSync } from "node:child_process";
 import { cp, mkdir, readFile, rm, writeFile, chmod, symlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { basename, join } from "node:path";
 import sharp from "sharp";
+import { packageDesktop, run as execute } from "./package-desktop.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const desktop = join(root, "desktop");
@@ -16,9 +16,7 @@ if (process.versions.node !== manifest.engines.node) {
 }
 
 function run(command, args, cwd = root, env = process.env) {
-  const result = spawnSync(command, args, { cwd, env, stdio: "inherit" });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`${command} exited ${result.status}`);
+  execute(command, args, cwd, env);
 }
 
 run("npm", ["run", "typecheck"], desktop);
@@ -63,4 +61,5 @@ await sharp(Buffer.from('<svg width="44" height="32" viewBox="0 0 44 32" xmlns="
   .png().toFile(join(generated, "tray.png"));
 
 run("npm", ["run", dev ? "build:dev" : "build"], desktop);
+if (!dev) await packageDesktop(desktop);
 console.info(`Native ${dev ? "development" : "release"} app built in desktop/build (unsigned).`);

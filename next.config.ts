@@ -9,6 +9,7 @@ const nextConfig: NextConfig = {
     },
   } : {}),
   devIndicators: false,
+  reactProductionProfiling: process.env.PLANWERK_PROFILE === "1",
   serverExternalPackages: ["better-sqlite3", "@microsoft/agent-host-protocol", "@github/copilot-sdk", "@github/copilot"],
 };
 

@@ -16,10 +16,10 @@
     "native:setup": "npm --prefix desktop ci && npm --prefix desktop run prepare",
     "native:build": "node scripts/build-desktop.mjs",
     "native:dev": "npm run native:build -- --dev && npm --prefix desktop run start",
-    "native:test": "node --test desktop/src/*.test.ts lib/desktop/*.test.ts lib/data-directory.test.ts",
+    "native:test": "node --test scripts/*.test.mjs desktop/src/*.test.ts lib/desktop/*.test.ts lib/diagnostics/*.test.ts lib/data-directory.test.ts",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "node --test lib/**/*.test.ts lib/data-directory.test.ts desktop/src/*.test.ts"
+    "test": "node --test scripts/*.test.mjs lib/**/*.test.ts lib/data-directory.test.ts desktop/src/*.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

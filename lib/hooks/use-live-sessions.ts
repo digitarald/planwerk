@@ -7,6 +7,7 @@ import { useConnectionStore } from "@/lib/store/connection-store";
 import { useInboxStore } from "@/lib/store/inbox-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import { StreamOrder } from "@/lib/ahp/stream-order";
+import { uiElapsed, uiMark, uiMeasure, uiSpan } from "@/lib/diagnostics/ui-performance-client";
 
 export function useLiveSessions() {
   const status = useConnectionStore((s) => s.status);
@@ -48,6 +49,8 @@ export function useLiveSessions() {
     }
 
     hasHandshakedRef.current = false;
+    let connectionStarted = performance.now();
+    uiMark("sse.connect");
 
     // Build the SSE URL — pass host when available
     let sseUrl = "/api/ahp/events";
@@ -63,13 +66,16 @@ export function useLiveSessions() {
     eventSourceRef.current = es;
 
     es.onopen = () => {
+      if (disposed || eventSourceRef.current !== es) return;
+      uiMark("sse.open");
       console.info("[ahp:sse]", "stream open");
     };
 
     es.onmessage = (event) => {
       if (disposed || eventSourceRef.current !== es) return;
+      const endApply = uiSpan("sse.apply", { characters: event.data.length });
       try {
-        const data = JSON.parse(event.data);
+        const data = uiMeasure("sse.parse", () => JSON.parse(event.data), { characters: event.data.length });
         const admission = order.accept(data);
         if (admission === "stale") return;
         if (admission === "resync") {
@@ -92,6 +98,7 @@ export function useLiveSessions() {
         }
 
         if (data.type === "init") {
+          uiElapsed("sse.init", connectionStarted, { cards: data.cards.length, cached: Number(Boolean(data.cached)) });
           console.info("[ahp:sse]", `init: ${data.cards.length} cards`);
           setCards(data.cards);
           hasHandshakedRef.current = true;
@@ -165,6 +172,8 @@ export function useLiveSessions() {
         }
       } catch (e) {
         console.error("Failed to parse SSE event:", e);
+      } finally {
+        endApply();
       }
     };
 
@@ -182,6 +191,8 @@ export function useLiveSessions() {
         es.close();
         eventSourceRef.current = null;
       } else {
+        connectionStarted = performance.now();
+        uiMark("sse.connect");
         console.warn("[ahp:sse]", "stream error, browser will auto-reconnect");
       }
     };

@@ -1,15 +1,20 @@
 import "server-only";
 
-import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
-import { existsSync } from "fs";
 import path from "path";
 import { dataDirectory } from "../data-directory";
+import { DiagnosticLog } from "../diagnostics/log.ts";
 
 import type { OtlpNotification } from "./telemetry-transport";
 
 const TELEMETRY_DIR = path.join(dataDirectory(), "telemetry");
 const LOGS_FILE = path.join(TELEMETRY_DIR, "logs.ndjson");
-const MAX_LINES = 10_000;
+const log = new DiagnosticLog(
+  LOGS_FILE,
+  { runId: process.env.PLANWERK_RUN_ID ?? "web", pid: process.pid },
+  [process.env.PLANWERK_DESKTOP_TOKEN ?? ""],
+  undefined,
+  (message) => console.error("[ahp:telemetry]", message),
+);
 
 // OTLP severity number bands → human-readable level
 const SEVERITY_MAP: Record<number, string> = {};
@@ -30,54 +35,15 @@ export interface TelemetryLogEntry {
   attrs?: Record<string, unknown>;
 }
 
-let dirEnsured = false;
-
-async function ensureDir(): Promise<void> {
-  if (dirEnsured) return;
-  if (!existsSync(TELEMETRY_DIR)) {
-    await mkdir(TELEMETRY_DIR, { recursive: true });
-  }
-  dirEnsured = true;
-}
-
-// Serialized write queue to prevent concurrent file writes and ordering issues
-let writeChain: Promise<void> = Promise.resolve();
-
-function enqueueWrite(data: string): void {
-  writeChain = writeChain.then(async () => {
-    await ensureDir();
-    await appendFile(LOGS_FILE, data);
-  }).catch(() => {
-    // Write failures are non-fatal; keep the chain alive
-  });
-}
-
-/**
- * Truncate the log file to the last MAX_LINES lines.
- * Must be awaited before starting the telemetry tap to avoid data loss.
- */
-export async function rotateLogs(): Promise<void> {
-  await ensureDir();
-  if (!existsSync(LOGS_FILE)) return;
-  try {
-    const content = await readFile(LOGS_FILE, "utf-8");
-    const lines = content.split("\n").filter(Boolean);
-    if (lines.length > MAX_LINES) {
-      const trimmed = lines.slice(-MAX_LINES).join("\n") + "\n";
-      await writeFile(LOGS_FILE, trimmed);
-    }
-  } catch {
-    // Non-fatal — file may not exist yet
-  }
-}
-
 /** Convert nanosecond OTLP timestamp to ISO string */
 function otlpTimestamp(timeUnixNano?: string | number): string {
   if (!timeUnixNano) return new Date().toISOString();
   // OTLP timestamps are nanoseconds; convert to milliseconds
   const ns = typeof timeUnixNano === "string" ? Number(timeUnixNano) : timeUnixNano;
   const ms = Math.floor(ns / 1_000_000);
-  return new Date(ms).toISOString();
+  const date = new Date(ms);
+  if (!Number.isFinite(date.getTime())) throw new Error("Invalid OTLP log timestamp");
+  return date.toISOString();
 }
 
 /** Extract string value from OTLP AnyValue */
@@ -115,7 +81,7 @@ function extractSessionResource(
 
 /**
  * Handle an inbound `otlp/exportLogs` notification.
- * Parses the OTLP/JSON payload and enqueues NDJSON records for file write.
+ * Persists OTLP/JSON records with bounded retention and host timestamps.
  */
 export function handleOtlpLogs(notification: OtlpNotification): void {
   if (notification.method !== "otlp/exportLogs") return;
@@ -135,9 +101,8 @@ export function handleOtlpLogs(notification: OtlpNotification): void {
     }>;
   }>;
 
-  if (!resourceLogs?.length) return;
-
-  const lines: string[] = [];
+  if (!Array.isArray(resourceLogs)) throw new Error("Invalid OTLP resourceLogs");
+  if (!resourceLogs.length) return;
 
   for (const rl of resourceLogs) {
     const session = extractSessionResource(rl.resource?.attributes);
@@ -158,12 +123,8 @@ export function handleOtlpLogs(notification: OtlpNotification): void {
         const attrs = extractAttributes(lr.attributes);
         if (attrs) entry.attrs = attrs;
 
-        lines.push(JSON.stringify(entry));
+        log.write({ ...entry, scope: entry.scope ?? "ahp:host" });
       }
     }
   }
-
-  if (lines.length === 0) return;
-
-  enqueueWrite(lines.join("\n") + "\n");
 }

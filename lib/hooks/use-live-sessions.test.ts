@@ -10,6 +10,7 @@ const state = {
   host: "ws://a",
   changes: [] as Array<{ kind: string; id?: string }>,
   liveConnections: 0,
+  initStarts: [] as number[],
 };
 const key = "__planwerkLiveSessionsTest";
 Object.defineProperty(globalThis, key, { value: state, configurable: true });
@@ -45,6 +46,11 @@ const hooks = registerHooks({
       setConnected(){${s}.liveConnections++;},setError(){${s}.changes.push({kind:"error"});}});}`;
     if (specifier === "@/lib/store/inbox-store") source = "export const useInboxStore={getState(){return {reconcileItem(){},removeItem(){}};}};";
     if (specifier === "@/lib/store/orchestrator-store") source = "export function useOrchestratorStore(selector){return selector({addFeedItem(){},setMonitoringStatus(){}});}";
+    if (specifier === "@/lib/diagnostics/ui-performance-client") source = `
+      export function uiElapsed(name,start){if(name==="sse.init") ${s}.initStarts.push(start);}
+      export function uiMark(){}
+      export function uiSpan(){return ()=>{};}
+      export function uiMeasure(name,work){return work();}`;
     if (source) return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(source)}` };
     if (specifier.startsWith("@/")) return { shortCircuit: true, url: pathToFileURL(path.join(root, `${specifier.slice(2)}.ts`)).href };
     if (specifier.startsWith(".") && !path.extname(specifier) && context.parentURL?.startsWith("file:")) {
@@ -82,4 +88,25 @@ test("host switch and stream retirement fence delayed snapshots and removal resu
   assert.equal(state.changes.at(-1)?.id, "b");
   assert.equal(b.closed, false);
   assert.equal(state.changes.some((change) => change.kind === "error"), false);
+});
+
+test("reconnect init timing starts at the stream drop, including reconnect wait", (t) => {
+  for (const cleanup of state.effects.splice(0)) cleanup();
+  state.initStarts.length = 0;
+  let now = 100;
+  t.mock.method(performance, "now", () => now);
+  useLiveSessions();
+  const stream = FakeEventSource.instances.at(-1)!;
+  now = 150;
+  stream.onopen?.();
+  now = 180;
+  stream.emit({ type: "init", epoch: "first", sequence: 1, cards: [] });
+  now = 1000;
+  stream.onerror?.();
+  now = 1100;
+  stream.onopen?.();
+  now = 1200;
+  stream.emit({ type: "init", epoch: "reconnected", sequence: 1, cards: [] });
+  assert.deepEqual(state.initStarts, [100, 1000]);
+  assert.equal(stream.closed, false);
 });

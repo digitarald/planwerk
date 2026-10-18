@@ -1,15 +1,17 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseStatus, type InboxStatus } from "./model.ts";
+import { DiagnosticLog } from "../../lib/diagnostics/log.ts";
+import { captureOutput } from "./diagnostics.ts";
 
 export interface BackendOptions {
   resources: string;
   dataDir: string;
   port: number;
   onExit: (message: string) => void;
+  runId?: string;
 }
 
 export class Backend {
@@ -26,30 +28,42 @@ export class Backend {
   }
 
   async start(): Promise<void> {
+    const startedAt = performance.now();
     const backend = join(this.options.resources, "backend");
-    const log = openSync(join(this.options.dataDir, "server.log"), "a", 0o600);
-    try {
-      this.child = spawn(join(backend, "node"), [join(backend, "watch-server.cjs")], {
-        cwd: backend,
-        detached: true,
-        stdio: ["ignore", log, log],
-        env: {
-          ...process.env,
-          NODE_ENV: "production",
-          NODE_OPTIONS: "",
-          HOSTNAME: "127.0.0.1",
-          PORT: String(this.options.port),
-          PLANWERK_DATA_DIR: this.options.dataDir,
-          PLANWERK_DESKTOP_TOKEN: this.token,
-          PLANWERK_PARENT_PID: String(process.pid),
-          PATH: `${join(backend, "bin")}:${process.env.PATH || "/usr/bin:/bin:/usr/sbin:/sbin"}:/opt/homebrew/bin:/usr/local/bin`,
-        },
-      });
-    } finally {
-      closeSync(log);
+    const log = new DiagnosticLog(
+      join(this.options.dataDir, "server.log"),
+      { runId: this.options.runId ?? "standalone", pid: process.pid },
+      [this.token],
+      undefined,
+      (message) => console.error(message),
+    );
+    log.write({ level: "INFO", scope: "backend:lifecycle", body: "Starting local server", port: this.options.port });
+    this.child = spawn(join(backend, "node"), [join(backend, "watch-server.cjs")], {
+      cwd: backend,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        NODE_ENV: "production",
+        NODE_OPTIONS: "",
+        HOSTNAME: "127.0.0.1",
+        PORT: String(this.options.port),
+        PLANWERK_DATA_DIR: this.options.dataDir,
+        PLANWERK_DESKTOP_TOKEN: this.token,
+        PLANWERK_PARENT_PID: String(process.pid),
+        PLANWERK_RUN_ID: this.options.runId ?? "standalone",
+        AHP_DEBUG: process.env.AHP_DEBUG ?? "1",
+        PATH: `${join(backend, "bin")}:${process.env.PATH || "/usr/bin:/bin:/usr/sbin:/sbin"}:/opt/homebrew/bin:/usr/local/bin`,
+      },
+    });
+    for (const [stream, level] of [[this.child.stdout, "INFO"], [this.child.stderr, "ERROR"]] as const) {
+      const output = captureOutput(log, level, this.child.pid);
+      stream?.on("data", (chunk: Buffer) => output.write(chunk));
+      stream?.on("end", () => output.end());
     }
     this.child.on("error", (error) => this.recordFailure(error.message));
     this.child.on("exit", (code, signal) => {
+      log.write({ level: this.stopping ? "INFO" : "ERROR", scope: "backend:lifecycle", body: "Local server exited", code, signal });
       if (!this.stopping) {
         this.recordFailure(`Local server stopped (${signal ?? code}). See server.log.`);
       }
@@ -60,6 +74,10 @@ export class Backend {
       if (this.failure) throw new Error(this.failure);
       try {
         await this.status();
+        log.write({
+          level: "INFO", scope: "performance", body: "Backend ready",
+          metric: "backend.ready", durationMs: performance.now() - startedAt,
+        });
         return;
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error);

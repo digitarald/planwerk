@@ -4,6 +4,8 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { UNASSIGNED_WORKSPACE } from "@/lib/automation-scope";
 import { KanbanCard, Phase } from "@/lib/types";
 import { replaceAuthoritativeCard } from "./card-reconcile";
+import { uiMark, uiMeasure, uiSpan } from "@/lib/diagnostics/ui-performance-client";
+import { observeBoardStorage } from "@/lib/diagnostics/ui-storage";
 
 // Sentinel value for filtering cards with no project
 export { UNASSIGNED_WORKSPACE };
@@ -204,18 +206,18 @@ export const useBoardStore = create<BoardState>()(
       hideDone: true,
       setDetailCard: (id) => set({ detailCardId: id }),
       setCards: (cards) =>
-        set((state) => ({
+        uiMeasure("board.set-cards", () => set((state) => ({
           cards,
           workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters, state.hideDone),
-        })),
+        })), { cards: cards.length }),
       replaceCard: (id, incoming) =>
-        set((state) => {
+        uiMeasure("board.replace-card", () => set((state) => {
           const cards = state.cards.map((existing) => {
             if (existing.id !== id) return existing;
             return replaceAuthoritativeCard(existing, incoming);
           });
           return { cards, workspaceFilters: normalizeWorkspaceFilters(cards, state.workspaceFilters, state.hideDone) };
-        }),
+        }), { cards: get().cards.length }),
       updateCard: (id, incoming) =>
         set((state) => {
           const cards = state.cards.map((existing) => {
@@ -275,7 +277,15 @@ export const useBoardStore = create<BoardState>()(
     }),
     {
       name: "planwerk-board",
-      storage: createJSONStorage(() => sessionStorage),
+      storage: observeBoardStorage(createJSONStorage(() => sessionStorage)),
+      onRehydrateStorage: () => {
+        const end = uiSpan("board.hydrate");
+        return (_state, error) => {
+          end();
+          uiMark("board.hydrate", { success: Number(!error) });
+          if (error) console.warn("[board:hydrate] Could not restore board preferences:", error);
+        };
+      },
       partialize: (state) => ({
         workspaceFilters: Array.from(state.workspaceFilters),
         hideDone: state.hideDone,

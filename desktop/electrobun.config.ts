@@ -21,6 +21,7 @@ export default {
       icons: "generated/Planwerk.iconset",
       codesign: false,
       notarize: false,
+      createDmg: false,
     },
   },
   runtime: { exitOnLastWindowClosed: false },

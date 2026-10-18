@@ -1,9 +1,11 @@
 "use client";
 
+import { useEffect } from "react";
 import { CoordinatorDrawer } from "@/components/orchestrator/coordinator-drawer";
 import { TitleBar } from "@/components/title-bar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useCoordinatorPolicyHydration } from "@/lib/hooks/use-coordinator-policy-hydration";
+import { uiAfterPaint, uiMark } from "@/lib/diagnostics/ui-performance-client";
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -11,6 +13,10 @@ interface AppShellProps {
 
 export function AppShell({ children }: AppShellProps) {
   useCoordinatorPolicyHydration();
+  useEffect(() => {
+    uiMark("shell.commit", undefined, true);
+    return uiAfterPaint("shell.paint-opportunity");
+  }, []);
 
   return (
     <TooltipProvider delay={250}>

@@ -122,12 +122,16 @@ function projectRemoteEvent(
   hostUrl: string,
 ): CardStreamEvent {
   if (event.type === "init") {
+    const startedAt = performance.now();
     const cards = event.sessions.map((s) => {
       const card = safeEnrich(s, event.enrichments.get(s.resource), { hostUrl }, event.workers.get(s.resource));
       const pi = event.pendingInputs.get(s.resource);
       if (pi) card.pendingInput = pi;
       return card;
     });
+    if (process.env.PLANWERK_DESKTOP_TOKEN) console.info("[performance]", JSON.stringify({
+      metric: "server.project-init", durationMs: performance.now() - startedAt, cards: cards.length,
+    }));
     return { type: "init", cards, connection: event.connection };
   }
 
@@ -502,6 +506,7 @@ function createRemoteStream(
         workspaceScope,
         send(event: CardStreamEvent) {
           if (closed) return;
+          const startedAt = performance.now();
           const frame = encoder.encode(`data: ${JSON.stringify({ ...event, epoch, sequence: ++sequence })}\n\n`);
           if (frame.byteLength > maxBufferedBytes) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({
@@ -520,6 +525,10 @@ function createRemoteStream(
             return;
           }
           controller.enqueue(frame);
+          if (event.type === "init" && process.env.PLANWERK_DESKTOP_TOKEN) console.info("[performance]", JSON.stringify({
+            metric: "server.sse-init", durationMs: performance.now() - startedAt,
+            cards: event.cards.length, cached: Boolean(event.cached), bytes: frame.byteLength,
+          }));
         },
         close() {
           closeStream();
@@ -537,6 +546,7 @@ function createRemoteStream(
       });
 
       if (firstForHost) {
+        const startedAt = performance.now();
         try {
           partition.cards = getCachedSessions(hostUrl).map((cached) =>
             safeEnrich(cached.summary, cached.enrichment, {
@@ -546,6 +556,10 @@ function createRemoteStream(
           );
         } catch {
           partition.cards = [];
+        } finally {
+          if (process.env.PLANWERK_DESKTOP_TOKEN) console.info("[performance]", JSON.stringify({
+            metric: "server.cache-init", durationMs: performance.now() - startedAt, cards: partition.cards.length,
+          }));
         }
         partition.initialized = true;
       }

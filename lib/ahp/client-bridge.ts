@@ -18,7 +18,7 @@ import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCache
 import { getDb } from "@/lib/db/schema";
 import { claimSessionOwnership, isSessionOwnedByHost } from "@/lib/db/session-ownership";
 import { TelemetryTapTransport } from "./telemetry-transport";
-import { handleOtlpLogs, rotateLogs } from "./telemetry-logs";
+import { handleOtlpLogs } from "./telemetry-logs";
 import { listAllSessions } from "./catalog";
 import { connectInitializedAhpClient, type AhpEndpointDiagnostics } from "./endpoint";
 import {
@@ -806,9 +806,6 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
     signal.addEventListener("abort", dispose, { once: true });
   }
 
-  // Rotate telemetry logs before the tap starts receiving to avoid data loss
-  await rotateLogs().catch(() => {});
-
   let connection: Awaited<ReturnType<typeof connectInitializedAhpClient>>;
   try {
     connection = await connectInitializedAhpClient(hostUrl, {
@@ -851,8 +848,10 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
     const logsChannel = expandLevelTemplate(initResult.telemetry.logs, "debug");
     info("subscribing to telemetry logs:", logsChannel);
     client.subscribe(logsChannel).catch((err) => {
-      debug("telemetry logs subscription failed:", err instanceof Error ? err.message : err);
+      warn("telemetry logs subscription failed; host diagnostics unavailable:", err instanceof Error ? err.message : err);
     });
+  } else {
+    warn("Host does not advertise telemetry logs; host diagnostics unavailable");
   }
 
   // Fetch initial session list
