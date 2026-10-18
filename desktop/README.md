@@ -94,6 +94,10 @@ endpoint and Copilot authentication remain prerequisites for managing sessions.
 - Quit stops Planwerk's server and its owned child-process group. It does not
   stop VS Code or sessions owned by VS Code. Restart Local Server requires
   confirmation because it interrupts in-flight coordinator work.
+  Shutdown waits for the owned watchdog's exit event, allowing its three-second
+  group-reaping deadline to finish. It does not probe a dying process group,
+  which can report `EPERM` on macOS even during normal teardown. A watchdog that
+  exceeds the deadline is force-stopped; signaling and exit failures remain errors.
 
 ## Data and diagnostics
 

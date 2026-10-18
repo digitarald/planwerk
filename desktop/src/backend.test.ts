@@ -83,6 +83,53 @@ test("port collision does not adopt or kill a server belonging to someone else",
   }
 });
 
+test("shutdown waits for owned child exit instead of probing a dying process group", async () => {
+  const resources = await fixture();
+  const backend = new Backend({ resources, dataDir: resources, port: await availablePort(), onExit: assert.fail });
+  const kill = process.kill;
+  try {
+    await backend.start();
+    process.kill = (pid: number, signal?: string | number) => {
+      if (pid < 0 && signal === 0) {
+        throw Object.assign(new Error("Dying process group"), { code: "EPERM" });
+      }
+      return kill.call(process, pid, signal);
+    };
+    await backend.stop();
+    await assert.rejects(fetch(backend.origin));
+  } finally {
+    process.kill = kill;
+    await backend.stop();
+    await rm(resources, { recursive: true, force: true });
+  }
+});
+
+test("normal shutdown waits for the watchdog to reap a SIGTERM-resistant server", async () => {
+  const resources = await fixture();
+  await cp(new URL("../watch-server.cjs", import.meta.url), join(resources, "backend/watch-server.cjs"));
+  await writeFile(join(resources, "backend/server.js"), `
+    const http = require("node:http");
+    require("node:fs").writeFileSync(${JSON.stringify(join(resources, "server.pid"))}, String(process.pid));
+    process.on("SIGTERM", () => {});
+    http.createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({unread:0,open:0,connected:false,running:0}));
+    }).listen(Number(process.env.PORT), process.env.HOSTNAME);
+  `);
+  const backend = new Backend({ resources, dataDir: resources, port: await availablePort(), onExit: assert.fail });
+  try {
+    await backend.start();
+    const serverPid = Number(await readFile(join(resources, "server.pid"), "utf8"));
+    await backend.stop();
+    assert.throws(() => process.kill(serverPid, 0), { code: "ESRCH" });
+    await assert.rejects(fetch(backend.origin));
+    await backend.stop();
+  } finally {
+    await backend.stop();
+    await rm(resources, { recursive: true, force: true });
+  }
+});
+
 test("watchdog reaps a server that ignores SIGTERM after the desktop parent crashes", async () => {
   const resources = await mkdtemp(join(tmpdir(), "pw-watch-"));
   const parent = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });

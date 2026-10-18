@@ -99,8 +99,22 @@ export class Backend {
 
   async stop(): Promise<void> {
     this.stopping = true;
-    const pid = this.child?.pid;
+    const child = this.child;
+    const pid = child?.pid;
     if (!pid) return;
+    const waitForExit = (timeoutMs: number): Promise<boolean> => {
+      if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+      return new Promise((resolve) => {
+        const finish = (exited: boolean) => {
+          clearTimeout(timer);
+          child.off("exit", onExit);
+          resolve(exited);
+        };
+        const onExit = () => finish(true);
+        const timer = setTimeout(() => finish(false), timeoutMs);
+        child.once("exit", onExit);
+      });
+    };
     // The process group was created by this instance; never signal an adopted server.
     const signalGroup = (signal: NodeJS.Signals): boolean => {
       try {
@@ -115,19 +129,14 @@ export class Backend {
       this.child = undefined;
       return;
     }
-    for (let attempt = 0; attempt < 30; attempt++) {
-      await delay(100);
-      try {
-        process.kill(-pid, 0);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ESRCH") {
-          this.child = undefined;
-          return;
-        }
-        throw error;
+    // The watchdog reaps its group after three seconds. Wait for its exit to
+    // be reaped instead of probing a dying macOS group (which can return EPERM).
+    if (!await waitForExit(4500)) {
+      signalGroup("SIGKILL");
+      if (!await waitForExit(1500)) {
+        throw new Error("The owned local-server watchdog did not exit after SIGKILL");
       }
     }
-    signalGroup("SIGKILL");
     this.child = undefined;
   }
 
