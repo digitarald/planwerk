@@ -129,8 +129,15 @@ and must not show a risk blocker. The shared eligibility predicate is
 `lib/orchestrator/risk-authority.ts`.
 SDK failures and invalid model output use `risk-classifier.ts`; incomplete
 counts-only facts and sensitive auth/security/permissions/schema/migration or
-destructive-operation evidence are deterministically high risk. Only complete,
+destructive-operation file paths are deterministically high risk. Prose is
+interpreted by the model, not used as a keyword-based pre-model floor. Prose keywords
+and size thresholds remain conservative SDK-failure fallback signals.
+The model's shared rubric evaluates impact, blast radius, reversibility, exposure,
+and uncertainty. Only complete,
 revision-bound per-file facts can receive a lower fallback assessment.
+`risk_assessment.guidance` from the working directory's nearest configuration
+is part of `RiskInput` and its digest; `RISK_POLICY_VERSION` also invalidates
+assessments when the rubric changes. Inspect these before reusing an older verdict.
 `review_chat_cleanups` records peer-chat disposal by normalized
 `(host_url, chat_uri)`. Retries are host-scoped and bounded to three total
 attempts per row. The global heartbeat scans every persisted host; an origin
@@ -327,7 +334,15 @@ When the board is empty, distinguish these diagnostic states before changing cod
   intentionally does not fall back to a standalone host.
 - The selected host has `totalSessions: 0`: the host catalog itself is empty.
 - `totalSessions > 0` with `visibleSessions: 0`: every catalog entry was filtered
-  because it is archived without code changes. This is an intentional board filter.
+  because it is archived without code changes or its folder configuration sets
+  `enabled: false`. These are intentional board filters.
+  `lib/orchestrator/config-file.ts` discovers the nearest `.github/planwerk.yml`
+  or `.yaml` from each local working directory up to its repository root
+  (`.yml` wins ties; nearest configuration replaces parent configuration).
+  SSE filters cached/live cards before board, triage, and inbox projection;
+  the automation-host selector rechecks enabled state on each read.
+  Reconnect after editing to refresh the full board/workspace list. A multi-folder
+  session is hidden if any folder is disabled. Old inbox history is not erased.
 - Multiple compatible editor candidates: diagnostics record the chosen catalog size and
   selection rule. A host with more sessions wins, so an empty standalone instance cannot
   hide an active desktop catalog.

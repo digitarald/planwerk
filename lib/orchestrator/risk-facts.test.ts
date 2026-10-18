@@ -13,6 +13,9 @@ import {
 } from "./risk-facts.ts";
 import { setCardRiskInDb } from "./risk-persistence.ts";
 import { claimSessionOwnership } from "../db/session-ownership.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const HOST_URL = "vscode-local://desktop";
 const CARD_ID = "card-1";
@@ -145,6 +148,26 @@ function snapshot(db: Database.Database) {
   assert.ok(value);
   return value;
 }
+
+test("folder risk guidance is source-bound and changes invalidate an assessment", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "planwerk-risk-guidance-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, ".github"));
+  const file = join(root, ".github", "planwerk.yml");
+  writeFileSync(file, "risk_assessment:\n  guidance: Changes affect local drafts only.\n");
+  const db = createDb();
+  t.after(() => db.close());
+  const summary = { ...JSON.parse(summaryJson()), workingDirectory: root };
+  db.prepare("UPDATE session_cache SET summary_json = ?").run(JSON.stringify(summary));
+  const before = snapshot(db);
+  assert.equal(before.input.riskGuidance, "Changes affect local drafts only.");
+  setCardRiskInDb(db, CARD_ID, "low", ["Bounded impact"], "copilot", before.digest);
+  writeFileSync(file, "risk_assessment:\n  guidance: Changes affect shared production workflows.\n");
+  const after = snapshot(db);
+  assert.notEqual(after.digest, before.digest);
+  assert.equal(riskFactsStillMatch(db, before), false);
+  assert.equal(readAuthoritativeRisk(db, CARD_ID, HOST_URL).status, "stale");
+});
 
 test("summary change rejects stale verified enrichment after a failed refresh", () => {
   const db = createDb();

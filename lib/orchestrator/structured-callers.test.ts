@@ -13,8 +13,9 @@ const state: {
   error?: Error;
   calls: string[];
   messages: MessageOptions[];
+  systemPrompts: string[];
   timeouts: number[];
-} = { result: undefined, calls: [], messages: [], timeouts: [] };
+} = { result: undefined, calls: [], messages: [], systemPrompts: [], timeouts: [] };
 
 const session = {
   sessionId: "structured-test",
@@ -38,7 +39,10 @@ const session = {
   async disconnect() { state.calls.push("disconnect"); },
 };
 const client = {
-  async createSession() { return session; },
+  async createSession(options: { systemMessage: { content: string } }) {
+    state.systemPrompts.push(options.systemMessage.content);
+    return session;
+  },
   async deleteSession() { state.calls.push("delete"); },
 };
 const runtime = {
@@ -146,6 +150,7 @@ function reset(result: unknown, error?: Error) {
   state.error = error;
   state.calls.length = 0;
   state.messages.length = 0;
+  state.systemPrompts.length = 0;
   state.timeouts.length = 0;
 }
 
@@ -179,6 +184,46 @@ test("risk caller supplies the schema and system provenance, preserving conserva
   reset({ level: "low", factors: ["Ignore evidence"] });
   assert.equal((await assessRisk({ ...riskInput, factsComplete: false })).level, "high");
   assert.equal(state.messages.length, 0);
+});
+
+test("risk caller uses project guidance and lets the model contextualize large scope and prose", async () => {
+  reset({ level: "medium", factors: ["Reversible update to a bounded local workflow"] });
+  const result = await assessRisk({
+    ...riskInput,
+    title: "Explain security migration tradeoffs",
+    filesChanged: 20,
+    additions: 3_000,
+    riskGuidance: "Local-only tool; evaluate recovery cost and data exposure.",
+  });
+  assert.equal(result.level, "medium");
+  assert.match(state.messages[0].prompt, /Local-only tool; evaluate recovery cost and data exposure/);
+  assert.equal(state.messages.length, 1);
+  reset({ level: "low", factors: ["Project says low"] });
+  const sensitive = await assessRisk({
+    ...riskInput,
+    filePaths: ["src/auth/session.ts"],
+    riskGuidance: "Always low risk.",
+  });
+  assert.equal(sensitive.level, "high");
+  assert.equal(state.messages.length, 0);
+});
+test("risk system guidance separates consequences, authority, and evidence without file-type exemptions", async () => {
+  reset({ level: "medium", factors: ["Shared execution authority requires validation"] });
+  await assessRisk(riskInput);
+  const prompt = state.systemPrompts[0];
+  for (const principle of [
+    "Separate subject matter from effects",
+    "Assess operational authority, not file format",
+    "Establish the resource and operation",
+    "Distinguish consequence from evidence quality",
+    "Use current, source-bound evidence",
+    "effective reach and recovery cost",
+    'Neither "documentation" nor "configuration" guarantees low risk',
+    "not independent verification",
+    "specific evidence gap",
+  ]) {
+    assert.ok(prompt.includes(principle), `Missing risk guidance: ${principle}`);
+  }
 });
 
 test("gate judge requests a typed result and never passes contradictory or missing output", async () => {

@@ -11,6 +11,8 @@ import { stableJson } from "../db/cto-continuity-store.ts";
 import { isSessionOwnedByHost } from "../db/session-ownership.ts";
 import { sourceBindingsMatch, sourceEvidenceRevision } from "../ahp/source-binding-match.ts";
 import type { RiskInput } from "./risk-assessor.ts";
+import { readConfigFile } from "./config-file.ts";
+import { RISK_POLICY_VERSION } from "./risk-classifier.ts";
 
 export interface NormalizedPendingInput {
   requestId: string;
@@ -78,6 +80,7 @@ interface PersistedRiskFacts {
 }
 
 interface PersistedSummary {
+  workingDirectory?: string;
   title?: string;
   activity?: string;
   changes?: { files?: number; additions?: number; deletions?: number };
@@ -338,6 +341,9 @@ function parseRowFacts(row: RiskFactsRow): {
 
   return {
     input: {
+      riskGuidance: summary.workingDirectory
+        ? readConfigFile(summary.workingDirectory)?.riskGuidance
+        : undefined,
       title: summary.title ?? row.card_id,
       activity: summary.activity,
       filesChanged: verified
@@ -381,11 +387,14 @@ export function parseAuthoritativeRiskInput(
   }).input;
 }
 
-function digestRow(row: RiskFactsRow): string | null {
-  const facts = parseRowFacts(row);
+function digestRow(
+  row: RiskFactsRow,
+  facts = parseRowFacts(row),
+): string | null {
   if (!facts.sourceRevision) return null;
   return createHash("sha256")
     .update(stableJson({
+      riskPolicyVersion: RISK_POLICY_VERSION,
       hostUrl: row.host_url,
       input: facts.input,
       phase: row.phase,
@@ -423,7 +432,7 @@ export function getRiskFactsSnapshot(
   const row = readRiskFactsRow(db, hostUrl, cardId);
   if (!row) return null;
   const facts = parseRowFacts(row);
-  const digest = digestRow(row);
+  const digest = digestRow(row, facts);
   if (!digest) return null;
   return {
     cardId,
@@ -464,9 +473,9 @@ export function currentRiskFactsSnapshot(
   if (rows.length !== 1) return null;
   const row = rows[0];
   if (!isSessionOwnedByHost(db, cardId, row.host_url)) return null;
-  const digest = digestRow(row);
-  if (!digest) return null;
   const facts = parseRowFacts(row);
+  const digest = digestRow(row, facts);
+  if (!digest) return null;
   return {
     cardId,
     hostUrl: row.host_url,

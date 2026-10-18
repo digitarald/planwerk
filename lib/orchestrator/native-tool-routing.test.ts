@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import path from "node:path";
 import { after, test } from "node:test";
@@ -115,6 +115,36 @@ const [
 
 const db = getDb();
 const hostUrl = "vscode-local://desktop";
+
+test("nested folders pick up custom YAML gates, scripts, and review policy", async () => {
+  const project = path.join(scratchRoot, "custom-project");
+  const nested = path.join(project, "packages", "app");
+  mkdirSync(path.join(project, ".github"), { recursive: true });
+  mkdirSync(nested, { recursive: true });
+  writeFileSync(path.join(project, ".github", "planwerk.yaml"), `
+scripts:
+  - name: Local check
+    command: npm run check:local
+gates:
+  build-to-review:
+    required:
+      - type: script
+        name: Local check
+review_policy:
+  medium:
+    auto_approve_plan: true
+risk_assessment:
+  guidance: Consider recovery cost in this local-only tool.
+`);
+  const gates = getGatesForTransition("build", "review", nested, "medium");
+  assert.equal(gates.length, 1);
+  assert.equal(gates[0].gateName, "Local check");
+  assert.equal(gates[0].command, "npm run check:local");
+  const { loadConfig } = await import("./skill-config.ts");
+  const config = loadConfig(nested);
+  assert.equal(config.reviewPolicy.medium.autoApprovePlan, true);
+  assert.equal(config.riskAssessment.guidance, "Consider recovery cost in this local-only tool.");
+});
 
 after(() => {
   process.chdir(originalCwd);

@@ -17,6 +17,8 @@ export interface DeterministicRiskAssessment {
   factors: string[];
 }
 
+export const RISK_POLICY_VERSION = "impact-v3";
+
 const HIGH_RISK_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   [/(?:^|[/_.-])auth(?:entication|orization)?(?:[/_.-]|$)|\bauth(?:entication|orization)?\b|\boauth\b|\bsso\b|\blogin\b|\bsession token\b/i, "Authentication-sensitive change"],
   [/(?:^|[/_.-])security(?:[/_.-]|$)|\bsecurity\b|\bcredential\b|\bsecret\b|\bencrypt(?:ion|ed)?\b|\bcrypto(?:graphy)?\b/i, "Security-sensitive change"],
@@ -25,31 +27,17 @@ const HIGH_RISK_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   [/\b(?:drop|truncate|wipe|purge|delete all|destroy|force[ -]?push|reset\s+--hard|rollback)\b|\b(?:delete|remove)\b.{0,40}\b(?:data|database|table|schema|record|file|directory|resource|account)\b/i, "Destructive operation"],
 ];
 
-function evidenceText(input: DeterministicRiskInput): string {
-  return [
-    input.title,
-    input.activity,
-    ...(input.filePaths ?? []),
-    input.planContent,
-    input.lastAgentMessage,
-  ].filter((value): value is string => typeof value === "string").join("\n");
-}
-
 export function classifyRiskDeterministically(
   input: DeterministicRiskInput,
 ): DeterministicRiskAssessment {
-  if (input.factsComplete !== true) {
-    return {
-      level: "high",
-      factors: ["Authoritative file facts are incomplete"],
-    };
-  }
+  const conservative = requiresConservativeHighRisk(input);
+  if (conservative) return conservative;
 
-  const evidence = evidenceText(input);
+  const evidence = [
+    input.title, input.activity, input.planContent, input.lastAgentMessage,
+  ].filter((value): value is string => typeof value === "string").join("\n");
   const sensitive = HIGH_RISK_PATTERNS.find(([pattern]) => pattern.test(evidence));
-  if (sensitive) {
-    return { level: "high", factors: [sensitive[1]] };
-  }
+  if (sensitive) return { level: "high", factors: [sensitive[1]] };
 
   const factors: string[] = [];
   let score = 0;
@@ -78,6 +66,12 @@ export function classifyRiskDeterministically(
 export function requiresConservativeHighRisk(
   input: DeterministicRiskInput,
 ): DeterministicRiskAssessment | null {
-  const assessment = classifyRiskDeterministically(input);
-  return assessment.level === "high" ? assessment : null;
+  if (input.factsComplete !== true) {
+    return { level: "high", factors: ["Authoritative file facts are incomplete"] };
+  }
+  // Prose needs contextual interpretation; paths are the deterministic floor.
+  const sensitive = HIGH_RISK_PATTERNS.find(([pattern]) =>
+    (input.filePaths ?? []).some((path) => pattern.test(path)),
+  );
+  return sensitive ? { level: "high", factors: [sensitive[1]] } : null;
 }

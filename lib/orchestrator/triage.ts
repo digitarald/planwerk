@@ -30,7 +30,7 @@ export async function triageCard(
   cardId: string,
   riskSnapshot: RiskFactsSnapshot,
   toPhase: Phase,
-  options: { isCurrent?: () => boolean } = {},
+  options: { isCurrent?: () => boolean; projectPath?: string } = {},
 ): Promise<TriageResult | null> {
   if (!TRIAGE_PHASES.includes(toPhase)) {
     return null;
@@ -50,7 +50,7 @@ export async function triageCard(
 
   const nextPhase = getNextPhase(toPhase);
   const applicableGates = nextPhase
-    ? getGatesForTransition(toPhase, nextPhase, undefined, storedRisk.level)
+    ? getGatesForTransition(toPhase, nextPhase, options.projectPath, storedRisk.level)
     : [];
   const requiredGates = applicableGates.filter((gate) => gate.required);
   const requiresHumanApproval = requiredGates.some(

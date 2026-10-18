@@ -33,6 +33,7 @@ import { inboxEventMatchesHost, inboxEvents } from "@/lib/inbox/events";
 import type { InboxStreamEvent } from "@/lib/inbox/types";
 import { KanbanCard, type Phase, type RiskLevel } from "@/lib/types";
 import { registerDesktopHosts } from "@/lib/desktop/status";
+import { isWorkspaceEnabled } from "@/lib/orchestrator/config-file";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,6 +81,7 @@ async function tryTriage(
   automationScopes: Iterable<Set<string> | null> = [],
   isCurrent: () => boolean = () => true,
 ): Promise<TriageEvent | undefined> {
+  if (!isWorkspaceEnabled(card)) return undefined;
   if (!isCardInAnyAutomationScope(card, automationScopes)) return undefined;
   if (!TRIAGE_PHASES.includes(card.phase)) return undefined;
 
@@ -98,7 +100,7 @@ async function tryTriage(
       card.id,
       snapshot,
       card.phase,
-      { isCurrent },
+      { isCurrent, projectPath: card.workingDirectory },
     );
 
     if (!result) return undefined;
@@ -123,7 +125,7 @@ function projectRemoteEvent(
 ): CardStreamEvent {
   if (event.type === "init") {
     const startedAt = performance.now();
-    const cards = event.sessions.map((s) => {
+    const cards = event.sessions.filter(isWorkspaceEnabled).map((s) => {
       const card = safeEnrich(s, event.enrichments.get(s.resource), { hostUrl }, event.workers.get(s.resource));
       const pi = event.pendingInputs.get(s.resource);
       if (pi) card.pendingInput = pi;
@@ -132,7 +134,14 @@ function projectRemoteEvent(
     if (process.env.PLANWERK_DESKTOP_TOKEN) console.info("[performance]", JSON.stringify({
       metric: "server.project-init", durationMs: performance.now() - startedAt, cards: cards.length,
     }));
-    return { type: "init", cards, connection: event.connection };
+    return {
+      type: "init", cards,
+      connection: {
+        ...event.connection,
+        visibleSessions: cards.length,
+        filteredSessions: event.connection.totalSessions - cards.length,
+      },
+    };
   }
 
   if (event.type === "sessionRemoved") {
@@ -142,6 +151,9 @@ function projectRemoteEvent(
     };
   }
 
+  if (!isWorkspaceEnabled(event.session)) {
+    return { type: "cardRemoved", cardId: event.session.resource };
+  }
   const card = safeEnrich(event.session, event.enrichment, { hostUrl }, event.workers);
   // Attach pending input if available (null means explicitly cleared)
   if (event.pendingInput !== undefined) {
@@ -216,7 +228,7 @@ function getAutomationHosts() {
     return {
       hostUrl,
       cards: partition.cards.filter((card) =>
-        isCardInAnyAutomationScope(card, scopes)
+        isWorkspaceEnabled(card) && isCardInAnyAutomationScope(card, scopes)
       ),
     };
   });
@@ -229,6 +241,7 @@ function reprojectCard(
   const partition = hostStreams.get(hostUrl);
   const existing = partition?.cards.find((card) => card.id === cardId);
   if (!partition || !existing) return undefined;
+  if (!isWorkspaceEnabled(existing)) return undefined;
 
   const cached = getCachedSession(hostUrl, cardId);
   if (!cached) return undefined;
@@ -322,6 +335,7 @@ function scheduleTriage(partition: HostPartition, card: KanbanCard): void {
       if (!hostStreams.isCurrent(partition)) return;
       const scopes = Array.from(partition.subscribers.values(), (subscriber) => subscriber.workspaceScope);
       const isCurrent = () => hostStreams.isCurrent(partition)
+        && isWorkspaceEnabled(card)
         && getAuthoritativeRiskSnapshot(partition.hostUrl, card.id)?.digest === snapshot.digest
         && partition.cards.some((item) => item.id === card.id && item.phase === phase
           && isCardInAnyAutomationScope(item, Array.from(partition.subscribers.values(), (subscriber) => subscriber.workspaceScope)));
@@ -415,7 +429,8 @@ function startHostBridge(partition: HostPartition): void {
             if (
               event.type === "sessionRemoved" &&
               event.reason === "archived" &&
-              event.session
+              event.session &&
+              isWorkspaceEnabled(event.session)
             ) {
               projectArchivedSessionToInbox(partition.hostUrl, event.session);
             } else if (event.type === "sessionRemoved") {
@@ -548,13 +563,15 @@ function createRemoteStream(
       if (firstForHost) {
         const startedAt = performance.now();
         try {
-          partition.cards = getCachedSessions(hostUrl).map((cached) =>
+          partition.cards = getCachedSessions(hostUrl)
+            .filter((cached) => isWorkspaceEnabled(cached.summary)).map((cached) =>
             safeEnrich(cached.summary, cached.enrichment, {
               recordStatus: false,
               hostUrl,
             })
           );
-        } catch {
+        } catch (error) {
+          console.warn("[ahp:sse] Cached initialization failed:", error);
           partition.cards = [];
         } finally {
           if (process.env.PLANWERK_DESKTOP_TOKEN) console.info("[performance]", JSON.stringify({

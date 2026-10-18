@@ -111,6 +111,73 @@ structured domain errors.
 Keep the direct `vscode-jsonrpc` pin aligned with the SDK: a regression test
 checks that both resolve the same module so error constructor identities match.
 
+## Folder configuration
+
+Each local workspace can supply `.github/planwerk.yml` or
+`.github/planwerk.yaml`. Planwerk searches from the session's working directory
+up to its repository root and uses the nearest configuration. If both extensions
+exist in the same folder, `.yml` wins. Configurations are not layered: omitted
+settings use Planwerk's built-in defaults, not a parent project's settings.
+A workspace without a configuration does not inherit Planwerk's own project
+configuration. Remote workspace URIs cannot load local configuration files.
+
+The configuration supports custom gate scripts, review skills and prompts,
+phase gates, per-risk review policies, orchestrator settings, WIP limits, and
+coherence settings. See [this project's configuration](.github/planwerk.yml)
+for an example. Gate commands still run in the session's working directory,
+not the directory containing the YAML.
+
+To keep a notes or product-brain folder off the board, put this in that folder's
+`.github/planwerk.yml`:
+
+```yaml
+enabled: false
+```
+
+Reconnect the board after editing configuration to refresh the whole list.
+Disabled folders are excluded from cached and live board cards, the workspace
+picker, and coordinator automation; an unfiltered board cannot opt them back in.
+A multi-folder session is excluded if any of its folders is disabled.
+This does not archive or delete the underlying Copilot sessions or their history.
+It also does not erase previously recorded inbox items.
+
+### Risk guidance
+
+Risk triage considers impact, blast radius, reversibility, exposure, and
+uncertainty. File and line counts inform scope but do not force the model to
+return high risk. Titles and summaries are interpreted in context rather than
+classified by sensitive keywords alone.
+
+The rubric separates subject matter from operational effects, and file format
+from authority. It asks what the changed material controls, which resource could
+be affected, and how a failure could be recovered. Documentation is not
+automatically harmless, and a small configuration edit can have broad authority.
+Missing or stale evidence is an explicit uncertainty, not proof of damage.
+Explanations must connect the current evidence to a consequence, containment
+property, recovery path, or specific evidence gap rather than repeat a generic
+scope label.
+
+Use project guidance to describe consequences and recovery constraints:
+
+```yaml
+risk_assessment:
+  guidance: |
+    This tool runs locally and has no production deployment.
+    Evaluate whether changes could lose user-authored notes or publish them.
+    Routine editing is reversible through Git; bulk rewrites need recovery evidence.
+```
+
+Guidance is domain context, not a fixed risk override. Incomplete verified file
+evidence and sensitive file paths still impose a high-risk floor. If the model
+is unavailable or returns invalid output, conservative keyword- and size-based classification
+remains the fallback. Changes to guidance or the shared rubric invalidate prior
+assessments; reassessment runs for eligible cards without waking cold sessions
+merely to collect evidence.
+
+Configuration edits are detected on subsequent reads. Invalid YAML or invalid
+`enabled` / `risk_assessment.guidance` values raise an explicit error rather
+than silently enabling a folder or falling back to a different policy.
+
 ## Learn more
 
 - [`zettelkasten/vision.md`](zettelkasten/vision.md) — the problem, principles, and north star

@@ -1,12 +1,9 @@
 import "server-only";
 
-import { readFileSync, existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
-import { parse as parseYaml } from "yaml";
-
 import type { ArtifactType, RiskLevel } from "@/lib/types";
 import type { CoherenceConfig } from "./coherence-engine";
 import { resolveReviewPrompt } from "./review-prompt";
+import { readConfigFile } from "./config-file.ts";
 
 export interface SkillConfig {
   id: string;
@@ -88,6 +85,8 @@ export interface OrchestratorConfig {
 }
 
 export interface PlanwerkConfig {
+  enabled: boolean;
+  riskAssessment: { guidance?: string };
   scripts: Record<string, string>;
   skills: Record<string, SkillConfig>;
   gates: Record<string, GateTransitionConfig>;
@@ -227,44 +226,25 @@ function parseDuration(value: string | number | undefined, defaultMs: number): n
   }
 }
 
-// Cache: file path → { mtime, config }
-let configCache: { path: string; mtime: number; config: PlanwerkConfig } | null = null;
-
 /**
- * Load the Planwerk config from .github/planwerk.yml relative to a project path.
+ * Load the nearest .github/planwerk.yml (or .yaml), stopping at the repository root.
  * Falls back to sensible defaults if file doesn't exist.
  * When projectPath is provided, only that project's config is used (no cwd fallback).
  */
 export function loadConfig(projectPath?: string): PlanwerkConfig {
-  const searchPaths: string[] = [];
-  if (projectPath) {
-    searchPaths.push(resolve(projectPath, ".github/planwerk.yml"));
-  } else {
-    searchPaths.push(resolve(process.env.PLANWERK_DATA_DIR || process.cwd(), ".github/planwerk.yml"));
-  }
-
-  for (const filePath of searchPaths) {
-    if (!existsSync(filePath)) continue;
-
-    // Simple mtime-based cache
-    const { mtimeMs } = statSync(filePath);
-    if (configCache && configCache.path === filePath && configCache.mtime === mtimeMs) {
-      return configCache.config;
-    }
-
-    try {
-      const raw = readFileSync(filePath, "utf-8");
-      const parsed = parseYaml(raw) as Record<string, unknown>;
-      const config = mergeConfig(parsed);
-      configCache = { path: filePath, mtime: mtimeMs, config };
-      return config;
-    } catch (err) {
-      console.warn("[skill-config] Failed to parse", filePath, err);
-    }
+  const file = readConfigFile(projectPath);
+  if (file) {
+    return {
+      ...mergeConfig(file.raw),
+      enabled: file.enabled,
+      riskAssessment: { guidance: file.riskGuidance },
+    };
   }
 
   // Return defaults
   return {
+    enabled: true,
+    riskAssessment: {},
     scripts: DEFAULT_SCRIPTS,
     skills: DEFAULT_SKILLS,
     gates: DEFAULT_GATES,
@@ -377,7 +357,10 @@ function mergeConfig(raw: Record<string, unknown>): PlanwerkConfig {
         : DEFAULT_COHERENCE.blockHighRiskShip,
   };
 
-  return { scripts, skills, gates, reviewPolicy, orchestrator, wipLimits, coherence };
+  return {
+    enabled: true, riskAssessment: {},
+    scripts, skills, gates, reviewPolicy, orchestrator, wipLimits, coherence,
+  };
 }
 
 function parseGateRefs(raw: unknown[] | undefined): GateRef[] {

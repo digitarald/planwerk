@@ -9,6 +9,8 @@ import type { AHPBridgeOptions, BridgeEvent } from "./client-bridge.ts";
 import type { HeartbeatHostSnapshot } from "../orchestrator/heartbeat.ts";
 import type { NextRequest } from "next/server";
 import { inboxEvents } from "../inbox/events.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const state: {
   bridge?: AHPBridgeOptions;
@@ -28,7 +30,7 @@ const routeUrl = pathToFileURL(path.join(root, "app/api/ahp/events/route.ts")).h
 const mocks: Record<string, string> = {
   "next/server": `export class NextResponse extends Response { static json(value, init) { return new Response(JSON.stringify(value), init); } }`,
   "@/lib/ahp/client-bridge": `export async function createAHPBridge(options) { globalThis["${key}"].bridge = options; }`,
-  "@/lib/ahp/enrich-card": `export function enrichSessionToCard(s) { globalThis["${key}"].sessions.set(s.resource, structuredClone(s)); return { id:s.resource, title:s.title, phase:"plan", runtime:s.status === 24 ? "input-needed" : s.status === 8 ? "running" : "idle", risk:"medium" }; }`,
+  "@/lib/ahp/enrich-card": `export function enrichSessionToCard(s) { globalThis["${key}"].sessions.set(s.resource, structuredClone(s)); return { id:s.resource, title:s.title, workingDirectory:s.workingDirectory, phase:"plan", runtime:s.status === 24 ? "input-needed" : s.status === 8 ? "running" : "idle", risk:"medium" }; }`,
   "@/lib/ahp/map-session": `export function mapSessionToCard(s) { return {id:s.resource}; }`,
   "@/lib/ahp/connection-error": `export function classifyError(message) { return {type:"error",message}; }`,
   "@/lib/db/session-cache": `export function getCachedSessions() { return [{summary:{resource:"cached",title:"Cached",status:1}}, ...[...globalThis["${key}"].sessions.values()].map(summary=>({summary}))]; } export function getCachedSession(host,id) {const summary=globalThis["${key}"].sessions.get(id);return summary ? {summary} : undefined;}`,
@@ -93,6 +95,51 @@ test("cached initialization is display-only until live init; queued events retai
   assert.equal(state.bridge!.signal!.aborted, true);
 });
 
+test("disabled folders are absent from cache, live snapshots, updates, and automation", async (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "planwerk-hidden-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  mkdirSync(path.join(directory, ".github"));
+  const file = path.join(directory, ".github", "planwerk.yml");
+  writeFileSync(file, "enabled: false\n");
+  const session = {
+    resource: "hidden-notes", title: "Notes", provider: "fake", status: 1,
+    createdAt: "", modifiedAt: "", workingDirectory: directory,
+  };
+  state.sessions.set(session.resource, session);
+  t.after(() => state.sessions.delete(session.resource));
+  const reader = await open("ws://hidden-notes");
+  const decode = (value?: Uint8Array) => JSON.parse(new TextDecoder().decode(value).slice(6));
+  const cached = decode((await reader.read()).value);
+  assert.equal(cached.cards.some((card: { id: string }) => card.id === session.resource), false);
+  emit({
+    type: "init", sessions: [session], enrichments: new Map(), pendingInputs: new Map(), workers: new Map(),
+    connection: {
+      logicalUrl: "ws://hidden-notes", transport: "websocket", resolvedTarget: "ws://hidden-notes",
+      candidateCount: 1, compatibleCandidateCount: 1, protocolVersion: "1.0.0",
+      totalSessions: 1, visibleSessions: 1, filteredSessions: 0,
+    },
+  });
+  const live = decode((await reader.read()).value);
+  assert.deepEqual(live.cards, []);
+  assert.equal(live.connection.filteredSessions, 1);
+  state.riskStatus = "missing";
+  t.after(() => { state.riskStatus = "current"; });
+  const before = state.triages;
+  emit({ type: "sessionAdded", session });
+  assert.equal(decode((await reader.read()).value).type, "cardRemoved");
+  await tick();
+  assert.equal(state.triages, before);
+  assert.deepEqual(state.getHosts!()[0].cards, []);
+  state.riskStatus = "current";
+  writeFileSync(file, "enabled: true\n");
+  emit({ type: "sessionSummaryChanged", session });
+  assert.equal(decode((await reader.read()).value).card.id, session.resource);
+  writeFileSync(file, "enabled: false\n");
+  assert.deepEqual(state.getHosts!()[0].cards, []);
+  emit({ type: "sessionSummaryChanged", session });
+  assert.equal(decode((await reader.read()).value).type, "cardRemoved");
+  await reader.cancel();
+});
 test("producer closure removes inbox listeners, closes host and fences replayed cache", async () => {
   const reader = await open();
   await reader.read();
