@@ -288,3 +288,22 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* Flightdeck: deep-space backdrop behind the transparent WebGL canvas. */
+.flightdeck-stage {
+  background:
+    radial-gradient(ellipse 60% 50% at 18% 20%, rgb(124 58 237 / 0.22), transparent 70%),
+    radial-gradient(ellipse 50% 45% at 85% 80%, rgb(14 165 233 / 0.18), transparent 70%),
+    radial-gradient(ellipse 120% 90% at 50% 45%, #1a1f4a 0%, #0c0f29 60%, #070918 100%);
+}
+
+@keyframes flightdeck-announce {
+  0% { opacity: 0; transform: translateY(6px) scale(0.92); }
+  8%, 80% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: translateY(-4px); }
+}
+
+@keyframes flightdeck-bob {
+  0%, 100% { transform: translateY(0) rotate(-4deg); }
+  50% { transform: translateY(-4px) rotate(4deg); }
+}

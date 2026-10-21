@@ -33,7 +33,7 @@ import {
 } from "./session-read-policy";
 import { withAHPClient } from "./client-operation";
 import type { PendingInput, WorkerActivity } from "@/lib/types";
-import { observeChatFacts, shouldObserveChat, visibleBackgroundWork } from "./chat-facts";
+import { currentToolFromChat, observeChatFacts, shouldObserveChat, visibleBackgroundWork } from "./chat-facts";
 import { mapWorkerChats, retainInactiveWorkers, type WorkerChatSummary } from "./worker-activity";
 import { getWorkerActivityHistory, recordWorkerActivity } from "@/lib/orchestrator/worker-activity-store";
 import { readSessionDetailsForState } from "./session-details";
@@ -148,6 +148,8 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
     const summary = { ...update.session } as AHPSessionSummary & { _planwerkRiskFacts?: unknown };
     // Cached binding belongs to its persisted enrichment, not future live facts.
     delete summary._planwerkRiskFacts;
+    // Live-only display fact; the refreshed summary came from the cache and never carries it.
+    summary.currentTool = current.currentTool;
     sessions.set(update.session.resource, summary);
     if (update.enrichment) enrichments.set(update.session.resource, update.enrichment);
     else enrichments.delete(update.session.resource);
@@ -615,6 +617,8 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
     session.backgroundWork = [...liveChatStates.values()]
       .filter((entry) => entry.sessionUri === sessionUri)
       .flatMap(({ state }) => visibleBackgroundWork(state, session.chats).map((work) => ({ chat: state.resource, work })));
+    const defaultChat = session.defaultChat ? liveChatStates.get(session.defaultChat)?.state : undefined;
+    session.currentTool = defaultChat ? currentToolFromChat(defaultChat) : undefined;
     const previous = workersBySession.get(sessionUri) ?? [];
     const workers = mapWorkerChats(workerChatsBySession.get(sessionUri) ?? session.chats ?? []).map((worker) => ({
       ...worker,
@@ -702,7 +706,7 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
       if (observer.sessionUri === sessionUri) stopChatObserver(workerId);
     }
     const session = sessions.get(sessionUri);
-    if (session) { session.backgroundWork = []; session.chatDetails = {}; }
+    if (session) { session.backgroundWork = []; session.chatDetails = {}; session.currentTool = undefined; }
     const observer = workerObservers.get(sessionUri);
     if (!observer) return;
     workerObservers.delete(sessionUri);

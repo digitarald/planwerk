@@ -2,7 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Subscription, type AhpClient, type SubscriptionEvent } from "@microsoft/agent-host-protocol/client";
 import type { ChatState, ChangesetState, Snapshot, SessionChatSummary } from "@microsoft/agent-host-protocol";
-import { canSendToChat, observeChatFacts, projectChatChangeset, visibleBackgroundWork, visibleChatCatalog, shouldObserveChat, assertDefaultChatWritable } from "./chat-facts.ts";
+import { canSendToChat, currentToolFromChat, observeChatFacts, projectChatChangeset, visibleBackgroundWork, visibleChatCatalog, shouldObserveChat, assertDefaultChatWritable } from "./chat-facts.ts";
+
+test("current tool is the latest running or streaming call in the active turn", () => {
+  const toolCall = (toolCallId: string, status: string, extra: Record<string, unknown> = {}) =>
+    ({ kind: "toolCall", toolCall: { toolCallId, status, toolName: "view", displayName: "Read", ...extra } });
+  const state = (responseParts: unknown[]) => ({ activeTurn: { responseParts } }) as unknown as Pick<ChatState, "activeTurn">;
+  assert.equal(currentToolFromChat({} as Pick<ChatState, "activeTurn">), undefined);
+  assert.equal(currentToolFromChat(state([toolCall("done", "completed")])), undefined);
+  assert.deepEqual(
+    currentToolFromChat(state([toolCall("a", "running"), { kind: "markdown", content: "x" }, toolCall("b", "completed")])),
+    { id: "a", name: "view", displayName: "Read", command: undefined },
+  );
+  assert.equal(
+    currentToolFromChat(state([toolCall("shell", "running", { toolName: "bash", toolInput: JSON.stringify({ command: "  npm test  " }) })]))?.command,
+    "npm test",
+  );
+});
 
 function stream() {
   const queued: SubscriptionEvent[] = [];

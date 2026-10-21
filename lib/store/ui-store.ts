@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
-export type WorkspaceMode = "inbox" | "split" | "board";
+export type WorkspaceMode = "inbox" | "split" | "board" | "flightdeck";
 
 interface UIState {
   welcomeOpen: boolean;

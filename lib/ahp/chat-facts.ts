@@ -10,7 +10,7 @@ import {
   type SessionState,
 } from "@microsoft/agent-host-protocol";
 import type { AhpClient, Subscription } from "@microsoft/agent-host-protocol/client";
-import type { ChatChangesetFacts, ChatDetails } from "../types.ts";
+import type { ChatChangesetFacts, ChatDetails, SessionCurrentTool } from "../types.ts";
 import { asChangesetState } from "./changeset-readiness.ts";
 import { shouldReadLiveSessionState } from "./session-read-policy.ts";
 import { isStaticChangesetUri } from "./changeset-review.ts";
@@ -64,6 +64,29 @@ export function projectChatChangeset(resource: string, label: string, changeKind
       reviewed: file.reviewed === true,
     })) : undefined,
   };
+}
+
+const SHELL_TOOLS = /^(bash|powershell|shell|run_in_terminal|terminal)$/i;
+
+/** The most recent tool the active turn is preparing or running, if any. */
+export function currentToolFromChat(state: Pick<ChatState, "activeTurn">): SessionCurrentTool | undefined {
+  const parts = state.activeTurn?.responseParts ?? [];
+  for (let index = parts.length - 1; index >= 0; index--) {
+    const part = parts[index];
+    if (part.kind !== ("toolCall" as typeof part.kind) || !("toolCall" in part)) continue;
+    const call = part.toolCall;
+    const status = call.status as string;
+    if (status !== "running" && status !== "streaming") continue;
+    let command: string | undefined;
+    if (SHELL_TOOLS.test(call.toolName) && "toolInput" in call && typeof call.toolInput === "string") {
+      try {
+        const input = JSON.parse(call.toolInput) as { command?: unknown };
+        if (typeof input.command === "string") command = input.command.trim().slice(0, 160) || undefined;
+      } catch { /* non-JSON input carries no command */ }
+    }
+    return { id: call.toolCallId, name: call.toolName, displayName: call.displayName || undefined, command };
+  }
+  return undefined;
 }
 
 export function visibleBackgroundWork(state: Pick<ChatState, "backgroundWork" | "interactivity">, chats: readonly SessionChatSummary[] = []): BackgroundWork[] {
@@ -183,7 +206,7 @@ export function observeChatFacts(
             const previousStatus = chat!.status;
             chat = chatReducer(chat!, event.params.action as ChatAction);
             if ((chat.status & 64) !== 0) { onState(chat, { changesets: [] }); break; }
-            if (previousStatus !== chat.status || /^chat\/(backgroundWorkSet|backgroundWorkRemoved|changesetsChanged|activityChanged|isArchivedChanged|isReadChanged|usage|turnStarted|turnComplete|turnCancelled|turnResume|error|turnsLoaded)$/.test(event.params.action.type)) syncChangesets();
+            if (previousStatus !== chat.status || /^chat\/(backgroundWorkSet|backgroundWorkRemoved|changesetsChanged|activityChanged|isArchivedChanged|isReadChanged|usage|turnStarted|turnComplete|turnCancelled|turnResume|error|turnsLoaded|toolCallStart|toolCallReady|toolCallConfirmed|toolCallComplete|toolCallAuthRequired|toolCallAuthResolved)$/.test(event.params.action.type)) syncChangesets();
           }
         } catch (error) { if (!closed) onError(error); }
         finally { if (!closed) { close(); onEnded(); } }

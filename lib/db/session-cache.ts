@@ -124,6 +124,9 @@ export function upsertSessionCache(
 ): boolean {
   const db = cacheDb();
   if (summary.resource !== sessionUri) return false;
+  // The current tool is live telemetry; a cached copy would be stale on reload.
+  const persisted: AHPSessionSummary = { ...summary };
+  delete persisted.currentTool;
   return db.transaction(() => {
     if (!claimSessionOwnership(db, sessionUri, hostUrl)) return false;
     // Preserve enrichment on summary-only refreshes; only the sentinel clears it.
@@ -144,7 +147,7 @@ export function upsertSessionCache(
            enrichment_json = COALESCE(excluded.enrichment_json, session_cache.enrichment_json),
            cache_token = excluded.cache_token, updated_at = datetime('now')
          WHERE session_cache.host_url = excluded.host_url`;
-    return db.prepare(sql).run(sessionUri, hostUrl, JSON.stringify(summary), enrichmentJson, randomUUID()).changes === 1;
+    return db.prepare(sql).run(sessionUri, hostUrl, JSON.stringify(persisted), enrichmentJson, randomUUID()).changes === 1;
   }).immediate();
 }
 

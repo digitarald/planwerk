@@ -1,5 +1,5 @@
 import type { SessionChatSummary } from "@microsoft/agent-host-protocol";
-import type { ChatDetails, SessionBackgroundWork, EvidenceCapture } from "../types.ts";
+import type { ChatDetails, SessionBackgroundWork, SessionCurrentTool, EvidenceCapture } from "../types.ts";
 
 export interface AHPSessionSummary {
   resource: string;
@@ -29,6 +29,8 @@ export interface AHPSessionSummary {
   defaultChat?: string;
   chatDetails?: Record<string, ChatDetails>;
   backgroundWork?: SessionBackgroundWork[];
+  /** Live-only; stripped before the summary is cached. */
+  currentTool?: SessionCurrentTool;
   annotations?: Array<{
     title: string;
     description?: string;

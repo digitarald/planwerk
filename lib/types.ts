@@ -55,6 +55,16 @@ export interface SessionBackgroundWork {
   work: BackgroundWork;
 }
 
+/** Live-only display fact: the tool the default chat is running right now.
+ *  Never persisted and never used for phase, gates, or risk. */
+export interface SessionCurrentTool {
+  id: string;
+  name: string;
+  displayName?: string;
+  /** Short command line for shell tools, when the host exposes it inline. */
+  command?: string;
+}
+
 /** Observed worker chat facts never participate in phase or gate logic. */
 export interface WorkerActivity {
   id: string;
@@ -272,6 +282,8 @@ export interface KanbanCard {
   defaultChat?: string;
   chatDetails?: Record<string, ChatDetails>;
   backgroundWork?: SessionBackgroundWork[];
+  /** Live-only; present only while the session is running. */
+  currentTool?: SessionCurrentTool;
   /** Recent status lines (oldest→newest), for the fading progress trail. */
   statusHistory?: StatusEntry[];
   /** Board-level coherence: other in-flight cards this one clashes with. Set from

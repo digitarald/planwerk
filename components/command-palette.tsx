@@ -12,7 +12,7 @@ import {
   CommandSeparator,
 } from "@/components/ui/command"
 import { useShallow } from "zustand/react/shallow"
-import { Plus, Columns3, Zap, ArrowRight, Sparkles, Inbox, PanelTop } from "lucide-react"
+import { Plus, Columns3, Zap, ArrowRight, Sparkles, Inbox, PanelTop, Rocket } from "lucide-react"
 import { useBoardStore, selectFilteredCards } from "@/lib/store/board-store"
 import { useUIStore } from "@/lib/store/ui-store"
 import { COLUMNS } from "@/lib/types"
@@ -94,6 +94,18 @@ export function CommandPalette() {
               <span>Open split view</span>
               <span className="ml-auto text-xs text-muted-foreground">
                 Inbox + board
+              </span>
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                setOpen(false)
+                setWorkspaceMode("flightdeck")
+              }}
+            >
+              <Rocket className="mr-2 h-4 w-4" />
+              <span>Open flightdeck</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                Watch agents at work
               </span>
             </CommandItem>
             <CommandItem onSelect={() => scrollToColumn("define")}>

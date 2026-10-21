@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useShallow } from "zustand/react/shallow";
 import Image from "next/image";
-import { Bot, Columns3, Eye, EyeOff, FolderOpen, ListTree, PanelTop } from "lucide-react";
+import { Bot, Columns3, Eye, EyeOff, FolderOpen, ListTree, PanelTop, Rocket } from "lucide-react";
 
 import { ConnectionDot } from "@/components/connection/connection-dot";
 import { TooltipHint } from "@/components/ui/tooltip";
@@ -153,6 +153,7 @@ const workspaceModes: Array<{
   { id: "inbox", label: "Feed", icon: ListTree },
   { id: "split", label: "Split", icon: PanelTop },
   { id: "board", label: "Board", icon: Columns3 },
+  { id: "flightdeck", label: "Flightdeck", icon: Rocket },
 ];
 
 function WorkspaceModeControl({

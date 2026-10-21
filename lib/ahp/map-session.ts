@@ -362,5 +362,6 @@ export function mapSessionToCard(
     defaultChat: session.defaultChat,
     chatDetails: session.chatDetails,
     backgroundWork: session.backgroundWork,
+    currentTool: !isArchived && runtime === "running" ? session.currentTool : undefined,
   };
 }

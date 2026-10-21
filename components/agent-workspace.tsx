@@ -1,6 +1,7 @@
 "use client";
 
 import { Profiler, useEffect, type ProfilerOnRenderCallback } from "react";
+import dynamic from "next/dynamic";
 import { BoardOverview, BoardPhaseStrip } from "@/components/board/board-overview";
 import { CardDetailModal } from "@/components/board/card-detail-modal";
 import { KanbanBoard } from "@/components/board/kanban-board";
@@ -8,6 +9,11 @@ import { InboxWorkspace } from "@/components/inbox/inbox-workspace";
 import { useBoardStore } from "@/lib/store/board-store";
 import { useUIStore } from "@/lib/store/ui-store";
 import { uiMark, uiReactRender } from "@/lib/diagnostics/ui-performance-client";
+
+const FlightdeckView = dynamic(() => import("@/components/flightdeck/flightdeck-view"), {
+  ssr: false,
+  loading: () => <div className="flightdeck-stage h-full" aria-busy="true" aria-label="Loading flightdeck" />,
+});
 
 const recordBoardRender: ProfilerOnRenderCallback = (_id, _phase, actualDuration, _baseDuration, startTime) => {
   uiReactRender(actualDuration, startTime);
@@ -26,6 +32,8 @@ export function AgentWorkspace() {
     ? <Profiler id="board" onRender={recordBoardRender}><KanbanBoard /></Profiler>
     : workspaceMode === "inbox"
       ? <InboxWorkspace />
+      : workspaceMode === "flightdeck"
+        ? <FlightdeckView />
       : (
           <div className="grid h-full min-h-0 grid-cols-[minmax(620px,1.75fr)_minmax(330px,0.9fr)] max-[1040px]:grid-cols-1">
             <div className="flex min-h-0 flex-col">
