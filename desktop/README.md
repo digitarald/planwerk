@@ -284,6 +284,8 @@ lints, type-checks, and builds on an Apple Silicon runner. It rejects mismatched
 versions or architectures, verifies the DMG, and publishes a GitHub prerelease
 only after the build succeeds. Only versioned DMGs and `SHA256SUMS` are uploaded,
 not Electrobun update archives or local data.
+Toolchain downloads get up to three setup attempts with visible warnings;
+an exhausted retry still fails the release.
 
 For a local release candidate, build normally, then run:
 
