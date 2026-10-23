@@ -262,10 +262,46 @@ resource-load error in WebKit and verify `webview.log`; export with the server
 stopped and confirm unavailable logs are marked. Source-level bridge tests do not
 replace this packaged-WebKit check.
 
+## Publishing a native preview
+
+GitHub releases currently publish an unsigned Apple Silicon DMG and SHA-256
+checksum. Intel, Windows, and Linux binaries are not published. These previews
+have no automatic updater. macOS may block the app because it is unsigned;
+use Apple's per-app Privacy & Security approval only if you trust its source.
+Never disable Gatekeeper globally.
+
+The root `package.json` supplies the Electrobun app version. Before tagging,
+update both package manifests and their lockfiles together:
+
+```bash
+npm version 0.2.0 --no-git-tag-version --ignore-scripts
+npm --prefix desktop version 0.2.0 --no-git-tag-version --ignore-scripts
+```
+
+Use the next unused version, commit the changes, and push a matching `vX.Y.Z`
+tag. The [native release workflow](../.github/workflows/release.yml) tests,
+lints, type-checks, and builds on an Apple Silicon runner. It rejects mismatched
+versions or architectures, verifies the DMG, and publishes a GitHub prerelease
+only after the build succeeds. Only versioned DMGs and `SHA256SUMS` are uploaded,
+not Electrobun update archives or local data.
+
+For a local release candidate, build normally, then run:
+
+```bash
+node scripts/prepare-native-release.mjs v0.2.0
+cd desktop/artifacts/v0.2.0
+shasum -a 256 -c SHA256SUMS
+```
+
+Release staging refuses to overwrite an existing version directory. Build and
+prepare from the same clean tagged checkout; do not relabel an older DMG.
+The backend includes Planwerk's license, Node and Electrobun notices, and a
+runtime-dependency license index. See [third-party notices](../THIRD-PARTY-NOTICES.md).
+
 ## Release work still required
 
 - Developer ID signing and notarization, including nested Node, SDK, and
-  native-library executables. Local unsigned builds are for development.
+  native-library executables. Current public builds are unsigned previews.
 - A published, verified update channel. No automatic updater is configured.
 - Intel Mac validation and an explicit supported macOS version policy.
 - A deliberate migration flow for existing web data and preferences.

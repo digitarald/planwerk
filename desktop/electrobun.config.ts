@@ -1,10 +1,11 @@
 import type { ElectrobunConfig } from "electrobun";
+import manifest from "../package.json";
 
 export default {
   app: {
     name: "Planwerk",
     identifier: "dev.planwerk.desktop",
-    version: "0.1.0",
+    version: manifest.version,
     description: "The management surface for agentic software development",
   },
   build: {

@@ -1,8 +1,6 @@
 version: 2
 
 updates:
-  # The repository .npmrc routes resolution through Microsoft's managed CFS
-  # feed, which also enforces the minimum release age.
   - package-ecosystem: npm
     directory: /
     schedule:
@@ -78,6 +76,12 @@ updates:
           - zustand
         update-types:
           - patch
+
+  - package-ecosystem: npm
+    directory: /desktop
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
 
   - package-ecosystem: github-actions
     directory: /

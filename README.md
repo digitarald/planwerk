@@ -2,7 +2,12 @@
 
 > The management surface for agentic software development.
 
-AI agents write 4x more code — but most of that speed gets eaten by the verification work humans still do by hand. Review queues are overflowing, sessions get babysat one at a time, and there's no single place to see what every agent is actually doing.
+Planwerk helps you follow agent sessions, review their work, and resolve blockers
+without babysitting every session separately.
+
+Experimental software. The native preview currently supports Apple Silicon Macs
+only and is unsigned. Planwerk is an independent project, not an official GitHub
+or Microsoft product.
 
 **Planwerk is an inbox and kanban board for the agentic SDLC.** The inbox tells you
 what deserves attention next; the board shows where every session is in
@@ -57,6 +62,21 @@ Planwerk on [http://localhost:3000](http://localhost:3000).
 
 ### Native macOS app
 
+Download the Apple Silicon DMG from [Releases](https://github.com/digitarald/planwerk/releases).
+Open it and drag Planwerk to Applications. No separate Node or Bun installation
+is needed. VS Code with an AHP 1.0.0 endpoint and Copilot authentication are still
+required.
+
+The preview is unsigned and not notarized, so macOS may block it. Only proceed
+if you trust the release source. Follow Apple's
+[instructions for opening an app from an unidentified developer](https://support.apple.com/102445);
+do not disable Gatekeeper or remove quarantine recursively.
+
+To verify a downloaded DMG, download `SHA256SUMS` from the same release and run
+`shasum -a 256 -c SHA256SUMS` in the download directory. Checksums detect
+corruption, not publisher identity. Intel, Windows, and Linux binaries are not
+published.
+
 Planwerk also runs in an Electrobun desktop app using the macOS WebKit renderer.
 The app bundles its Node server and has a native menu-bar inbox count.
 
@@ -72,9 +92,9 @@ npm run native:build
 ```
 
 The installer is written to `desktop/artifacts/macos-<arch>-Planwerk.dmg`.
-These local builds are unsigned and not notarized. They are not yet a public
-distribution release. See [desktop/README.md](desktop/README.md) for lifecycle,
-data storage, validation, and release requirements.
+Local and published preview builds are unsigned and not notarized.
+See [desktop/README.md](desktop/README.md) for lifecycle, data storage,
+validation, and the release process.
 
 All builds offer only AHP 1.0.0. Hosts must accept that version; Planwerk does
 not retry with older or untested protocol versions.
@@ -182,3 +202,12 @@ than silently enabling a folder or falling back to a different policy.
 
 - [`zettelkasten/vision.md`](zettelkasten/vision.md) — the problem, principles, and north star
 - [`zettelkasten/architecture-and-design.md`](zettelkasten/architecture-and-design.md) — design decisions, tech stack, and structure
+
+## Contributing and support
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, and pull requests.
+Report bugs and feature requests in [Issues](https://github.com/digitarald/planwerk/issues).
+Report vulnerabilities privately using [SECURITY.md](SECURITY.md).
+
+Planwerk is [MIT licensed](LICENSE). Bundled dependencies retain their
+[upstream licenses](THIRD-PARTY-NOTICES.md).

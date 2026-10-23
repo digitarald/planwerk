@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { basename, join } from "node:path";
 import sharp from "sharp";
 import { packageDesktop, run as execute } from "./package-desktop.mjs";
+import { collectDependencyNotices } from "./desktop-notices.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const desktop = join(root, "desktop");
@@ -41,6 +42,11 @@ await chmod(join(payload, "node"), 0o755);
 await mkdir(join(payload, "bin"), { recursive: true });
 await symlink("../node", join(payload, "bin/node"));
 await cp(join(desktop, "watch-server.cjs"), join(payload, "watch-server.cjs"));
+for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.md"]) {
+  await cp(join(root, file), join(payload, file));
+}
+await cp(join(desktop, "node_modules/electrobun/LICENSE"), join(payload, "ELECTROBUN-LICENSE"));
+await collectDependencyNotices(root, join(payload, "dependency-notices"));
 
 const license = await fetch(`https://raw.githubusercontent.com/nodejs/node/v${process.versions.node}/LICENSE`);
 if (!license.ok) throw new Error(`Node license download failed: ${license.status}`);
