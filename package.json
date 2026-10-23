@@ -22,7 +22,7 @@
     "test": "node --test scripts/*.test.mjs lib/**/*.test.ts lib/data-directory.test.ts desktop/src/*.test.ts"
   },
   "dependencies": {
-    "@base-ui/react": "^1.8.0",
+    "@base-ui/react": "^1.9.0",
     "@github/copilot-sdk": "^1.0.22",
     "@hello-pangea/dnd": "^18.0.1",
     "@microsoft/agent-host-protocol": "1.0.0",
