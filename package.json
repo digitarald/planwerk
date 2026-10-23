@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
-    "@github/copilot-sdk": "^1.0.22",
+    "@github/copilot-sdk": "^1.0.23",
     "@hello-pangea/dnd": "^18.0.1",
     "@microsoft/agent-host-protocol": "1.0.0",
     "better-sqlite3": "^13.0.3",
