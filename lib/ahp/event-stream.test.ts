@@ -25,7 +25,8 @@ const state: {
   projections: string[];
   bridges: number;
   archiveCompletions: number;
-} = { heartbeat: false, failProjection: false, triages: 0, riskStatus: "current", sessions: new Map(), projections: [], bridges: 0, archiveCompletions: 0 };
+  reconciliations: Array<{ host: string; catalog: Array<{ enabled: boolean; session: { resource: string } }>; cardId?: string }>;
+} = { heartbeat: false, failProjection: false, triages: 0, riskStatus: "current", sessions: new Map(), projections: [], bridges: 0, archiveCompletions: 0, reconciliations: [] };
 const key = "__planwerkEventStreamTest";
 Object.defineProperty(globalThis, key, { value: state, configurable: true });
 const root = path.resolve(import.meta.dirname, "../..");
@@ -42,7 +43,7 @@ const mocks: Record<string, string> = {
   "@/lib/orchestrator/risk-store": `export function getAuthoritativeCardRisk() { return {status:globalThis["${key}"].riskStatus}; } export function getAuthoritativeRiskSnapshot(host,id) { return {digest:"facts:"+id,hostUrl:host,cardId:id}; }`,
   "@/lib/orchestrator/heartbeat": `export function requestHeartbeatTick() {} export function invalidateHostWork() {} export function startHeartbeat(getHosts) { const s=globalThis["${key}"]; s.getHosts=getHosts; s.heartbeat=true; } export async function stopHeartbeat() { globalThis["${key}"].heartbeat=false; } export function isHeartbeatRunning() { return globalThis["${key}"].heartbeat; }`,
   "@/lib/http/local-mutation": `export function validateLocalEventStreamRequest() {}`,
-  "@/lib/inbox/service": `export function projectArchivedSessionToInbox() { globalThis["${key}"].archiveCompletions++; } export function projectCardToInbox() {} export function projectHeartbeatToInbox() {} export function projectRemovedSessionToInbox() {}`,
+  "@/lib/inbox/service": `export function projectArchivedSessionToInbox() { globalThis["${key}"].archiveCompletions++; } export function projectCardToInbox() {} export function projectHeartbeatToInbox() {} export function projectRemovedSessionToInbox() {} export function reconcileInboxCatalogToInbox(host,catalog,cardId) {globalThis["${key}"].reconciliations.push({host,catalog,cardId});}`,
   "@/lib/desktop/status": `export function registerDesktopHosts() {}`,
 };
 const hooks = registerHooks({
@@ -76,15 +77,18 @@ async function open(host = "ws://fake", archivedOnly = false, scope?: string[]) 
 function emit(event: BridgeEvent) { state.bridge!.onEvent(event); }
 
 test("cached initialization is display-only until live init; queued events retain their snapshots", async () => {
+  const before = state.reconciliations.length;
   const reader = await open();
   await reader.read();
+  assert.equal(state.reconciliations.length, before);
   assert.deepEqual(state.getHosts!(), []);
-  emit({ type: "init", sessions: [], enrichments: new Map(), pendingInputs: new Map(), workers: new Map(), connection: {
+  emit({ type: "init", sessions: [], catalog: [], enrichments: new Map(), pendingInputs: new Map(), workers: new Map(), connection: {
     logicalUrl: "ws://fake", transport: "websocket", resolvedTarget: "ws://fake",
     candidateCount: 1, compatibleCandidateCount: 1, protocolVersion: "1.0.0",
     totalSessions: 0, visibleSessions: 0, filteredSessions: 0,
   } });
   await reader.read();
+  assert.equal(state.reconciliations.length, before + 1);
   assert.equal(state.getHosts!().length, 1);
   const session = { resource: "burst", title: "Burst", status: 1, provider: "fake", createdAt: "", modifiedAt: "" };
   emit({ type: "sessionAdded", session });
@@ -115,7 +119,7 @@ test("disabled folders are absent from cache, live snapshots, updates, and autom
   const cached = decode((await reader.read()).value);
   assert.equal(cached.cards.some((card: { id: string }) => card.id === session.resource), false);
   emit({
-    type: "init", sessions: [session], enrichments: new Map(), pendingInputs: new Map(), workers: new Map(),
+    type: "init", sessions: [session], catalog: [session], enrichments: new Map(), pendingInputs: new Map(), workers: new Map(),
     connection: {
       logicalUrl: "ws://hidden-notes", transport: "websocket", resolvedTarget: "ws://hidden-notes",
       candidateCount: 1, compatibleCandidateCount: 1, protocolVersion: "1.0.0",
@@ -125,11 +129,13 @@ test("disabled folders are absent from cache, live snapshots, updates, and autom
   const live = decode((await reader.read()).value);
   assert.deepEqual(live.cards, []);
   assert.equal(live.connection.filteredSessions, 1);
+  assert.equal(state.reconciliations.at(-1)?.catalog[0].enabled, false);
   state.riskStatus = "missing";
   t.after(() => { state.riskStatus = "current"; });
   const before = state.triages;
   emit({ type: "sessionAdded", session });
   assert.equal(decode((await reader.read()).value).type, "cardRemoved");
+  assert.equal(state.reconciliations.at(-1)?.cardId, session.resource);
   await tick();
   assert.equal(state.triages, before);
   assert.deepEqual(state.getHosts!()[0].cards, []);

@@ -60,7 +60,7 @@ export { mergeFreshEnrichment } from "./source-binding";
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
 
 export type BridgeEvent =
-  | { type: "init"; sessions: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment>; pendingInputs: Map<string, PendingInput>; workers: Map<string, WorkerActivity[]>; connection: AhpEndpointDiagnostics & { protocolVersion: string; totalSessions: number; visibleSessions: number; filteredSessions: number } }
+  | { type: "init"; sessions: AHPSessionSummary[]; catalog?: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment>; pendingInputs: Map<string, PendingInput>; workers: Map<string, WorkerActivity[]>; connection: AhpEndpointDiagnostics & { protocolVersion: string; totalSessions: number; visibleSessions: number; filteredSessions: number } }
   | (AHPEvent & { enrichment?: ChangesetEnrichment | null; pendingInput?: PendingInput | null; workers?: WorkerActivity[] })
   | ConnectionError;
 
@@ -422,7 +422,6 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
           sub = await detailClient.subscribe(sessionUri);
         } catch (err) {
           warn("fetchInput: session subscribe failed", sessionUri, err instanceof Error ? err.message : err);
-          emitNoPendingInput(sessionUri);
           return;
         }
 
@@ -443,7 +442,7 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
             return;
           }
           if (!sessionState) {
-            emitNoPendingInput(sessionUri);
+            warn("fetchInput: session snapshot unavailable", sessionUri);
             return;
           }
 
@@ -468,7 +467,7 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
             clearTimeout(timer);
           }
 
-          emitNoPendingInput(sessionUri);
+          warn("fetchInput: question unavailable while session still needs input", sessionUri);
         } finally {
           await subscription.close();
           await detailClient.unsubscribe(sessionUri).catch(() => {});
@@ -476,7 +475,6 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
       }, readsController.signal);
     } catch (err) {
       warn("fetchInput: failed", sessionUri, err instanceof Error ? err.message : err);
-      emitNoPendingInput(sessionUri);
     }
   }
 
@@ -491,22 +489,6 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
         session,
         enrichment: enrichments.get(sessionUri) ?? null,
         pendingInput: mapped,
-      });
-    }
-  }
-
-  function emitNoPendingInput(sessionUri: string) {
-    if (!pendingInputs.has(sessionUri)) return;
-    debug("clearing pending input:", sessionUri);
-    pendingInputs.delete(sessionUri);
-    const session = sessions.get(sessionUri);
-    if (session) {
-      persistCurrentSessionSummary(session);
-      onEvent({
-        type: "sessionSummaryChanged",
-        session,
-        enrichment: enrichments.get(sessionUri) ?? null,
-        pendingInput: null,
       });
     }
   }
@@ -881,11 +863,13 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
     let coldSummaryOnlyCount = 0;
 
     const allSummaries = await listAllSessions(client);
+    const catalog: AHPSessionSummary[] = [];
 
     for (const summary of allSummaries) {
       const owned = claimSessionOwnership(getDb(), summary.resource, hostUrl);
       const mapped = mapSdkSessionSummary(summary);
       attachAHPSourceRevision(mapped, summary);
+      catalog.push(mapped);
       if (!shouldShowSession(summary.status, summary.changes?.files ?? 0)) {
         if (summary.status & AHPStatus.IsArchived) skippedArchived.set(summary.resource, mapped);
         continue;
@@ -947,6 +931,7 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
     onEvent({
       type: "init",
       sessions: Array.from(sessions.values()),
+      catalog,
       enrichments,
       pendingInputs,
       workers: workersBySession,
