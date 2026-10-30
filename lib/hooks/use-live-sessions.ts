@@ -5,6 +5,7 @@ import { useEffect, useRef } from "react";
 import { useBoardStore } from "@/lib/store/board-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
 import { useInboxStore } from "@/lib/store/inbox-store";
+import { useCoordinatorGoalStore } from "@/lib/store/coordinator-goal-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
 import { StreamOrder } from "@/lib/ahp/stream-order";
 import { uiElapsed, uiMark, uiMeasure, uiSpan } from "@/lib/diagnostics/ui-performance-client";
@@ -174,6 +175,8 @@ function useSessionStream(
         } else if (data.type === "cardRemoved") {
           const card = useBoardStore.getState().getCard(data.cardId);
           if (!card || Boolean(card.isArchived) === archivedOnly) removeCard(data.cardId);
+        } else if (data.type === "coordinatorGoalsChanged") {
+          void useCoordinatorGoalStore.getState().refresh(hostUrl!, JSON.parse(workspaceScope));
         } else if (data.type === "inboxAdded" || data.type === "inboxChanged") {
           if (data.item) {
             useInboxStore.getState().reconcileItem(data.item);

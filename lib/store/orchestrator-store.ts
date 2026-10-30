@@ -65,6 +65,8 @@ export interface MonitoringStatus {
 }
 
 interface OrchestratorState {
+  draft: string;
+  setDraft: (draft: string) => void;
   feedItems: FeedItem[];
   isProcessing: boolean;
   hasConnectedOnce: boolean;
@@ -75,7 +77,7 @@ interface OrchestratorState {
   /** Record connection/monitoring status (rendered in the pinned status line,
    *  not the feed). */
   setMonitoringStatus: (sessionCount: number) => void;
-  sendMessage: (message: string, hostUrl?: string, cards?: unknown[]) => Promise<void>;
+  sendMessage: (message: string, hostUrl?: string, workspaceScope?: string[], selectedCardId?: string | null) => Promise<void>;
   decideApproval: (
     decisionCapability: string,
     decision: "approve" | "reject",
@@ -88,6 +90,8 @@ let feedCounter = 0;
 export const useOrchestratorStore = create<OrchestratorState>()(
   persist(
     (set, get) => ({
+      draft: "",
+      setDraft: (draft) => set({ draft }),
       feedItems: [],
       isProcessing: false,
       hasConnectedOnce: false,
@@ -191,7 +195,7 @@ export const useOrchestratorStore = create<OrchestratorState>()(
         }
       },
 
-      sendMessage: async (message: string, hostUrl?: string, cards?: unknown[]) => {
+      sendMessage: async (message: string, hostUrl?: string, workspaceScope: string[] = [], selectedCardId?: string | null) => {
         const { addFeedItem, updateLastResponse } = get();
         const streamApprovals = new Set<string>();
 
@@ -202,7 +206,7 @@ export const useOrchestratorStore = create<OrchestratorState>()(
           const response = await fetch("/api/orchestrator/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message, hostUrl, cards }),
+            body: JSON.stringify({ message, hostUrl, workspaceScope, selectedCardId }),
           });
 
           const contentType = response.headers.get("content-type") ?? "";

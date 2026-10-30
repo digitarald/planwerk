@@ -59,6 +59,13 @@ not a claim of complete shipped workflow integration.
   after gates pass. Per-session overrides are explicit and audited.
 - **State:** runtime status and SDLC phase are separate. A running/idle change
   never substitutes for a gated phase transition.
+- **Chief of Staff:** the coordinator can inspect scoped sessions, save goals
+  and dependencies, and delegate real sessions in Coordinate mode. Existing
+  heartbeat ticks follow accepted results; code dependencies also require
+  current gates. People can pause, resume, cancel, or steer through chat.
+  Mode or scope loss stops future effects, not work the host already accepted.
+  Goals persist across reconnects; uncertain or queued delivery needs human
+  inspection before follow-through.
 - **Evidence:** captured facts, source freshness, and review approval are
   separate. Unavailable or changing evidence stays unverified. Refreshing
   evidence can restore a session and change its activity timestamp.

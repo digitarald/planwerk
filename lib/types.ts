@@ -199,7 +199,16 @@ export interface SessionRuntimeError {
 
 export interface SessionDetails {
   lastAgentMessage?: string;
+  outcomeEvidence?: SessionOutcomeEvidence;
   runtimeError?: SessionRuntimeError;
+}
+
+export interface SessionOutcomeEvidence {
+  chatUri: string;
+  turnId: string;
+  state: "complete";
+  text: string;
+  truncated: boolean;
 }
 
 export interface EvidenceCapture {
@@ -269,6 +278,7 @@ export interface KanbanCard {
   recentActivity?: ActivityEntry[];
   pendingInput?: PendingInput;
   lastAgentMessage?: string;
+  outcomeEvidence?: SessionOutcomeEvidence;
   /** Authoritative AHP creation/turn error details, when the host exposed them. */
   runtimeError?: SessionRuntimeError;
   fileChanges?: FileChange[];
