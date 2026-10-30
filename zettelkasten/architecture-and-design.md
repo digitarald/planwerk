@@ -209,6 +209,26 @@ authorize enrichment, input refetches, or dirty enrichment retries. Cold startup
 and idle catalog changes remain subscription-free, including explicit content
 revision changes. New chat observers also require an active parent session.
 
+The inbox reconciles session-backed handoffs against a successful, complete live
+catalog before board archive/workspace filtering. Missing or disabled sources,
+archived requests/readiness, and requests whose runtime no longer needs input are
+resolved automatically. Cached, partial, failed, and disconnected inventories do
+not authorize cleanup. Live single-session updates reconcile only that source;
+host ownership/quarantine still gates mutations. Human actions survive cleanup.
+
+An input-needed summary without a hydrated question is unknown, not a removal.
+Known requests survive reconnects and failed reads. A genuinely unavailable
+question gets a source-linked Open session notice, replaced by the real request
+when fetched. A matching request can recover an automatic false resolution, but
+not an explicit human resolution or snooze. This never answers a question.
+
+Inbox briefing JSON retains the source session title, project, and workspace even
+when the board card disappears. Authoritative source observation is separate from
+handoff age and synthesis generation time: cached reprojection and synthesis do
+not renew it. Metadata refresh preserves ordering, read/pin state, and synthesis.
+The UI shows unavailable, unverified, disconnected, and over-30-minute stale
+sources, and refreshes age while open. Source freshness never verifies a gate.
+
 An observed active-to-idle/error transition permits one final enrichment read,
 including zero-file outcomes. Queued work rechecks eligibility after connection
 acquisition; completion permission is consumed once. The session subscription

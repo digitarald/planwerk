@@ -11,7 +11,7 @@ import { AHPStatus, type AHPSessionSummary } from "./types.ts";
 import type { BridgeEvent } from "./client-bridge.ts";
 import type { ChangesetEnrichment } from "./changeset-enricher.ts";
 import type { CachedSession } from "../db/session-cache.ts";
-import type { Artifact } from "../types.ts";
+import type { Artifact, PendingInput } from "../types.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -66,12 +66,13 @@ function harness(status: number = AHPStatus.Idle) {
     changes: { files: 1, additions: 1, deletions: 0 },
     chats: [], defaultChat: "ahp-chat:/test",
   };
+  const summaries = [summary];
   let readWait: Promise<void> | undefined;
   let connectionWait: Promise<void> | undefined;
   let owned = true;
   const client = {
     async *stateChanges() { yield* []; },
-    async request() { return { items: [summary] }; },
+    async request() { return { items: summaries }; },
     attachSubscription() { return new Subscription("ahp-root://", root.iterator); },
     async subscribe(resource: string) {
       reads.push(resource);
@@ -97,7 +98,7 @@ function harness(status: number = AHPStatus.Idle) {
   };
   return {
     root, client: client as unknown as AhpClient, reads, releases, shutdowns, emitted, cached, summary,
-    seededCache, artifacts, actions,
+    seededCache, artifacts, actions, summaries, input: undefined as PendingInput | undefined,
     setChat(value: ChatState) { chat = value; },
     ownsSession() { return owned; },
     setOwned(value: boolean) { owned = value; },
@@ -149,7 +150,7 @@ const hooks = registerHooks({
     if (specifier === "./telemetry-transport") source = "export class TelemetryTapTransport {}";
     if (specifier === "./rpc-error") source = `
       export function classifyAhpError(error) { return {type:"error", message:String(error)}; }`;
-    if (specifier === "./map-session") source = "export function mapSessionInputNeeded() {}";
+    if (specifier === "./map-session") source = `export function mapSessionInputNeeded() {return globalThis["${key}"].input;}`;
     if (specifier === "@/lib/orchestrator/worker-activity-store") source = `
       export function getWorkerActivityHistory() { return []; }
       export function recordWorkerActivity() {}`;
@@ -181,6 +182,41 @@ async function start(status: number = AHPStatus.Idle) {
   await tick();
   return dispose;
 }
+
+test("live initialization includes archived no-change sources in the complete catalog without subscribing", async () => {
+  active = harness(AHPStatus.Idle);
+  active.summaries.push({
+    ...active.summary, resource: "copilotcli:/archived",
+    status: AHPStatus.IsArchived | AHPStatus.Idle,
+    changes: { files: 0, additions: 0, deletions: 0 },
+  });
+  const dispose = await createAHPBridge({ hostUrl: "ws://fake", onEvent: (event) => active.emitted.push(structuredClone(event)) });
+  await tick();
+  const init = active.emitted.find((event) => event.type === "init");
+  assert.ok(init?.type === "init");
+  assert.equal(init.sessions.length, 1);
+  assert.equal(init.catalog?.length, 2);
+  assert.equal(init.catalog?.[1].resource, "copilotcli:/archived");
+  assert.deepEqual(active.reads, []);
+  dispose();
+});
+
+test("failed input reads preserve a known question until an authoritative runtime clear", async () => {
+  active = harness(AHPStatus.InputNeeded);
+  active.input = { requestId: "question", message: "Choose", questions: [] };
+  const dispose = await createAHPBridge({ hostUrl: "ws://fake", onEvent: (event) => active.emitted.push(structuredClone(event)) });
+  await tick();
+  assert.ok(active.emitted.some((event) => event.type === "sessionSummaryChanged" && event.pendingInput?.requestId === "question"));
+  active.emitted.length = 0;
+  active.client.subscribe = async () => { throw new Error("snapshot unavailable"); };
+  active.change({ activity: "Waiting for your choice" });
+  await tick();
+  assert.equal(active.emitted.some((event) => event.type === "sessionSummaryChanged" && event.pendingInput === null), false);
+  active.change({ status: AHPStatus.Idle });
+  await tick();
+  assert.equal(active.emitted.some((event) => event.type === "sessionSummaryChanged" && event.pendingInput === null), true);
+  dispose();
+});
 
 test("cold startup, idle timestamps, repeated idle status and cold content events never subscribe", async () => {
   const dispose = await start();

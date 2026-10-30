@@ -28,6 +28,7 @@ import {
   projectCardToInbox,
   projectHeartbeatToInbox,
   projectRemovedSessionToInbox,
+  reconcileInboxCatalogToInbox,
 } from "@/lib/inbox/service";
 import { inboxEventMatchesHost, inboxEvents } from "@/lib/inbox/events";
 import type { InboxStreamEvent } from "@/lib/inbox/types";
@@ -466,6 +467,11 @@ function startHostBridge(partition: HostPartition): void {
           const removedActiveCard = projected.type === "cardRemoved"
             && partition.cards.some((card) => card.id === projected.cardId);
           try {
+            if (event.type === "sessionAdded" || event.type === "sessionSummaryChanged") {
+              reconcileInboxCatalogToInbox(partition.hostUrl, [{
+                session: event.session, enabled: isWorkspaceEnabled(event.session),
+              }], event.session.resource);
+            }
             if (
               event.type === "sessionRemoved" &&
               event.reason === "archived" &&
@@ -476,8 +482,15 @@ function startHostBridge(partition: HostPartition): void {
             } else if (event.type === "sessionRemoved") {
               projectRemovedSessionToInbox(partition.hostUrl, event.resource);
             } else if (projected.type === "init") {
+              if (event.type === "init" && event.catalog) {
+                reconcileInboxCatalogToInbox(partition.hostUrl, event.catalog.map((session) => ({
+                  session, enabled: isWorkspaceEnabled(session),
+                })));
+              }
               for (const card of projected.cards) {
-                projectCardToInbox(partition.hostUrl, card);
+                projectCardToInbox(partition.hostUrl, card, undefined, undefined, {
+                  sourceObserved: card.runtime !== "input-needed" || Boolean(card.pendingInput),
+                });
               }
             } else if (projected.type === "cardRemoved" && projected.archivedSession) {
               if (removedActiveCard) {
@@ -491,7 +504,15 @@ function startHostBridge(partition: HostPartition): void {
                 partition.hostUrl,
                 projected.card,
                 previousCard,
+                undefined,
+                {
+                  pendingInputCleared: projected.pendingInputCleared,
+                  sourceObserved: event.type !== "init" && "pendingInput" in event
+                    ? Boolean(event.pendingInput) : projected.card.runtime !== "input-needed",
+                },
               );
+            } else if (projected.type === "cardRemoved") {
+              projectRemovedSessionToInbox(partition.hostUrl, projected.cardId);
             }
           } catch (error) {
             reportInboxProjectionError(event.type, error);

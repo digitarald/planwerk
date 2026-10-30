@@ -22,6 +22,8 @@ import {
 import { ArtifactViewer } from "@/components/board/artifact-viewer";
 import { Button } from "@/components/ui/button";
 import { routeInboxClientAction } from "@/lib/inbox/client-action-routing";
+import { inboxSourceFreshness } from "@/lib/inbox/freshness";
+import { useConnectionStore } from "@/lib/store/connection-store";
 import { useBoardStore } from "@/lib/store/board-store";
 import {
   useInboxStore,
@@ -78,8 +80,8 @@ const artifactIcons: Record<ArtifactType, typeof FileCheck2> = {
   decision: ShieldCheck,
 };
 
-function relativeTime(timestamp: number): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+function relativeTime(timestamp: number, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
   if (seconds < 60) return "now";
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m`;
@@ -107,6 +109,7 @@ function actionLabel(item: InboxItem, action: InboxSuggestedAction): string {
   }
   if (action.kind === "resolve") return "Done";
   if (action.kind === "mark-read") return "Read";
+  if (action.kind === "open-session") return "Open session";
 
   switch (item.sourceKind) {
     case "pending-input":
@@ -123,7 +126,7 @@ function actionLabel(item: InboxItem, action: InboxSuggestedAction): string {
     case "completion":
       return "Read";
     default:
-      return action.kind === "open-session" ? "Open" : action.label;
+      return action.label;
   }
 }
 
@@ -137,10 +140,12 @@ export function InboxFeedItem({
   item,
   projectName,
   selected,
+  now,
 }: {
   item: InboxItem;
   projectName?: string;
   selected: boolean;
+  now: number;
 }) {
   const articleRef = useRef<HTMLElement>(null);
   const sourceFactsRef = useRef<HTMLDivElement>(null);
@@ -155,6 +160,7 @@ export function InboxFeedItem({
   const card = useBoardStore((state) =>
     state.cards.find((candidate) => candidate.id === item.cardId),
   );
+  const connected = useConnectionStore((state) => state.status === "connected");
 
   useEffect(() => {
     if (selected) {
@@ -224,7 +230,20 @@ export function InboxFeedItem({
   const urgent = item.priorityBand <= 2;
   const project = isWipLimit
     ? "Board"
-    : projectName ?? item.projectName ?? "Unassigned";
+    : projectName ?? item.projectName;
+  const sessionTitle = item.sessionTitle ?? card?.title ?? "Session unavailable";
+  const freshness = inboxSourceFreshness(item.briefing.freshness.sourceObservedAt, connected, now);
+  const freshnessLabel = !card && !isWipLimit
+    ? "Session unavailable"
+    : item.briefing.trigger === "pending-input-unavailable"
+      ? "Question unavailable"
+      : freshness === "disconnected"
+        ? "Disconnected"
+        : freshness === "unverified"
+          ? "Source unverified"
+          : freshness === "stale" ? "Source may be out of date" : null;
+  const actionUnavailable = (action: InboxSuggestedAction) =>
+    routeInboxClientAction(item.briefing.trigger, action.kind, Boolean(card)).type === "unavailable";
   const note = confidenceNote(item);
   const canResolve =
     item.category === "read"
@@ -300,15 +319,23 @@ export function InboxFeedItem({
       <div className="min-w-0">
         <header className="flex min-w-0 items-start gap-2">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-              <span className="truncate font-medium text-foreground/70">{project}</span>
+            <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+              <span
+                className="min-w-0 truncate font-medium text-foreground"
+                title={isWipLimit ? project : [project, sessionTitle].filter(Boolean).join(" / ")}
+              >
+                {isWipLimit ? project : sessionTitle}
+              </span>
+              {!isWipLimit && project && (
+                <span className="max-w-[35%] truncate" title={project}>{project}</span>
+              )}
               <span aria-hidden>·</span>
               <time
                 className="shrink-0"
-                dateTime={new Date(item.updatedAt).toISOString()}
-                title={formattedTime(item.updatedAt)}
+                dateTime={new Date(item.createdAt).toISOString()}
+                title={`Handoff received ${formattedTime(item.createdAt)}`}
               >
-                {relativeTime(item.updatedAt)}
+                {relativeTime(item.createdAt, now)}
               </time>
               {item.briefing.synthesisStatus === "generated" && (
                 <Sparkles
@@ -339,6 +366,16 @@ export function InboxFeedItem({
                 </>
               )}
             </div>
+            {!isWipLimit && freshnessLabel && (
+              <p
+                className="mt-1 text-[11px] text-pw-warning-foreground"
+                title={item.briefing.freshness.sourceObservedAt
+                  ? `Source last checked ${formattedTime(item.briefing.freshness.sourceObservedAt)}`
+                  : "No authoritative source observation is available."}
+              >
+                {freshnessLabel}
+              </p>
+            )}
             <h3
               className={cn(
                 "mt-1 break-words text-pretty text-[13px] leading-[1.125rem] text-foreground",
@@ -403,7 +440,8 @@ export function InboxFeedItem({
           >
             <Button
               size="xs"
-              disabled={pending}
+              disabled={pending || actionUnavailable(item.briefing.defaultAction)}
+              title={actionUnavailable(item.briefing.defaultAction) ? "The source session is not available on the board." : undefined}
               onClick={() => void runAction(item.briefing.defaultAction)}
             >
               {pending && <Loader2 className="motion-safe:animate-spin" />}
@@ -413,7 +451,7 @@ export function InboxFeedItem({
               <Button
                 variant="ghost"
                 size="xs"
-                disabled={pending}
+                disabled={pending || actionUnavailable(secondaryAction)}
                 onClick={() => void runAction(secondaryAction)}
               >
                 {secondaryAction.label}

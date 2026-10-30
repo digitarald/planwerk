@@ -12,6 +12,7 @@ import { exportDiagnostics } from "./diagnostics-export.ts";
 import { createWebviewDiagnosticHandler, webviewDiagnosticsPreload } from "./webview-diagnostics.ts";
 import desktopConfig from "../electrobun.config.ts";
 import { createWebviewPerformanceHandler } from "./webview-performance.ts";
+import { RendererHealth } from "./renderer-health.ts";
 // Electrobun 2.0.2 exposes window movement only through its native adapter.
 // Keep that adapter in the main process; the sandbox gets no general RPC.
 import { internalRpcHandlers } from "../.hutch/devkit/api/sdks/main/proc/native";
@@ -34,6 +35,10 @@ let restarting = false;
 let quitting = false;
 let quitReady = false;
 let lastPresentation = "";
+let rendererHealth: RendererHealth | undefined;
+let checkingRenderer = false;
+let rendererRecoveryAttempted = false;
+let rendererFailureReported = false;
 
 function veto(event: unknown): void {
   if (!event || typeof event !== "object") throw new Error("Invalid native event");
@@ -69,7 +74,7 @@ function renderMenu(): void {
 }
 
 function showWindow(destination?: "inbox" | "board"): void {
-  if (!window) return;
+  if (!window || quitting) return;
   window.unminimize();
   window.show();
   window.activate();
@@ -78,9 +83,47 @@ function showWindow(destination?: "inbox" | "board"): void {
   if (destination) {
     window.webview.executeJavascript(`location.hash = ${JSON.stringify(destination)};`);
   }
+  void checkRenderer();
 }
 
-function createWindow(origin: string): BrowserWindow {
+async function checkRenderer(): Promise<void> {
+  const current = window;
+  const health = rendererHealth;
+  const origin = backend?.origin;
+  if (checkingRenderer || quitting || restarting || state.kind !== "ready"
+    || !current || !health || !origin || !current.isVisible() || current.isMinimized() || rendererFailureReported) return;
+  checkingRenderer = true;
+  let replacing = false;
+  try {
+    const responsive = await health.check();
+    if (quitting || restarting || current !== window || !current.isVisible() || current.isMinimized()) return;
+    if (responsive !== false) return;
+    if (rendererRecoveryAttempted) throw new Error("The replacement window is not responding");
+    rendererRecoveryAttempted = true;
+    replacing = true;
+    console.warn("[desktop:renderer] Window did not acknowledge health check; recreating");
+    const replacement = createWindow(origin, current.getFrame());
+    window = replacement;
+    current.close();
+    console.info("[desktop:renderer] Replacement window created");
+  } catch (error) {
+    if (quitting || restarting || (current !== window && !replacing)) return;
+    rendererFailureReported = true;
+    console.error("[desktop:renderer]", error);
+    await Utils.showMessageBox({
+      type: "error", title: "Planwerk window is not responding",
+      message: String(error),
+      detail: "Use Restart Local Server in the menu bar to retry. Agent sessions in VS Code are not stopped.",
+    });
+  } finally {
+    checkingRenderer = false;
+  }
+}
+
+function createWindow(
+  origin: string,
+  frame: { width: number; height: number; x?: number; y?: number } = { width: 1280, height: 840 },
+): BrowserWindow {
   let navigationStartedAt = performance.now();
   let firstLoad = true;
   const win = new BrowserWindow({
@@ -90,31 +133,40 @@ function createWindow(origin: string): BrowserWindow {
     sandbox: true,
     allowedProtocols: { views: false, appData: false },
     navigationRules: JSON.stringify(["^*", `${origin}/*`]),
-    frame: { width: 1280, height: 840 },
+    frame,
     titleBarStyle: "hiddenInset",
     trafficLightOffset: { x: 8, y: 6 },
     preload: `window.__PLANWERK_PRELOAD_MS__ = performance.now();
 window.__PLANWERK_PERFORMANCE_DISABLED__ = ${process.env.PLANWERK_PERFORMANCE === "0"};\n` + titlebarPreload + webviewDiagnosticsPreload,
     spellCheck: true,
   });
+  const health = new RendererHealth((script) => win.webview.executeJavascript(script));
+  const cleanups: Array<() => void> = [];
+  const listen = (name: string, handler: (event: unknown) => void) => {
+    Electrobun.events.on(name, handler);
+    cleanups.push(() => Electrobun.events.off(name, handler));
+  };
   const receiveDiagnostic = createWebviewDiagnosticHandler((record) => diagnostics.webview.write(record));
   const receivePerformance = createWebviewPerformanceHandler((record) => diagnostics.webview.write(record));
-  Electrobun.events.on(`host-message-${win.webview.id}`, (event: unknown) => {
+  listen(`host-message-${win.webview.id}`, (event) => {
     const detail = eventData(event).detail;
+    health.receive(detail);
     receiveDiagnostic(detail);
     receivePerformance(detail);
     const action = titlebarAction(detail);
     if (action === "start") internalRpcHandlers.message.startWindowMove({ id: win.id });
     else if (action === "stop") internalRpcHandlers.message.stopWindowMove({});
   });
-  win.on("will-close", (event) => {
-    if (quitting) return;
+  listen(`will-close-${win.id}`, (event) => {
+    if (quitReady) return;
     veto(event);
-    win.webview.executeJavascript('window.__PLANWERK_MONITOR_VISIBLE__ = false; window.dispatchEvent(new Event("planwerk-visibility"));');
-    win.hide();
-    console.info("[desktop:lifecycle] Window hidden");
+    void quit();
   });
-  win.webview.on("dom-ready", () => {
+  Electrobun.events.once(`close-${win.id}`, () => {
+    health.cancel();
+    for (const cleanup of cleanups) cleanup();
+  });
+  listen(`dom-ready-${win.webview.id}`, () => {
     diagnostics.native.write({
       level: "INFO", scope: "performance", body: "WebKit DOM ready",
       metric: "webview.dom-ready", durationMs: performance.now() - navigationStartedAt,
@@ -137,8 +189,9 @@ window.__PLANWERK_PERFORMANCE_DISABLED__ = ${process.env.PLANWERK_PERFORMANCE ==
       void Utils.showMessageBox({ type: "error", title: "Planwerk", message: "Could not open this link in its application." });
     }
   };
-  win.webview.on("will-navigate", openLink);
-  Electrobun.events.on(`new-window-open-${win.webview.id}`, openLink);
+  listen(`will-navigate-${win.webview.id}`, openLink);
+  listen(`new-window-open-${win.webview.id}`, openLink);
+  rendererHealth = health;
   return win;
 }
 
@@ -158,12 +211,16 @@ async function poll(): Promise<void> {
   if (quitting || restarting || current !== backend) return;
   state = next;
   renderMenu();
+  void checkRenderer();
   timer = setTimeout(() => void poll(), 3000);
 }
 
 async function startBackend(): Promise<void> {
   if (restarting || quitting) return;
   restarting = true;
+  rendererHealth?.cancel();
+  rendererRecoveryAttempted = false;
+  rendererFailureReported = false;
   clearTimeout(timer);
   state = { kind: "starting" };
   renderMenu();
@@ -208,23 +265,37 @@ async function startBackend(): Promise<void> {
 async function quit(): Promise<void> {
   if (quitting) return;
   quitting = true;
+  const startedAt = performance.now();
   console.info("[desktop:lifecycle] Quitting");
   clearTimeout(timer);
+  rendererHealth?.cancel();
   try {
     await backend?.stop();
-    instance?.close();
+    const server = instance;
+    if (server) {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+      instance = null;
+    }
     tray?.remove();
+    tray = undefined;
     quitReady = true;
-    Utils.quit();
+    console.info("[desktop:lifecycle] Shutdown complete; requesting native exit", {
+      durationMs: performance.now() - startedAt,
+    });
+    if (!Utils.quit()) throw new Error("Native quit was cancelled");
   } catch (error) {
     console.error("[desktop:quit]", error);
+    quitReady = false;
     quitting = false;
     await Utils.showMessageBox({
       type: "error",
       title: "Planwerk could not finish quitting",
       message: String(error),
-      detail: "The local server could not be stopped. Check the logs before trying again.",
+      detail: "Shutdown did not complete. Check the logs before trying again.",
     });
+    void poll();
   }
 }
 
@@ -286,6 +357,9 @@ Electrobun.events.on("before-quit", (event) => {
 Electrobun.events.on("reopen", () => showWindow());
 process.on("SIGTERM", () => void quit());
 process.on("SIGINT", () => void quit());
+process.on("exit", (code) => {
+  console.info("[desktop:lifecycle] Process exiting", { code, shutdownComplete: quitReady });
+});
 
 try {
   instance = await claimInstance(join(dataDir, "desktop.sock"), () => showWindow());

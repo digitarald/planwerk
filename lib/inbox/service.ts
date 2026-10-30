@@ -5,7 +5,10 @@ import {
   applyInboxAction,
   getInboxItem,
   getInboxItemBySourceKey,
+  getInboxSessionItems,
+  hasInboxHumanResolution,
   listInboxItems,
+  observeInboxSource,
   resolveInboxKind,
   resolveInboxSource,
   updateInboxPresentationIfCurrent,
@@ -15,6 +18,8 @@ import {
 import type { AHPSessionSummary } from "../ahp/types.ts";
 import type { HeartbeatAction } from "../orchestrator/heartbeat.ts";
 import type { KanbanCard } from "../types.ts";
+import { isSessionOwnedByHost } from "../db/session-ownership.ts";
+import { reconcileInboxCatalog, type InboxCatalogEntry } from "./reconciliation.ts";
 import { inboxEvents } from "./events.ts";
 import {
   inboxItemMatchesHost,
@@ -25,7 +30,6 @@ import {
   projectCardSnapshot,
   projectExistingCompletionRefresh,
   projectHeartbeatAction,
-  projectRemovedSession,
 } from "./projector.ts";
 import {
   scopedInboxSourceKey,
@@ -156,6 +160,9 @@ function prepareSynthesisOperations(
   const evidenceByRequest = new Map<string, InboxSynthesisEvidence>();
   const prepared = operations.map((operation): InboxProjectionOperation => {
     if (operation.type !== "upsert") return operation;
+    if (operation.item.briefing.provenance.eventType === "pending-input-unavailable") {
+      return operation;
+    }
     const evidence = synthesisEvidence(operation.item, card, event);
     const requestId = synthesisRequestId(evidence);
     const existing = getInboxItemBySourceKey(
@@ -187,7 +194,15 @@ function prepareSynthesisOperations(
         item: {
           ...operation.item,
           title: existing.title,
-          briefing: existing.briefing,
+          briefing: {
+            ...existing.briefing,
+            provenance: operation.item.briefing.provenance,
+            freshness: {
+              ...operation.item.briefing.freshness,
+              sourceObservedAt: operation.item.briefing.freshness.sourceObservedAt
+                ?? existing.briefing.freshness.sourceObservedAt,
+            },
+          },
         },
       };
     }
@@ -465,8 +480,29 @@ export function projectCardToInbox(
   card: KanbanCard,
   previousCard?: KanbanCard,
   db: Database.Database = getDb(),
+  observation: { pendingInputCleared?: boolean; sourceObserved?: boolean } = {},
 ): void {
-  const operations = projectCardSnapshot(card, previousCard, { hostUrl });
+  if (!isSessionOwnedByHost(db, card.id, hostUrl)) return;
+  const currentItems = getInboxSessionItems(db, hostUrl, card.id);
+  const now = new Date().toISOString();
+  for (const item of currentItems) {
+    publishMutation(observeInboxSource(db, item, {
+      sessionTitle: card.title,
+      projectName: card.project?.name,
+      workspacePath: card.project?.path,
+    }, observation.sourceObserved === true && (item.kind !== "pending-input"
+      || (card.pendingInput && item.sourceKey.endsWith(`:pending-input:${card.pendingInput.requestId}`)))
+      ? now : undefined));
+  }
+  const hasPendingItem = currentItems.some((item) =>
+    item.kind === "pending-input"
+    && item.briefing.provenance.eventType !== "pending-input-unavailable"
+    && (item.workflowState !== "resolved" || hasInboxHumanResolution(db, item.id))
+  );
+  const operations = projectCardSnapshot(card, previousCard, {
+    hostUrl, sourceObserved: false, ...observation, now,
+  }).filter((operation) => !(hasPendingItem && operation.type === "upsert"
+    && operation.item.briefing.provenance.eventType === "pending-input-unavailable"));
   if (
     !previousCard &&
     card.runtime === "idle" &&
@@ -491,11 +527,25 @@ export function projectCardToInbox(
   scheduleSynthesis(mutations, prepared.evidenceByRequest, db);
 }
 
+export function reconcileInboxCatalogToInbox(
+  hostUrl: string,
+  catalog: readonly InboxCatalogEntry[],
+  cardId?: string,
+): void {
+  const db = getDb();
+  for (const mutation of reconcileInboxCatalog(db, hostUrl, catalog, {
+    complete: true,
+    cardId,
+    ownsSession: (cardId) => isSessionOwnedByHost(db, cardId, hostUrl),
+  })) publishProjectionMutation(mutation);
+}
+
 export function projectArchivedSessionToInbox(
   hostUrl: string,
   session: AHPSessionSummary,
 ): void {
   const db = getDb();
+  if (!isSessionOwnedByHost(db, session.resource, hostUrl)) return;
   const operations = projectArchivedSession(session, { hostUrl });
   const prepared = prepareSynthesisOperations(
     hostUrl,
@@ -512,7 +562,11 @@ export function projectRemovedSessionToInbox(
   hostUrl: string,
   cardId: string,
 ): void {
-  applyInboxProjection(hostUrl, projectRemovedSession(cardId));
+  const db = getDb();
+  if (!isSessionOwnedByHost(db, cardId, hostUrl)) return;
+  for (const mutation of reconcileInboxCatalog(db, hostUrl, [], {
+    complete: true, cardId,
+  })) publishProjectionMutation(mutation);
 }
 
 export function projectHeartbeatToInbox(
