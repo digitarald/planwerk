@@ -13,6 +13,35 @@ function sdkEvent(event: unknown): SessionEvent {
   return event as SessionEvent;
 }
 
+test("primary warnings are durable stream facts, deduplicated and never assistant errors", () => {
+  const mapper = createSdkEventMapper(new Map());
+  const warning = sdkEvent({
+    id: "warning", type: "session.warning", data: {
+      message: "Blocked", warningType: "policy_blocked", originatingMessageId: "request",
+    },
+  });
+  assert.deepEqual(mapper.map(warning), { type: "warning", id: "warning", ...warning.data });
+  assert.equal(mapper.map(warning), null);
+  assert.equal(mapper.error, null);
+  assert.equal(mapper.content, "");
+  assert.equal(mapper.map({ ...warning, id: "child", agentId: "worker" }), null);
+});
+
+test("context occupancy and compaction are separate from usage consumption", () => {
+  const mapper = createSdkEventMapper(new Map());
+  assert.deepEqual(mapper.map(sdkEvent({
+    id: "context", timestamp: "now", type: "session.usage_info",
+    data: { currentTokens: 40, tokenLimit: 100, messagesLength: 3 },
+  })), { type: "context", currentTokens: 40, tokenLimit: 100, compacting: false, updatedAt: "now" });
+  assert.deepEqual(mapper.map(sdkEvent({
+    id: "start", timestamp: "later", type: "session.compaction_start", data: {},
+  })), { type: "context", currentTokens: 40, tokenLimit: 100, compacting: true, updatedAt: "later" });
+  assert.deepEqual(mapper.map(sdkEvent({
+    id: "failed", timestamp: "latest", type: "session.compaction_complete",
+    data: { success: false, error: "Compaction failed", postCompactionTokens: 0 },
+  })), { type: "context", currentTokens: 40, tokenLimit: 100, compacting: false, updatedAt: "latest", error: "Compaction failed" });
+});
+
 test("message deltas are accumulated while preserving the native delta", () => {
   const mapper = createSdkEventMapper(new Map());
 
@@ -161,4 +190,21 @@ test("only primary session termination disables the primary lifecycle", () => {
   assert.equal(isPrimarySdkSessionTermination(sdkEvent({
     type: "assistant.message", data: { content: "hello" },
   })), false);
+});
+
+test("worker usage contributes without exposing worker dialogue or context", () => {
+  const mapper = createSdkEventMapper(new Map());
+  assert.equal(mapper.map(sdkEvent({
+    id: "worker-usage", agentId: "worker", timestamp: "now", type: "assistant.usage",
+    data: { model: "worker-model", inputTokens: 0, outputTokens: 2 },
+  }))?.type, "usage");
+  for (const [type, data] of [
+    ["assistant.message", { messageId: "worker-message", content: "Private worker response" }],
+    ["session.usage_info", { currentTokens: 20, tokenLimit: 100 }],
+    ["session.compaction_start", {}],
+    ["tool.execution_start", { toolName: "read", toolCallId: "worker-call" }],
+  ]) {
+    assert.equal(mapper.map(sdkEvent({ id: type, type, data, agentId: "worker" })), null);
+  }
+  assert.equal(mapper.content, "");
 });

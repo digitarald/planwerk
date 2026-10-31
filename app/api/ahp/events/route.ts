@@ -28,12 +28,15 @@ import {
   projectCardToInbox,
   projectHeartbeatToInbox,
   projectRemovedSessionToInbox,
+  reconcileInboxCatalogToInbox,
 } from "@/lib/inbox/service";
 import { inboxEventMatchesHost, inboxEvents } from "@/lib/inbox/events";
 import type { InboxStreamEvent } from "@/lib/inbox/types";
 import { KanbanCard, type Phase, type RiskLevel } from "@/lib/types";
 import { registerDesktopHosts } from "@/lib/desktop/status";
 import { isWorkspaceEnabled } from "@/lib/orchestrator/config-file";
+import { registerCoordinatorHostReader } from "@/lib/orchestrator/coordinator-hosts";
+import { coordinatorGoalEvents } from "@/lib/orchestrator/coordinator-goal-events";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,6 +46,7 @@ type CardStreamEvent =
   | { type: "cardChanged"; card: KanbanCard; triage?: TriageEvent; pendingInputCleared?: boolean }
   | { type: "cardRemoved"; cardId: string; archivedSession?: ArchivedSession }
   | { type: "heartbeat"; action: HeartbeatAction }
+  | { type: "coordinatorGoalsChanged" }
   | InboxStreamEvent
   | ConnectionError;
 
@@ -253,6 +257,20 @@ registerDesktopHosts(() => Array.from(hostStreams.entries(), ([hostUrl, partitio
   connected: partition.resource.connected,
   running: partition.cards.filter((card) => card.runtime === "running").length,
 })));
+
+registerCoordinatorHostReader((hostUrl) => {
+  const partition = hostStreams.get(hostUrl);
+  if (!partition?.resource.connected) return undefined;
+  const scopes = Array.from(partition.subscribers.values())
+    .map((subscriber) => subscriber.workspaceScope)
+    .filter((scope): scope is Set<string> => scope !== null);
+  if (!scopes.length) return undefined;
+  return {
+    generation: partition.generation,
+    cards: partition.cards.filter(isWorkspaceEnabled),
+    scopes,
+  };
+});
 
 function getAutomationHosts() {
   return Array.from(hostStreams.entries())
@@ -466,6 +484,11 @@ function startHostBridge(partition: HostPartition): void {
           const removedActiveCard = projected.type === "cardRemoved"
             && partition.cards.some((card) => card.id === projected.cardId);
           try {
+            if (event.type === "sessionAdded" || event.type === "sessionSummaryChanged") {
+              reconcileInboxCatalogToInbox(partition.hostUrl, [{
+                session: event.session, enabled: isWorkspaceEnabled(event.session),
+              }], event.session.resource);
+            }
             if (
               event.type === "sessionRemoved" &&
               event.reason === "archived" &&
@@ -476,8 +499,15 @@ function startHostBridge(partition: HostPartition): void {
             } else if (event.type === "sessionRemoved") {
               projectRemovedSessionToInbox(partition.hostUrl, event.resource);
             } else if (projected.type === "init") {
+              if (event.type === "init" && event.catalog) {
+                reconcileInboxCatalogToInbox(partition.hostUrl, event.catalog.map((session) => ({
+                  session, enabled: isWorkspaceEnabled(session),
+                })));
+              }
               for (const card of projected.cards) {
-                projectCardToInbox(partition.hostUrl, card);
+                projectCardToInbox(partition.hostUrl, card, undefined, undefined, {
+                  sourceObserved: card.runtime !== "input-needed" || Boolean(card.pendingInput),
+                });
               }
             } else if (projected.type === "cardRemoved" && projected.archivedSession) {
               if (removedActiveCard) {
@@ -491,7 +521,15 @@ function startHostBridge(partition: HostPartition): void {
                 partition.hostUrl,
                 projected.card,
                 previousCard,
+                undefined,
+                {
+                  pendingInputCleared: projected.pendingInputCleared,
+                  sourceObserved: event.type !== "init" && "pendingInput" in event
+                    ? Boolean(event.pendingInput) : projected.card.runtime !== "input-needed",
+                },
               );
+            } else if (projected.type === "cardRemoved") {
+              projectRemovedSessionToInbox(partition.hostUrl, projected.cardId);
             }
           } catch (error) {
             reportInboxProjectionError(event.type, error);
@@ -545,6 +583,7 @@ function createRemoteStream(
   const streamId = nextStreamId++;
   let closed = false;
   let unsubscribeInbox: (() => void) | undefined;
+  let unsubscribeGoals: (() => void) | undefined;
   const epoch = crypto.randomUUID();
   let sequence = 0;
   const maxBufferedBytes = 8 * 1024 * 1024;
@@ -553,6 +592,7 @@ function createRemoteStream(
     if (closed) return;
     closed = true;
     unsubscribeInbox?.();
+    unsubscribeGoals?.();
     const partition = hostStreams.get(hostUrl);
     if (partition?.subscribers.size === 1 && partition.subscribers.has(streamId)) invalidateHostWork(hostUrl);
     const { activeHostCount } = hostStreams.unsubscribe(hostUrl, streamId);
@@ -618,6 +658,9 @@ function createRemoteStream(
         subscriber,
       );
       if (!archivedOnly) {
+        unsubscribeGoals = coordinatorGoalEvents.subscribe((changedHost) => {
+          if (changedHost === hostUrl) subscriber.send({ type: "coordinatorGoalsChanged" });
+        });
         unsubscribeInbox = inboxEvents.subscribe((event) => {
           if (inboxEventMatchesHost(event, hostUrl)) {
             subscriber.send(event);

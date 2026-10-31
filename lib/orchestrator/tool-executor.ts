@@ -1,12 +1,14 @@
 import "server-only";
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
-import { injectMessage, answerInput } from "@/lib/ahp/session-messenger";
+import { injectMessage } from "@/lib/ahp/session-messenger";
 import { startReview } from "./review-executor";
 import { getApplicableSkills, loadConfig } from "./skill-config";
 import {
   completeGateRun,
+  executeGateCommand,
+  getGateRunsForCard,
   getNextPhase,
   getPersistedCardPhase,
   resolveConfiguredGate,
@@ -15,7 +17,6 @@ import {
   type GateType,
 } from "./gate-engine";
 import { assessRisk } from "./risk-assessor";
-import { buildAnswer } from "@/lib/ahp/answer-value";
 import type { OrchestratorToolName, ToolCallResult } from "./orchestrator-tools";
 import { PHASE_ORDER, type KanbanCard, type Phase } from "@/lib/types";
 import {
@@ -39,8 +40,16 @@ import { isOperationAborted } from "@/lib/abort";
 import { runLeaseRenewalTick } from "./lease-renewal";
 import { reassessAndPersistRisk } from "./risk-reassessment";
 import type { RiskFactsSnapshot } from "./risk-facts";
-import { dispatchGateInstruction } from "./gate-tool-dispatch";
+import { createAndStartSession } from "../ahp/create-session";
+import { currentCoordinatorCards, withCoordinatorAuthority } from "./coordinator-authority";
+import { queryCoordinatorSessions } from "./coordinator-queries";
+import { coordinatorReviewPolicy } from "./coordinator-mode";
+import { getEffectiveCoordinatorMode } from "./coordinator-mode-store";
+import { assertOperationCurrent, runOperationEffect } from "./operation-context";
+import { submitAuthorizedAnswer } from "./auto-answerer";
+import { getCoordinatorGoalStore, goalInScope, listCoordinatorGoals, manageCoordinatorGoal } from "./coordinator-goal-service";
 import { resolveAuthoritativeGateRevision } from "./gate-revision";
+import { recordCoordinatorDelivery, getCoordinatorDelivery } from "../db/coordinator-deliveries";
 
 const TOOL_EXECUTION_LEASE_MS = 5 * 60_000;
 
@@ -62,17 +71,20 @@ const defaultRenewalScheduler: RenewalScheduler = {
 
 export interface ToolCallContext {
   hostUrl: string;
+  workspaceScope: string[];
   cards: KanbanCard[];
   idempotencyKey: string;
   sdkSessionId: string;
   toolCallId: string;
   signal?: AbortSignal;
+  isCurrent?: () => boolean;
   services?: {
     continuityStore?: CtoContinuityStore;
     startReview?: typeof startReview;
+    executeGateCommand?: typeof executeGateCommand;
     injectMessage?: (
       ...args: Parameters<typeof injectMessage>
-    ) => Promise<{ success: boolean; queued?: boolean }>;
+    ) => Promise<{ success: boolean; queued?: boolean; chatUri?: string; turnId?: string }>;
     assessRisk?: typeof assessRisk;
     getAuthoritativeRiskSnapshot?: (
       hostUrl: string,
@@ -113,6 +125,11 @@ function needsHumanRecoveryResult(toolName: string): ToolCallResult {
   };
 }
 
+function coordinatorSessionResource(key: string): string {
+  const digest = createHash("sha256").update(key).digest("hex");
+  return `copilotcli:/${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
 /**
  * Execute an orchestrator tool call and return the result.
  */
@@ -120,6 +137,47 @@ export async function executeToolCall(
   toolName: OrchestratorToolName,
   args: Record<string, unknown>,
   context: ToolCallContext
+): Promise<ToolCallResult> {
+  if (context.signal?.aborted || context.isCurrent?.() === false) {
+    return { ...abortedResult(), auditKey: context.idempotencyKey };
+  }
+  const scope = { hostUrl: context.hostUrl, workspaceScope: context.workspaceScope, isCurrent: context.isCurrent };
+  if (toolName === "list_goals") {
+    return { success: true, message: "Persistent scoped goals; read_goal supplies acceptance criteria and work evidence.", data: listCoordinatorGoals(scope).map((goal) => ({
+      id: goal.id, revision: goal.revision, state: goal.state, objective: goal.objective.slice(0, 500),
+      summary: goal.summary, workCount: goal.items.length,
+    })) };
+  }
+  if (toolName === "read_goal") {
+    const goal = getCoordinatorGoalStore().get(String(args.goalId));
+    return goal && goalInScope(goal, scope)
+      ? { success: true, message: "Current goal and work evidence.", data: goal }
+      : { success: false, message: "Goal is unavailable in this scope." };
+  }
+  if (toolName === "manage_goal") {
+    return { success: true, message: "Goal updated; background effects still require Coordinate and current scope.", data: manageCoordinatorGoal(scope, args, context.idempotencyKey) };
+  }
+  if (toolName === "list_sessions" || toolName === "read_session" || toolName === "read_session_messages") {
+    return queryCoordinatorSessions(toolName, args, context.hostUrl, currentCoordinatorCards(scope));
+  }
+  const resource = coordinatorSessionResource(context.idempotencyKey);
+  return withCoordinatorAuthority(
+    scope,
+    toolName === "create_session"
+      ? { workingDirectory: String(args.workingDirectory ?? ""), resource }
+      : { cardId: String(args.cardId ?? "") },
+    toolName === "trigger_gate" || toolName === "trigger_review" ? "verify"
+      : toolName === "assess_risk" ? "observe"
+      : toolName === "override_phase" ? "advance" : "interact",
+    context.signal,
+    (cards) => executeAdmittedToolCall(toolName, args, { ...context, cards }),
+  );
+}
+
+async function executeAdmittedToolCall(
+  toolName: OrchestratorToolName,
+  args: Record<string, unknown>,
+  context: ToolCallContext,
 ): Promise<ToolCallResult> {
   if (context.signal?.aborted) {
     return { ...abortedResult(), auditKey: context.idempotencyKey };
@@ -174,7 +232,7 @@ export async function executeToolCall(
       store.completeToolExecution(context.idempotencyKey, ownerId, result);
       return result;
     }
-    if (toolName === "create_session" || toolName === "assess_risk") {
+    if (toolName === "assess_risk") {
       if (!store.recoverToolExecution(
         context.idempotencyKey,
         ownerId,
@@ -226,6 +284,9 @@ export async function executeToolCall(
     const result = {
       ...outcome.result,
       auditKey: context.idempotencyKey,
+      data: toolName === "create_session" || toolName === "send_message"
+        ? { ...getCoordinatorDelivery(getDb(), context.idempotencyKey), disposition: "uncertain" }
+        : outcome.result.data,
     };
     persistToolHandlerOutcome(
       store,
@@ -256,17 +317,19 @@ export async function executeToolCall(
       }
       return result;
     }
-    if (isOperationAborted(error)) {
+    if (isOperationAborted(error) && toolName !== "create_session" && toolName !== "send_message") {
       store.abandonToolExecution(context.idempotencyKey, ownerId);
       return { ...abortedResult(), auditKey: context.idempotencyKey };
     }
-    let result = {
+    let result: ToolCallResult = {
       success: false,
       message:
         `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`,
       auditKey: context.idempotencyKey,
+      data: toolName === "create_session" || toolName === "send_message"
+        ? { ...getCoordinatorDelivery(getDb(), context.idempotencyKey), disposition: "uncertain" } : undefined,
     };
-    if (toolName === "create_session" || toolName === "assess_risk") {
+    if (toolName === "assess_risk") {
       store.abandonToolExecution(context.idempotencyKey, ownerId);
     } else {
       result = {
@@ -298,7 +361,7 @@ async function executeToolCallOnce(
   let result: ToolCallResult;
   switch (toolName) {
     case "create_session":
-      result = await handleCreateSession(args);
+      result = await handleCreateSession(args, context);
       break;
     case "send_message":
       result = await handleSendMessage(args, context);
@@ -322,15 +385,23 @@ async function executeToolCallOnce(
   return { result, disposition: "terminal" };
 }
 
-async function handleCreateSession(args: Record<string, unknown>): Promise<ToolCallResult> {
+async function handleCreateSession(args: Record<string, unknown>, context: ToolCallContext): Promise<ToolCallResult> {
   const title = args.title as string;
   if (!title) return { success: false, message: "title is required" };
 
-  // Session creation happens client-side via the AHP protocol
-  // The orchestrator can only suggest — actual creation needs the VS Code host
+  const resource = coordinatorSessionResource(context.idempotencyKey);
+  recordCoordinatorDelivery(getDb(), context.idempotencyKey, { resource });
+  const delivery = await createAndStartSession({
+    hostUrl: context.hostUrl, task: args.prompt as string,
+    workingDirectory: args.workingDirectory as string, resource, signal: context.signal,
+    beforeDispatch: (identity) => recordCoordinatorDelivery(getDb(), context.idempotencyKey,
+      deliveryIdentity(resource, identity)),
+  });
   return {
-    success: true,
-    message: `Suggested creating session: "${title}". The user should create this via their editor.`,
+    success: delivery.success,
+    message: delivery.success ? `Created ${title}; task ${delivery.queued ? "queued" : "dispatched"}, not completed.`
+      : `Created ${resource}, but the task did not start. Inspect before retrying.`,
+    data: deliveryResult(resource, delivery),
   };
 }
 
@@ -347,12 +418,31 @@ async function handleSendMessage(
 
   if (context.signal?.aborted) return abortedResult();
   // Use the card ID as session URI (standard mapping)
-  const { success } = await injectMessage(context.hostUrl, cardId, message, {
+  const delivery = await (context.services?.injectMessage ?? injectMessage)(context.hostUrl, cardId, message, {
     signal: context.signal,
+    beforeDispatch: (identity) => recordCoordinatorDelivery(getDb(), context.idempotencyKey,
+      deliveryIdentity(cardId, identity)),
   });
-  return success
-    ? { success: true, message: `Sent message to ${card.title}: "${message.slice(0, 100)}"` }
-    : { success: false, message: `Failed to send message to ${card.title}` };
+  return {
+    success: delivery.success,
+    message: delivery.success
+      ? `${delivery.queued ? "Queued" : "Dispatched"} instruction to ${card.title}; awaiting its result.`
+      : `Message delivery to ${card.title} is uncertain. Inspect before retrying.`,
+    data: deliveryResult(cardId, delivery),
+  };
+}
+
+function deliveryIdentity(resource: string, delivery: { queued?: boolean; chatUri?: string; turnId?: string }) {
+  return {
+    resource, chatUri: delivery.chatUri, queued: delivery.queued,
+    turnId: delivery.queued ? undefined : delivery.turnId,
+    pendingMessageId: delivery.queued ? delivery.turnId : undefined,
+  };
+}
+
+function deliveryResult(resource: string, delivery: { success: boolean; queued?: boolean; chatUri?: string; turnId?: string }) {
+  return { ...deliveryIdentity(resource, delivery),
+    disposition: delivery.success ? delivery.queued ? "queued" : "dispatched" : "uncertain" };
 }
 
 async function handleAnswerInput(
@@ -366,48 +456,10 @@ async function handleAnswerInput(
   const card = context.cards.find((c) => c.id === cardId);
   if (!card) return { success: false, message: `Card ${cardId} not found` };
   if (!card.pendingInput) return { success: false, message: `Card ${card.title} has no pending input` };
-  if (card.pendingInput.kind === "toolAuthentication") {
-    return {
-      success: false,
-      message: `${card.title} requires tool authentication in VS Code; Planwerk never handles OAuth credentials.`,
-    };
-  }
-
-  // Only elicitation-kind pending input has an answerable question; tool
-  // confirmations (`card.pendingInput.toolConfirmation`) are a different wire
-  // shape (chat/toolCallConfirmed) not handled by this tool.
-  const question = card.pendingInput.questions[0];
-  if (!question) {
-    return {
-      success: false,
-      message: `${card.title}'s pending input isn't an answerable question (likely a tool confirmation) — this tool only answers elicitations.`,
-    };
-  }
-
-  const built = buildAnswer(question, answer);
-  if (!built) {
-    return { success: false, message: `Could not map "${answer}" onto the question format for ${card.title}` };
-  }
-
   if (context.signal?.aborted) return abortedResult();
-  // Dispatch by the pending input's requestId — NOT the question id — keyed
-  // per-question in the answers record (see ChatInputCompletedAction shape).
-  const { success, stale } = await answerInput(
-    context.hostUrl,
-    cardId,
-    card.pendingInput.requestId,
-    "accept",
-    { [question.id]: { state: "submitted", value: built.value } },
-    { signal: context.signal },
-  );
-  return success
-    ? { success: true, message: `Answered input for ${card.title}: ${built.display}` }
-    : {
-        success: false,
-        message: stale
-          ? `Input request for ${card.title} is no longer pending (stale)`
-          : `Failed to answer input for ${card.title}`,
-      };
+  const result = await submitAuthorizedAnswer(context.hostUrl, card, answer);
+  return { success: result.answered, message: result.answered
+    ? `Answered input for ${card.title}: ${result.answer}` : result.reason ?? "Input was not answered." };
 }
 
 async function handleTriggerReview(
@@ -496,11 +548,11 @@ async function handleTriggerReview(
     context.hostUrl,
     cardId,
     cardId,
-    skill,
+    coordinatorReviewPolicy(getEffectiveCoordinatorMode(context.hostUrl, cardId)).allowEdits ? skill : { ...skill, autoFix: false },
     transition.value,
     riskLevel,
     revision.changesetRef,
-    { signal: context.signal },
+    { signal: context.signal, independent: true },
   );
 
   return {
@@ -607,6 +659,11 @@ async function handleTriggerGate(
         disposition: "retryable",
       };
     }
+    const duplicate = getGateRunsForCard(cardId).find((run) =>
+      run.status === "running" && run.gateType === gate.gateType &&
+      run.gateName === (gate.gateName ?? null) && run.changesetRef === revision.changesetRef);
+    if (duplicate) return { result: { success: true, message: "This check is already running.", data: { gateRunId: duplicate.id } }, disposition: "terminal" };
+    assertOperationCurrent("verify");
     gateRunId = startGateRun({
       cardId,
       fromPhase: transition.fromPhase,
@@ -617,20 +674,17 @@ async function handleTriggerGate(
       signal: context.signal,
     });
 
-    return await dispatchGateInstruction({
-      cardTitle: card.title,
-      gateType: gate.gateName ?? gate.gateType,
-      gateRunId,
-      command: gate.command,
-      inject: () =>
-        (context.services?.injectMessage ?? injectMessage)(
-          context.hostUrl,
-          cardId,
-          `Run this command and fix any issues: ${gate.command}`,
-          { signal: context.signal },
-        ),
-      failGate: (output) => completeGateRun(gateRunId!, "failed", output),
-    });
+    if (!card.workingDirectory) {
+      completeGateRun(gateRunId, "failed", "No local working directory is available.");
+      return { result: { success: false, message: "No local working directory is available." }, disposition: "terminal" };
+    }
+    const status = await runOperationEffect("verify", () => new Promise<"passed" | "failed">((resolve) => {
+      (context.services?.executeGateCommand ?? executeGateCommand)(gateRunId!, gate.command!, card.workingDirectory!, resolve, {
+        signal: context.signal,
+        isCurrent: () => { try { assertOperationCurrent("verify"); return true; } catch { return false; } },
+      });
+    }));
+    return { result: { success: status === "passed", message: `${gate.gateType} ${status}.`, data: { gateRunId, status } }, disposition: "terminal" };
   } catch (error) {
     if (!isOperationAborted(error)) throw error;
     if (gateRunId !== undefined) {

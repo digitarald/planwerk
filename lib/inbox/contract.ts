@@ -9,6 +9,7 @@ import type {
   InboxItemKind,
   InboxListResponse,
 } from "./types.ts";
+import { inboxSourceFreshness } from "./freshness.ts";
 
 const BAND_NUMBER = {
   urgent: 1,
@@ -98,14 +99,14 @@ function defaultAction(item: InboxItem): InboxApiSuggestedAction {
   }
 }
 
-function isStale(item: InboxItem, generatedAt: number, now: number): boolean {
+function isStale(item: InboxItem, sourceObservedAt: number | undefined, now: number): boolean {
   if (
     item.workflowState !== "open" ||
     !ACTIONABLE_KINDS.has(item.kind)
   ) {
     return false;
   }
-  return now - generatedAt > 30 * 60 * 1_000;
+  return inboxSourceFreshness(sourceObservedAt, true, now) !== "current";
 }
 
 export function serializeInboxItem(
@@ -113,8 +114,10 @@ export function serializeInboxItem(
   now = Date.now(),
 ): InboxApiItem {
   const generatedAt =
-    timestamp(item.briefing.freshness.observedAt) ?? timestamp(item.updatedAt) ??
+    timestamp(item.briefing.synthesis?.generatedAt ?? null)
+      ?? timestamp(item.briefing.freshness.observedAt) ?? timestamp(item.updatedAt) ??
       now;
+  const sourceObservedAt = timestamp(item.briefing.freshness.sourceObservedAt ?? null) ?? undefined;
   const snoozedUntil = timestamp(item.snoozedUntil);
   const workflowState = item.workflowState === "dismissed"
     ? snoozedUntil
@@ -163,6 +166,9 @@ export function serializeInboxItem(
       `${item.priorityBand} priority ${item.kind}`,
     ],
     title: item.title,
+    sessionTitle: provenance.sessionTitle,
+    projectName: provenance.projectName,
+    workspacePath: provenance.workspacePath,
     briefing: {
       message: item.briefing.message ?? [
         item.briefing.reason,
@@ -182,7 +188,8 @@ export function serializeInboxItem(
       freshness: {
         sourceRevision: item.sourceRevision,
         generatedAt,
-        stale: isStale(item, generatedAt, now),
+        sourceObservedAt,
+        stale: isStale(item, sourceObservedAt, now),
       },
       provenance: [
         provenance.sourceType,

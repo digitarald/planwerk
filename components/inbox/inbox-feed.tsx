@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Inbox as InboxIcon, RotateCcw } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -45,6 +46,11 @@ function FeedSkeleton() {
 }
 
 export function InboxFeed() {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const hostUrl = useConnectionStore((state) => state.hostUrl);
   const visibleItems = useInboxStore(useShallow(visibleInboxItems));
   const selectedId = useInboxStore((state) => state.selectedId);
@@ -113,6 +119,7 @@ export function InboxFeed() {
           <InboxFeedItem
             key={item.id}
             item={item}
+            now={now}
             projectName={
               cardsById.get(item.cardId)?.project?.name ?? item.projectName
             }

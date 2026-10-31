@@ -1,6 +1,8 @@
 import type {
   ChatTurnStartedAction,
   ChatPendingMessageSetAction,
+  ChatPendingMessageRemovedAction,
+  ChatQueuedMessagesReorderedAction,
   ChatInputAnswerChangedAction,
   ChatInputCompletedAction,
   ChatInputAnswer,
@@ -52,6 +54,21 @@ export function chatQueuedMessage(id: string, text: string): ChatPendingMessageS
     id,
     message: userMessage(text),
   };
+}
+
+export function chatSteeringMessage(id: string, text: string): ChatPendingMessageSetAction {
+  return { ...chatQueuedMessage(id, text), kind: "steering" as ChatPendingMessageSetAction["kind"] };
+}
+
+export function chatPendingMessageRemoved(kind: "queued" | "steering", id: string): ChatPendingMessageRemovedAction {
+  return {
+    type: "chat/pendingMessageRemoved" as ChatPendingMessageRemovedAction["type"],
+    kind: kind as ChatPendingMessageRemovedAction["kind"], id,
+  };
+}
+
+export function chatQueuedMessagesReordered(order: string[]): ChatQueuedMessagesReorderedAction {
+  return { type: "chat/queuedMessagesReordered" as ChatQueuedMessagesReorderedAction["type"], order };
 }
 
 /** Resume the latest errored turn after its identity and resumability are re-read. */

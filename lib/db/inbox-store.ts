@@ -153,9 +153,26 @@ export function upsertInboxItem(
 ): InboxMutation {
   const transaction = db.transaction((): InboxMutation => {
     const existingRow = getItemRowBySourceKey(db, draft.sourceKey);
+    const existingBriefing = existingRow ? mapItem(existingRow).briefing : undefined;
+    const recoverPendingInput = existingRow?.workflow_state === "resolved"
+      && draft.kind === "pending-input"
+      && draft.recoverPendingInput === true
+      && !hasInboxHumanResolution(db, existingRow.id);
     const priority = priorityForInboxKind(draft.kind);
     let nextTitle = draft.title;
-    let nextBriefing = draft.briefing;
+    let nextBriefing = existingBriefing ? {
+      ...draft.briefing,
+      provenance: {
+        ...existingBriefing.provenance,
+        ...Object.fromEntries(Object.entries(draft.briefing.provenance)
+          .filter(([, value]) => value !== undefined)),
+      },
+      freshness: {
+        ...draft.briefing.freshness,
+        sourceObservedAt: draft.briefing.freshness.sourceObservedAt
+          ?? existingBriefing.freshness.sourceObservedAt,
+      },
+    } : draft.briefing;
     if (existingRow?.source_revision === draft.sourceRevision) {
       const existing = mapItem(existingRow);
       const existingSynthesis = existing.briefing.synthesis;
@@ -168,7 +185,7 @@ export function upsertInboxItem(
           ? existing.title
           : draft.title;
         nextBriefing = {
-          ...draft.briefing,
+          ...nextBriefing,
           ...(existingSynthesis.status === "generated"
             ? {
                 message: existing.briefing.message,
@@ -186,6 +203,7 @@ export function upsertInboxItem(
 
     if (
       existingRow?.source_revision === draft.sourceRevision &&
+      !recoverPendingInput &&
       existingRow.kind === draft.kind &&
       existingRow.priority_band === priority.band &&
       existingRow.priority_rank === priority.rank &&
@@ -246,7 +264,9 @@ export function upsertInboxItem(
             card_id = ?,
             related_card_ids_json = ?,
             title = ?,
-            briefing_json = ?
+            briefing_json = ?,
+            workflow_state = CASE WHEN ? THEN 'open' ELSE workflow_state END,
+            resolved_at = CASE WHEN ? THEN NULL ELSE resolved_at END
         WHERE id = ?
       `).run(
         draft.kind,
@@ -256,6 +276,8 @@ export function upsertInboxItem(
         relatedCardIdsJson,
         nextTitle,
         briefingJson,
+        Number(recoverPendingInput),
+        Number(recoverPendingInput),
         existingRow.id,
       );
       const item = getInboxItem(db, existingRow.id);
@@ -297,6 +319,53 @@ export function upsertInboxItem(
     return { previous, item, changed: true, inserted: false };
   });
   return transaction.immediate();
+}
+
+export function hasInboxHumanResolution(db: Database.Database, itemId: string): boolean {
+  return Boolean(db.prepare(`
+    SELECT 1 FROM inbox_item_actions
+    WHERE inbox_item_id = ? AND action_type = 'resolve' LIMIT 1
+  `).get(itemId));
+}
+
+export function getInboxSessionItems(
+  db: Database.Database,
+  hostUrl: string,
+  cardId?: string,
+): InboxItem[] {
+  const rows = db.prepare(`
+    SELECT * FROM inbox_items
+    WHERE json_extract(briefing_json, '$.provenance.hostUrl') = ?
+      AND json_extract(briefing_json, '$.provenance.sourceType') = 'ahp-session'
+      AND card_id IS NOT NULL
+      ${cardId === undefined ? "" : "AND card_id = ?"}
+  `).all(...(cardId === undefined ? [hostUrl] : [hostUrl, cardId])) as InboxItemRow[];
+  return rows.map(mapItem);
+}
+
+export function observeInboxSource(
+  db: Database.Database,
+  item: InboxItem,
+  identity: Pick<InboxBriefing["provenance"], "sessionTitle" | "projectName" | "workspacePath">,
+  sourceObservedAt?: string,
+): InboxMutation {
+  const briefing: InboxBriefing = {
+    ...item.briefing,
+    provenance: {
+      ...item.briefing.provenance,
+      ...Object.fromEntries(Object.entries(identity).filter(([, value]) => value !== undefined)),
+    },
+    freshness: {
+      ...item.briefing.freshness,
+      sourceObservedAt: sourceObservedAt ?? item.briefing.freshness.sourceObservedAt,
+    },
+  };
+  if (JSON.stringify(briefing) === JSON.stringify(item.briefing)) {
+    return { previous: item, item, changed: false, inserted: false };
+  }
+  db.prepare("UPDATE inbox_items SET briefing_json = ? WHERE id = ?")
+    .run(JSON.stringify(briefing), item.id);
+  return { previous: item, item: { ...item, briefing }, changed: true, inserted: false };
 }
 
 export function updateInboxPresentationIfCurrent(
@@ -426,14 +495,13 @@ export function purgeNonActionableInboxItems(
     DELETE FROM inbox_items
     WHERE 1 = 1
       ${hostClause}
+      AND NOT EXISTS (
+        SELECT 1 FROM inbox_item_actions
+        WHERE inbox_item_id = inbox_items.id
+      )
       AND (
         (
           workflow_state = 'resolved'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM inbox_item_actions
-            WHERE inbox_item_id = inbox_items.id
-          )
         )
         OR (
           workflow_state = 'open'

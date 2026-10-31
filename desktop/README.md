@@ -85,12 +85,19 @@ endpoint and Copilot authentication remain prerequisites for managing sessions.
 - Open Inbox selects the unread inbox view. Open Board selects the board.
   Both preserve workspace filters because those filters also define automation
   scope. A global menu count can therefore exceed the filtered view's count.
-- Closing the window hides it and retains its live AHP connection. The
-  coordinator continues at the existing authority level and scope.
-  Hiding the app does not grant it additional authority.
+- Closing the window with the red button quits Planwerk through the same
+  shutdown sequence as Quit Planwerk or Command-Q. Minimize or Hide Planwerk
+  keeps monitoring active without closing the app; neither grants additional authority.
 - Reopening the app or choosing a menu destination restores the same window.
   A second launch activates the first instance rather than starting another
   server.
+- While the server is ready, visible, non-minimized windows receive a renderer
+  health probe every three seconds, including when reopened. A loaded document
+  must acknowledge within ten seconds. An unresponsive window is recreated once,
+  preserving its frame and persisted UI settings without restarting the server.
+  If the replacement also fails, a native error directs you to Restart Local
+  Server; automatic recovery does not loop. Restart resets the recovery limit.
+  This checks JavaScript/bridge liveness, not GPU compositing or visual correctness.
 - Quit stops Planwerk's server and its owned child-process group. It does not
   stop VS Code or sessions owned by VS Code. Restart Local Server requires
   confirmation because it interrupts in-flight coordinator work.
@@ -98,6 +105,9 @@ endpoint and Copilot authentication remain prerequisites for managing sessions.
   group-reaping deadline to finish. It does not probe a dying process group,
   which can report `EPERM` on macOS even during normal teardown. A watchdog that
   exceeds the deadline is force-stopped; signaling and exit failures remain errors.
+  The window stays open until shutdown finishes. Native diagnostics record
+  shutdown completion and elapsed time before requesting native exit, and a
+  process-exit record when the runtime emits its exit event.
 
 ## Data and diagnostics
 

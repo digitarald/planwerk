@@ -304,6 +304,69 @@ test("managed approval requirements are never auto-approved", async () => {
   db.close();
 });
 
+test("derived standard approval preserves one-shot provenance but not a second managed prompt", async () => {
+  const db = new Database(":memory:");
+  ensureCtoContinuitySchema(db);
+  const store = new CtoContinuityStore(db);
+  const policy = createCtoPermissionPolicy({
+    store,
+    resolveBinding: (tool, args, session) => approvalBinding(tool, args, session, "low", {}),
+  });
+  const invocation = { sessionId: "sdk-1", promptRequest: {
+    kind: "read" as const, path: "/test", intention: "Read", managedApprovalRequired: false,
+  } };
+  assert.deepEqual(await policy.onPermissionRequest({
+    kind: "read", path: "/test", intention: "Read", managedApprovalRequired: true,
+  }, invocation), { kind: "approve-once", approvedInteractively: true });
+  assert.equal(store.listApprovals().length, 0);
+  assert.deepEqual(await policy.onPermissionRequest({
+    kind: "read", path: "/test", intention: "Read",
+  }, invocation), { kind: "reject", feedback: "Planwerk only permits its registered CTO tools." });
+  db.close();
+});
+
+test("derived approval cannot bypass an independent high-risk override", async () => {
+  const db = new Database(":memory:");
+  ensureCtoContinuitySchema(db);
+  const store = new CtoContinuityStore(db);
+  const abort = new AbortController();
+  const policy = createCtoPermissionPolicy({
+    store, signal: abort.signal,
+    resolveBinding: (tool, args, session) => approvalBinding(tool, args, session, "high", {}),
+  });
+  const pending = policy.onPermissionRequest(overrideRequest(true), {
+    sessionId: "sdk-1", promptRequest: {
+      kind: "read", path: "/test", intention: "Read", managedApprovalRequired: false,
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(store.listApprovals("pending").length, 1);
+  abort.abort();
+  assert.deepEqual(await pending, { kind: "user-not-available" });
+  db.close();
+});
+
+test("nonstandard prompt context never clears the raw managed requirement", async () => {
+  const db = new Database(":memory:");
+  ensureCtoContinuitySchema(db);
+  const store = new CtoContinuityStore(db);
+  const abort = new AbortController();
+  const policy = createCtoPermissionPolicy({
+    store, signal: abort.signal,
+    resolveBinding: (tool, args, session) => approvalBinding(tool, args, session, "low", {}),
+  });
+  const pending = policy.onPermissionRequest(overrideRequest(true), {
+    sessionId: "sdk-1", promptRequest: {
+      kind: "custom-tool", toolName: "override_phase", toolDescription: "Override",
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(store.listApprovals("pending").length, 1);
+  abort.abort();
+  assert.deepEqual(await pending, { kind: "user-not-available" });
+  db.close();
+});
+
 test("missing authoritative risk fails closed despite client-like request data", async () => {
   const db = new Database(":memory:");
   ensureCtoContinuitySchema(db);

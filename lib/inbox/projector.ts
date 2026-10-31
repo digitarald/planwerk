@@ -13,6 +13,8 @@ import type {
 interface ProjectionContext {
   hostUrl: string;
   now?: string;
+  pendingInputCleared?: boolean;
+  sourceObserved?: boolean;
 }
 
 function digest(value: unknown): string {
@@ -180,6 +182,28 @@ function projectPendingInput(
   context: ProjectionContext,
 ): InboxProjectionOperation[] {
   if (!card.pendingInput) {
+    if (card.runtime === "input-needed" && !context.pendingInputCleared) {
+      const sourceKey = `session:${card.id}:pending-input:unavailable`;
+      const note = briefing(sourceKey, "pending-input-unavailable", context, {
+        cardId: card.id,
+        sourceRevision: "unavailable",
+        reason: "The session needs input, but the question is not available here.",
+        recommendation: "Open the session to view the request.",
+        alternativeActions: [],
+        outcome: "",
+        caveats: [],
+        confidence: "high",
+      });
+      note.recommendedAction = {
+        id: "open-session", label: "Open session", intent: "open-session",
+      };
+      note.synthesis = { status: "failed" };
+      return [{
+        type: "upsert",
+        item: draft("pending-input", sourceKey, "unavailable",
+          `${cardTitle(card)} needs input`, note, card.id),
+      }];
+    }
     return [{ type: "resolve-kind", kind: "pending-input", cardId: card.id }];
   }
 
@@ -460,13 +484,37 @@ export function projectCardSnapshot(
   previousCard: KanbanCard | undefined,
   context: ProjectionContext,
 ): InboxProjectionOperation[] {
-  return [
+  const operations: InboxProjectionOperation[] = [
     ...projectPendingInput(card, context),
     projectRuntimeError(card, context),
     ...projectReadiness(card, previousCard, context, "review"),
     ...projectReadiness(card, previousCard, context, "ship"),
     ...projectCompletion(card, previousCard, context),
   ];
+  return operations.map((operation) => {
+    if (operation.type !== "upsert") return operation;
+    return {
+      ...operation,
+      item: {
+        ...operation.item,
+        recoverPendingInput: Boolean(card.pendingInput),
+        briefing: {
+          ...operation.item.briefing,
+          freshness: {
+            ...operation.item.briefing.freshness,
+            sourceObservedAt: context.sourceObserved === false
+              ? undefined : observedAt(context),
+          },
+          provenance: {
+            ...operation.item.briefing.provenance,
+            sessionTitle: card.title,
+            projectName: card.project?.name,
+            workspacePath: card.project?.path,
+          },
+        },
+      },
+    };
+  });
 }
 
 export function projectArchivedSession(
@@ -477,6 +525,31 @@ export function projectArchivedSession(
   const revision = `modified:${Date.parse(session.modifiedAt)}`;
   const sourceKey = `session:${session.resource}:completion:${revision}`;
   const fileCount = session.changes?.files ?? 0;
+  const completionBriefing = briefing(sourceKey, "session-archived", context, {
+    cardId: session.resource,
+    sourceRevision: revision,
+    sourceModifiedAt: session.modifiedAt,
+    recommendation: fileCount > 0
+      ? `Produced ${fileCount} changed file${fileCount === 1 ? "" : "s"}.`
+      : "",
+    reason: session.activity || "The agent session was archived after completing its work.",
+    alternativeActions: [
+      { id: "inspect-outcome", label: "Open result" },
+      { id: "resolve-briefing", label: "Done", description: "Remove this item from the queue." },
+    ],
+    outcome: fileCount > 0
+      ? `The archived session reports ${fileCount} changed file${fileCount === 1 ? "" : "s"}.`
+      : "The archived session completed without detected code changes, which may represent research, analysis, or planning.",
+    caveats: ["Archived completion does not imply that external gates passed."],
+    confidence: "high",
+  });
+  completionBriefing.provenance = {
+    ...completionBriefing.provenance,
+    sessionTitle: session.title,
+    projectName: session.project?.name,
+    workspacePath: session.project?.path,
+  };
+  completionBriefing.freshness.sourceObservedAt = observedAt(context);
   return [
     ...projectRemovedSession(session.resource),
     {
@@ -492,30 +565,7 @@ export function projectArchivedSession(
         sourceKey,
         revision,
         `${session.title || session.resource} finished`,
-        briefing(sourceKey, "session-archived", context, {
-          cardId: session.resource,
-          sourceRevision: revision,
-          sourceModifiedAt: session.modifiedAt,
-          recommendation: fileCount > 0
-            ? `Produced ${fileCount} changed file${fileCount === 1 ? "" : "s"}.`
-            : "",
-          reason: session.activity || "The agent session was archived after completing its work.",
-          alternativeActions: [
-            { id: "inspect-outcome", label: "Open result" },
-            {
-              id: "resolve-briefing",
-              label: "Done",
-              description: "Remove this item from the queue.",
-            },
-          ],
-          outcome: fileCount > 0
-            ? `The archived session reports ${fileCount} changed file${fileCount === 1 ? "" : "s"}.`
-            : "The archived session completed without detected code changes, which may represent research, analysis, or planning.",
-          caveats: [
-            "Archived completion does not imply that external gates passed.",
-          ],
-          confidence: "high",
-        }),
+        completionBriefing,
         session.resource,
       ),
     },
