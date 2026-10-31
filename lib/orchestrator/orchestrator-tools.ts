@@ -15,7 +15,7 @@ export const ORCHESTRATOR_TOOLS = [
         type: "object",
         properties: {
           title: { type: "string", minLength: 1, description: "Task title" },
-          prompt: { type: "string", minLength: 1, description: "Full delegation instructions and acceptance criteria" },
+          prompt: { type: "string", minLength: 1, description: "Outcome, acceptance criteria and essential constraints; leave implementation to the worker" },
           workingDirectory: { type: "string", minLength: 1, description: "Absolute in-scope working directory" },
         },
         required: ["title", "prompt", "workingDirectory"],
@@ -103,7 +103,7 @@ export const ORCHESTRATOR_TOOLS = [
           objective: { type: "string", minLength: 1 },
           acceptanceCriteria: { type: "string", minLength: 1 },
           itemId: { type: "string", minLength: 1 },
-          instructions: { type: "string", minLength: 1 },
+          instructions: { type: "string", minLength: 1, description: "Desired outcome and essential constraints, not implementation steps" },
           workingDirectory: { type: "string", minLength: 1 },
           cardId: { type: "string", minLength: 1 },
           dependencies: { type: "array", items: { type: "string" }, maxItems: 32 },
