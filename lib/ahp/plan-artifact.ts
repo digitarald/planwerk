@@ -1,136 +1,92 @@
 import "server-only";
 
-import { homedir } from "os";
-import { join } from "path";
-import { pathToFileURL } from "url";
-
 import type { AhpClient } from "@microsoft/agent-host-protocol/client";
-import { RpcError } from "@microsoft/agent-host-protocol/client";
-import { AhpErrorCodes } from "@microsoft/agent-host-protocol";
-
+import type { ChatState, SessionState } from "@microsoft/agent-host-protocol";
 import type { Artifact } from "@/lib/types";
+import { awaitAbortable } from "../abort";
 import { readTextResource } from "./resource-read";
-import type { EvidenceCaptureBudget } from "./evidence-budget";
+import { EvidenceCaptureBudget } from "./evidence-budget";
+import { hashPlanContent, isPlanReviewRequest, readPlanReviewInput, type PlanEvidence } from "./plan-source";
+import { readChatState } from "./snapshot";
 
-const LOG_PREFIX = "[ahp:artifact]";
-const debug = (...args: unknown[]) => {
-  if (process.env.AHP_DEBUG) console.debug(LOG_PREFIX, ...args);
-};
-
-const UUID_RE = /^copilotcli:\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/i;
-
-const SESSION_ARTIFACTS = [
-  { filename: "plan.md", type: "plan", title: "Plan" },
-  { filename: "review.md", type: "review", title: "Review" },
-] as const;
-
-// A bridge owns misses across its transient clients, never across hosts/reconnects.
-const missingArtifactCache = new WeakMap<object, Map<string, string>>();
-
-
-/**
- * Extract the root session UUID from a copilotcli:/ URI.
- * Returns null for non-copilotcli providers or malformed URIs.
- */
-function extractSessionId(sessionUri: string): string | null {
-  const match = UUID_RE.exec(sessionUri);
-  return match ? match[1] : null;
+function requestTurn(chat: ChatState | undefined, requestId: string): string {
+  const turns = [...(chat?.turns ?? []), ...(chat?.activeTurn ? [chat.activeTurn] : [])];
+  const matches = turns.filter((turn) => turn.responseParts.some(
+    (part) => part.kind === "inputRequest" && part.request.id === requestId && part.response === undefined,
+  ));
+  if (matches.length !== 1) throw new Error("The original plan request turn is unavailable or ambiguous.");
+  return matches[0].id;
 }
 
-/**
- * Attempt to read plan.md from a Copilot CLI session's session-state directory.
- *
- * This is a provider-specific fallback for sessions where plan.md lives in
- * ~/.copilot/session-state/{id}/ rather than in the git working tree.
- * Returns a plan Artifact with content, or null if no plan exists.
- */
-async function fetchCopilotCliArtifact(
+export async function fetchSessionPlan(
   client: AhpClient,
   sessionUri: string,
-  modifiedAt: string,
-  definition: (typeof SESSION_ARTIFACTS)[number],
-  cacheOwner: object,
-  strict: boolean,
-  budget?: EvidenceCaptureBudget,
-): Promise<Artifact | null> {
-  const sessionId = extractSessionId(sessionUri);
-  if (!sessionId) return null;
-
-  const cacheKey = `${sessionUri}:${definition.filename}`;
-  let misses = missingArtifactCache.get(cacheOwner);
-  if (!misses) {
-    misses = new Map();
-    missingArtifactCache.set(cacheOwner, misses);
-  }
-  const cachedMissAt = misses.get(cacheKey);
-  if (cachedMissAt === modifiedAt) return null;
-
-  const artifactPath = join(
-    homedir(),
-    ".copilot",
-    "session-state",
-    sessionId,
-    definition.filename
+  state: SessionState,
+  providedBudget?: EvidenceCaptureBudget,
+  providedChat?: ChatState,
+): Promise<{ artifact: Artifact; source: PlanEvidence["source"] } | null> {
+  if (!sessionUri.startsWith("ahp-session:/")) return null;
+  const requests = (state.inputNeeded ?? []).filter(
+    (entry) => entry.kind === "chatInput" && isPlanReviewRequest(entry.request),
   );
-  const artifactUri = pathToFileURL(artifactPath).toString();
-
+  if (requests.length === 0) return null;
+  if (requests.length !== 1) throw new Error("More than one parent plan request is pending.");
+  const entry = requests[0];
+  if (entry.kind !== "chatInput") return null;
+  const review = readPlanReviewInput(entry.request);
+  if (!review?.planUri) throw new Error("The host has not published a complete plan resource.");
+  const budget = providedBudget ?? new EvidenceCaptureBudget();
   try {
-    budget?.assertCurrent();
-    const content = await readTextResource(client, artifactUri,
-      budget ? (count) => budget.consumeDecodedBytes(count) : undefined);
-
-    debug("found", definition.filename, "for", sessionUri, `(${content.length} chars)`);
-    misses.delete(cacheKey);
-
-    return {
-      id: `session-state-${definition.type}`,
-      type: definition.type,
-      title: definition.title,
-      contentRef: content,
-      createdAt: Date.now(),
-      createdBy: "agent",
-      status: "draft",
+    const chat = providedChat?.resource === entry.chat
+      ? providedChat : await awaitAbortable(() => readChatState(client, entry.chat), budget.signal);
+    const source = {
+      sessionUri, uri: review.planUri, chatUri: entry.chat,
+      turnId: requestTurn(chat, entry.request.id), requestId: entry.request.id,
     };
-  } catch (err) {
-    // NotFound (-32008) is expected — artifacts appear as the session progresses.
-    // Checked via the SDK's structured RpcError.code rather than sniffing
-    // err.message for the numeric code as a substring.
-    const isNotFound = err instanceof RpcError && err.code === AhpErrorCodes.NotFound;
-    if (isNotFound) {
-      misses.set(cacheKey, modifiedAt);
-    } else {
-      if (strict) throw err;
-      debug(
-        `resourceRead failed for ${definition.filename}:`,
-        err instanceof Error ? err.message : err
-      );
-    }
-    return null;
+    const content = await awaitAbortable(() => readTextResource(client, source.uri,
+      (count) => budget.consumeDecodedBytes(count)), budget.signal);
+    budget.assertCurrent();
+    if (!content.trim()) throw new Error("The published plan resource is empty.");
+    return {
+      source,
+      artifact: {
+        id: source.uri, type: "plan", title: "Plan", contentRef: content,
+        createdAt: Date.now(), createdBy: "agent", status: "draft",
+      },
+    };
+  } catch (error) {
+    budget.assertCurrent();
+    throw error;
+  } finally {
+    if (!providedBudget) budget.dispose();
   }
 }
 
-export async function fetchCopilotCliArtifacts(
+export async function verifyPlanEvidence(
   client: AhpClient,
-  sessionUri: string,
-  modifiedAt: string,
-  cacheOwner: object = client,
-  strict = false,
-  budget?: EvidenceCaptureBudget,
-): Promise<Artifact[]> {
-  const artifacts = await Promise.all(
-    SESSION_ARTIFACTS.map((definition) =>
-      fetchCopilotCliArtifact(client, sessionUri, modifiedAt, definition, cacheOwner, strict, budget)
-    )
-  );
-  return artifacts.filter((artifact): artifact is Artifact => artifact !== null);
-}
-
-/** Backward-compatible single-artifact helper for existing callers/tests. */
-export async function fetchCopilotCliPlan(
-  client: AhpClient,
-  sessionUri: string,
-  modifiedAt: string,
-): Promise<Artifact | null> {
-  const artifacts = await fetchCopilotCliArtifacts(client, sessionUri, modifiedAt);
-  return artifacts.find((artifact) => artifact.type === "plan") ?? null;
+  state: SessionState,
+  evidence: PlanEvidence,
+  budget: EvidenceCaptureBudget,
+): Promise<void> {
+  const { source } = evidence;
+  if (source.requestId) {
+    const entry = state.inputNeeded?.find(
+      (input) => input.kind === "chatInput" && input.request.id === source.requestId,
+    );
+    if (!entry || entry.kind !== "chatInput" || entry.chat !== source.chatUri
+      || readPlanReviewInput(entry.request)?.planUri !== source.uri) {
+      throw new Error("The original plan request or resource changed.");
+    }
+    const chat = await awaitAbortable(() => readChatState(client, entry.chat), budget.signal);
+    if (requestTurn(chat, source.requestId) !== source.turnId) {
+      throw new Error("The original plan request turn changed.");
+    }
+  }
+  const content = await awaitAbortable(() => readTextResource(client, source.uri,
+    (count) => budget.consumeDecodedBytes(count)), budget.signal);
+  budget.assertCurrent();
+  if (!content.trim() || content !== evidence.content
+    || hashPlanContent(content) !== evidence.changesetRef) {
+    throw new Error("The parent plan changed after its evidence was captured.");
+  }
 }

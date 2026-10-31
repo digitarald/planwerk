@@ -2,12 +2,13 @@ import type Database from "better-sqlite3";
 
 import { normalizeChangesetRef } from "../types.ts";
 import { ABANDONED_REVIEW_START_SUMMARY } from "./work-lease-schema.ts";
+import { resolveAuthoritativeGateRevision } from "../orchestrator/gate-revision.ts";
 
 const ACTIVE_STATUS_SQL =
   "'pending', 'dispatching', 'injected', 'extracting', 'ambiguous'";
 
 export interface ReviewStartClaim {
-  state: "claimed" | "active" | "ambiguous" | "maxed";
+  state: "claimed" | "active" | "resolved" | "ambiguous" | "maxed";
   reviewRunId: number;
   iteration: number;
   status: string;
@@ -97,7 +98,7 @@ export function claimReviewStart(
     }
 
     const latest = db.prepare(`
-      SELECT id, iteration, status, verdict_summary
+      SELECT id, iteration, status, verdict_summary, changeset_ref
       FROM review_runs
       WHERE card_id = ? AND skill_id = ? AND phase_transition = ?
       ORDER BY id DESC
@@ -106,7 +107,13 @@ export function claimReviewStart(
       input.cardId,
       input.skillId,
       input.phaseTransition,
-    ) as (StartRow & { verdict_summary: string | null }) | undefined;
+    ) as (StartRow & { verdict_summary: string | null; changeset_ref: string | null }) | undefined;
+
+    if (latest && (latest.status === "passed" || latest.status === "escalated")
+      && normalizeChangesetRef(latest.changeset_ref ?? undefined) === normalizeChangesetRef(input.changesetRef)
+      && normalizeChangesetRef(input.changesetRef) !== "") {
+      return { state: "resolved", reviewRunId: latest.id, iteration: latest.iteration, status: latest.status };
+    }
 
     if (latest?.status === "failed") {
       const iteration = latest.verdict_summary === ABANDONED_REVIEW_START_SUMMARY
@@ -147,7 +154,9 @@ export function claimReviewStart(
             start_owner_id = ?,
             start_lease_expires_at_ms = ?,
             dispatch_host_url = NULL,
-            dispatch_chat_disposable = NULL
+            dispatch_chat_disposable = NULL,
+            plan_source_json = NULL,
+            source_digest = NULL
         WHERE id = ? AND status = 'failed'
       `).run(
         iteration,
@@ -306,6 +315,8 @@ export interface JudgmentClaimRow {
   chat_cleanup_error: string | null;
   chat_cleanup_attempts: number;
   chat_cleanup_last_attempt_at: string | null;
+  plan_source_json: string | null;
+  source_digest: string | null;
 }
 
 export function claimReviewJudgment(
@@ -400,6 +411,7 @@ export interface OwnedReviewOutcome {
   gateStatus: "passed" | "failed";
   gateOutput: string;
   verdictExtracted?: boolean;
+  sourceGuard?: { hostUrl: string; changesetRef: string; sourceRevision: string };
 }
 
 export function commitOwnedReviewOutcome(
@@ -410,6 +422,14 @@ export function commitOwnedReviewOutcome(
   now = Date.now(),
 ): boolean {
   const commit = db.transaction(() => {
+    if (outcome.sourceGuard) {
+      const run = db.prepare("SELECT card_id FROM review_runs WHERE id = ?")
+        .get(reviewRunId) as { card_id: string } | undefined;
+      if (!run) return false;
+      const current = resolveAuthoritativeGateRevision(db, run.card_id, "plan", outcome.sourceGuard.hostUrl);
+      if (!current.ok || current.changesetRef !== outcome.sourceGuard.changesetRef
+        || current.sourceRevision !== outcome.sourceGuard.sourceRevision) return false;
+    }
     const row = db.prepare(`
       SELECT gate_run_id
       FROM review_runs

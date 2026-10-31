@@ -13,8 +13,10 @@ import { awaitAbortable, OperationAbortedError } from "../abort.ts";
 import { OperationAdmission } from "../orchestrator/operation-admission.ts";
 import { withOperationContext } from "../orchestrator/operation-context.ts";
 import { coordinatorModeAllows, type CoordinatorMode } from "../orchestrator/coordinator-mode.ts";
+import { hashPlanContent } from "./plan-source.ts";
+import { EvidenceCaptureBudget } from "./evidence-budget.ts";
 
-const uri = "copilotcli:/lifecycle";
+const uri = "ahp-session:/12345678-1234-1234-1234-123456789abc";
 const chatUri = "ahp-chat:/lifecycle";
 const changesetUri = "ahp-changeset:/lifecycle";
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -103,7 +105,9 @@ function harness() {
       const stream = eventStream();
       streams.set(resource, stream);
       const state = resource === uri ? session
-        : resource === chatUri ? chat
+        : resource.startsWith("ahp-chat:") ? {
+          ...chat, resource, activeTurn: resource === chatUri ? chat.activeTurn : undefined,
+        }
           : resource === changesetUri ? changeset
             : { agents: [{ provider: "copilotcli", capabilities: { multipleChats: {} } }] };
       await h.onRead?.(resource);
@@ -142,7 +146,7 @@ function harness() {
         h.push(uri, { type: "session/inputNeededRemoved", id: "input:1" } as StateAction);
       } else if (action.type === "chat/toolCallConfirmed") {
         h.push(uri, { type: "session/inputNeededRemoved", id: "tool:1" } as StateAction);
-      } else if (channel === uri || channel === chatUri || channel === changesetUri) {
+      } else if (channel === uri || channel.startsWith("ahp-chat:") || channel === changesetUri) {
         h.push(channel, action);
       }
     },
@@ -187,7 +191,8 @@ const hooks = registerHooks({
 after(() => { hooks.deregister(); Reflect.deleteProperty(globalThis, key); });
 
 const { withSessionState } = await import("./snapshot.ts");
-const { answerInput, answerInputWithClient, injectMessage, injectMessageWithClient, setSessionArchived, startPeerChatReview } = await import("./session-messenger.ts");
+const { answerInput, answerInputWithClient, injectMessage, injectMessageWithClient, setSessionArchived, startPeerChatReview, verifyPlanReviewSource, fetchChatTurnById } = await import("./session-messenger.ts");
+const { readReviewSourceDigest } = await import("./changeset-enricher.ts");
 const { fetchSessionDetails, resumeErroredTurn } = await import("./session-details.ts");
 const { MessageDispatchAmbiguousError } = await import("./dispatch-confirmation.ts");
 const { POST: inputRoute } = await import("../../app/api/ahp/sessions/input/route.ts");
@@ -382,8 +387,74 @@ test("peer review retains its session through capability read, peer creation and
   const started = await startPeerChatReview("ws://fake", uri, "request:1", "/review");
   assert.equal(started.success, true);
   assert.deepEqual(active.requests, ["createChat"]);
-  assert.deepEqual(active.reads, [uri, "ahp-root://"]);
+  assert.deepEqual(active.reads, [uri, "ahp-root://", started.chatUri]);
   assert.equal(active.releases.at(-1), uri);
+});
+
+test("parent plan and source bytes are verified, with identities reserved before peer creation", async () => {
+  active = harness();
+  const content = "# Parent plan\nDo the work.";
+  const planUri = "file:///host/sdk-writer/plan.md";
+  const request = {
+    id: "plan-request", questions: [],
+    planReview: { answerQuestionId: "choice", actions: [{ id: "interactive" }], planUri },
+  };
+  active.session.inputNeeded = [{ kind: "chatInput", id: "opaque", chat: chatUri, request }] as unknown as SessionState["inputNeeded"];
+  active.chat.activeTurn = { id: "writer-turn", responseParts: [{ kind: "inputRequest", request }] } as unknown as ChatState["activeTurn"];
+  let code = "const before = 1;";
+  const originalRequest = active.client.request;
+  active.client.request = (async (method: string, params: { uri?: string }) => {
+    if (method === "resourceRead") {
+      return { encoding: "utf-8", data: params.uri === planUri ? content : code };
+    }
+    return originalRequest(method as never, params as never);
+  }) as AhpClient["request"];
+  let reserved: { sourceDigest?: string; chatUri: string; turnId: string } | undefined;
+  active.onRequest = async (method) => {
+    if (method === "createChat") assert(reserved?.sourceDigest, "reservation must precede createChat");
+  };
+  const evidence = {
+    content, changesetRef: hashPlanContent(content),
+    source: { sessionUri: uri, uri: planUri, chatUri, turnId: "writer-turn", requestId: request.id },
+  };
+  const started = await startPeerChatReview("ws://fake", uri, request.id, "/rubber-duck supplied plan", {
+    plan: evidence,
+    beforeDispatch(identity) { reserved = identity; },
+  });
+  assert.equal(started.success, true);
+  assert.equal(started.chatUri, reserved?.chatUri);
+  assert.equal(started.turnId, reserved?.turnId);
+  assert(reserved?.sourceDigest);
+  await verifyPlanReviewSource("ws://fake", uri, evidence, reserved.sourceDigest);
+  // No edit-tool event: a shell can change bytes while all diff counts stay equal.
+  code = "const after_ = 2;";
+  await assert.rejects(verifyPlanReviewSource("ws://fake", uri, evidence, reserved.sourceDigest),
+    /Source bytes changed/);
+});
+
+test("missing report-only source evidence prevents peer creation", async () => {
+  active = harness();
+  active.session.changesets = [];
+  const budget = new EvidenceCaptureBudget();
+  try {
+    await withSessionState(active.client, uri, async (state) => {
+      await assert.rejects(readReviewSourceDigest(active.client, uri, state!, budget), /changeset is required/);
+    });
+
+    assert.deepEqual(active.requests, []);
+  } finally { budget.dispose(); }
+});
+
+test("a completed review turn is not ready while its background work can still mutate source", async () => {
+  for (const busy of [true, false]) {
+    active = harness();
+    active.chat.turns = [{ id: "review-turn", state: "complete", responseParts: [] }] as unknown as ChatState["turns"];
+    active.chat.backgroundWork = busy ? [{ id: "shell", label: "Running command" }] as unknown as ChatState["backgroundWork"] : [];
+    await withSessionState(active.client, uri, async () => {
+      const turn = await fetchChatTurnById("ws://fake", chatUri, "review-turn");
+      assert.equal(Boolean(turn), !busy);
+    });
+  }
 });
 
 for (const change of ["mode", "source", "scope"] as const) {

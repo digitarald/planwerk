@@ -17,7 +17,7 @@ import {
   type EvidenceCaptureFailure,
   type EvidenceCaptureLimits,
 } from "./evidence-budget";
-import { fetchCopilotCliArtifacts } from "./plan-artifact";
+import { fetchSessionPlan } from "./plan-artifact";
 import { projectSessionDetails } from "./session-details-core";
 import { extractModelFromConfig } from "./session-config";
 import { mapSdkSessionSummary } from "./session-summary";
@@ -126,13 +126,13 @@ export async function refreshSessionEvidence(
           ) => {
             const collect = async () => {
               assertStreams();
-              const [changeset, artifacts] = await Promise.all([
+              const [changeset, plan] = await Promise.all([
                 changesetCapture(),
-                // Do not reuse cached misses for an intentional capture.
-                fetchCopilotCliArtifacts(client, sessionUri, before.modifiedAt, {}, true, budget),
+                fetchSessionPlan(client, sessionUri, state, budget, chatState),
               ]);
               assertStreams();
-              const result = mergeFreshEnrichment(changeset, artifacts, projectSessionDetails(state, chatState));
+              const result = mergeFreshEnrichment(changeset, plan ? [plan.artifact] : [],
+                projectSessionDetails(state, chatState), plan?.source);
               if (!result) throw new EvidenceChangedError();
               return result;
             };
@@ -171,7 +171,7 @@ export async function refreshSessionEvidence(
             };
             return read(async () => {
               assertChangeset();
-              const result = await enrichChangesetState(client, selected, ready, true, signal, budget);
+              const result = await enrichChangesetState(client, selected, ready, true, signal, budget, sessionUri);
               assertChangeset();
               return result;
             }, assertChangeset);

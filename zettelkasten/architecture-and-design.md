@@ -102,6 +102,34 @@ Gate results are `GateRun` records in SQLite — not derived from AHP tool-call 
 
 Tool-call history is a *hint* to avoid redundant runs, not proof of gate passage.
 
+#### Independent plan-review evidence
+
+Current `ahp-session:/` identities belong to the host, not to an SDK
+conversation directory. Planwerk reads a pending request's published
+`planReview.planUri` through the host and verifies the original chat/request
+turn. It never guesses a backing SDK UUID or retains legacy discovery.
+An unambiguous in-tree plan can also come from a ready session changeset.
+
+The independent peer receives the complete plan text and provenance explicitly;
+plain `createChat` does not inherit the writer's conversation. Plan reviews
+always use `plan:<sha256-of-exact-text>`, independently of the persisted column.
+Code gates retain their verified `source:` revisions. Missing, denied, changed
+or incomplete evidence cannot approve a plan or fall through to generic
+auto-answering.
+
+Plan reviews are report-only in every coordinator mode. Source-byte comparison
+before verdict acceptance supplements edit-tool detection; unknown or changed
+session resources cannot pass. This verifies host-reported changeset resources,
+not an unrestricted filesystem or a read-only sandbox. The existing judgment
+lease and atomic review/gate commit also check current cached plan authority.
+
+Peer chat/turn identities are reserved before creation. Uncertain dispatch
+remains quarantined even after disposal; duplicate starts reuse existing work.
+Automatic feedback/approval reserves a durable original-request receipt before
+dispatch and confirms consumption from host input removal. It cannot replay
+after an uncertain outcome. Human input remains explicit, and only the gate
+engine changes phase forward.
+
 ### 5. Skill-Based Reviews via Sub-Agents
 
 Reviews are injected as skills that agents can invoke. Dual-invocation model:

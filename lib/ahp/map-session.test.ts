@@ -31,7 +31,7 @@ const hooks = registerHooks({
   },
 });
 after(() => hooks.deregister());
-const { mapSessionToCard } = await import("./map-session.ts");
+const { mapSessionToCard, mapInputRequests } = await import("./map-session.ts");
 const binding = {
   sourceRevision: "catalog-fence", planVersion: "2026-10-17T00:00:00Z",
   contentRevision: "manifest", manifestRevision: "manifest", evidenceDigest: "captured-a",
@@ -52,6 +52,19 @@ function fixtures() {
   };
   return { summary, enrichment };
 }
+
+test("input projection preserves host plan metadata and marks unsupported plan requests", () => {
+  const request = {
+    id: "request", questions: [],
+    _meta: { purpose: "planReview" },
+    planReview: { answerQuestionId: "choice", actions: [{ id: "interactive" }], planUri: "file:///host/plan.md" },
+  };
+  assert.deepEqual(mapInputRequests([request])?.planReview,
+    { questionId: "choice", actionIds: ["interactive"], planUri: "file:///host/plan.md" });
+  const unsupported = { ...request, planReview: undefined };
+  assert.equal(mapInputRequests([unsupported])?.planReview, null);
+  assert.equal(mapInputRequests([{ id: "normal", questions: [] }])?.planReview, undefined);
+});
 
 test("cards and gates share the captured evidence identity, not the observation fence", () => {
   const { summary, enrichment } = fixtures();

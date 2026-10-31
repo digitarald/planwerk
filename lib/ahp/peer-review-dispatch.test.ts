@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { AhpClient } from "@microsoft/agent-host-protocol/client";
+import { MessageDispatchAmbiguousError } from "./dispatch-confirmation.ts";
 
 import {
   createPeerChatWithCleanupOnFailure,
@@ -120,9 +121,9 @@ test("setup failure and disposal failure preserves cleanup identity", async () =
   );
 });
 
-test("confirmed disposal makes a post-dispatch ambiguity retryable", async () => {
+test("confirmed disposal does not make a post-dispatch ambiguity replayable", async () => {
   const counts = { dispatch: 0, ping: 0, dispose: 0 };
-  const result = await dispatchPeerChatReviewWithClient(
+  await assert.rejects(dispatchPeerChatReviewWithClient(
     clientFor({
       counts,
       pingError: new Error("ping transport failed"),
@@ -130,11 +131,8 @@ test("confirmed disposal makes a post-dispatch ambiguity retryable", async () =>
     "ahp-chat://review/2",
     "turn-2",
     "review",
-  );
-
-  assert.equal(result.success, false);
-  assert.equal(result.failureKind, "ambiguous-disposed");
-  assert.match(result.reason ?? "", /disposal was confirmed/);
+  ), (error) => error instanceof MessageDispatchAmbiguousError
+    && error.chatUri === "ahp-chat://review/2" && error.turnId === "turn-2");
   assert.deepEqual(counts, { dispatch: 1, ping: 1, dispose: 1 });
 });
 
@@ -154,6 +152,16 @@ test("pre-dispatch failure is distinct and never pings", async () => {
   assert.equal(result.failureKind, "pre-dispatch");
   assert.match(result.reason ?? "", /dispatch rejected/);
   assert.deepEqual(counts, { dispatch: 1, ping: 0, dispose: 1 });
+});
+
+test("an ended turn-confirmation stream after dispatch remains ambiguous", async () => {
+  const counts = { dispatch: 0, ping: 0, dispose: 0 };
+  await assert.rejects(dispatchPeerChatReviewWithClient(clientFor({ counts }),
+    "ahp-chat://review/echo", "turn-echo", "review", undefined,
+    async () => { throw new Error("State stream ended"); }),
+    (error) => error instanceof MessageDispatchAmbiguousError
+      && error.chatUri === "ahp-chat://review/echo" && error.turnId === "turn-echo");
+  assert.deepEqual(counts, { dispatch: 1, ping: 1, dispose: 1 });
 });
 
 test("lost create acknowledgement disposes the already-known chat identity", async () => {
