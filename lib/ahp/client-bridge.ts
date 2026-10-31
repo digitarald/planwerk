@@ -2,7 +2,6 @@ import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import {
   sessionReducer,
   type SessionAction,
-  type UsageInfo,
   type ChatState,
 } from "@microsoft/agent-host-protocol";
 
@@ -13,7 +12,7 @@ import { enrichFromChangeset, type ChangesetEnrichment } from "./changeset-enric
 import { fetchCopilotCliArtifacts } from "./plan-artifact";
 import { extractModelFromConfig } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
-import { asChatState, asSessionState, withSessionState } from "./snapshot";
+import { asSessionState, withSessionState } from "./snapshot";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT, type CachedSession } from "@/lib/db/session-cache";
 import { getDb } from "@/lib/db/schema";
 import { claimSessionOwnership, isSessionOwnedByHost } from "@/lib/db/session-ownership";
@@ -34,6 +33,7 @@ import {
 import { withAHPClient } from "./client-operation";
 import type { PendingInput, WorkerActivity } from "@/lib/types";
 import { currentToolFromChat, observeChatFacts, shouldObserveChat, visibleBackgroundWork } from "./chat-facts";
+import { projectChatUsage } from "./chat-usage";
 import { mapWorkerChats, retainInactiveWorkers, type WorkerChatSummary } from "./worker-activity";
 import { getWorkerActivityHistory, recordWorkerActivity } from "@/lib/orchestrator/worker-activity-store";
 import { readSessionDetailsForState } from "./session-details";
@@ -536,63 +536,6 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
     }
   }
 
-  function toWorkerUsage(usage: UsageInfo | undefined): NonNullable<WorkerActivity["usage"]> | undefined {
-    if (
-      !usage
-      || (
-        usage.inputTokens === undefined
-        && usage.outputTokens === undefined
-        && usage.cacheReadTokens === undefined
-      )
-    ) {
-      return undefined;
-    }
-    return {
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      cacheReadTokens: usage.cacheReadTokens,
-    };
-  }
-
-  function sumWorkerUsage(
-    usages: readonly (WorkerActivity["usage"])[],
-  ): NonNullable<WorkerActivity["usage"]> | undefined {
-    const present = usages.filter(
-      (usage): usage is NonNullable<WorkerActivity["usage"]> => usage !== undefined,
-    );
-    if (present.length === 0) return undefined;
-
-    const sumField = (
-      field: keyof NonNullable<WorkerActivity["usage"]>,
-    ): number | undefined => {
-      const values = present
-        .map((usage) => usage[field])
-        .filter((value): value is number => value !== undefined);
-      return values.length > 0
-        ? values.reduce((total, value) => total + value, 0)
-        : undefined;
-    };
-
-    return {
-      inputTokens: sumField("inputTokens"),
-      outputTokens: sumField("outputTokens"),
-      cacheReadTokens: sumField("cacheReadTokens"),
-    };
-  }
-
-  function completedUsageFromChat(
-    chat: ReturnType<typeof asChatState>,
-  ): NonNullable<WorkerActivity["usage"]> | undefined {
-    return sumWorkerUsage(chat?.turns.map((turn) => toWorkerUsage(turn.usage)) ?? []);
-  }
-
-  function usageFromChat(chat: ReturnType<typeof asChatState>): NonNullable<WorkerActivity["usage"]> | undefined {
-    return sumWorkerUsage([
-      completedUsageFromChat(chat),
-      toWorkerUsage(chat?.activeTurn?.usage),
-    ]);
-  }
-
   function publishChatFacts(sessionUri: string) {
     const session = sessions.get(sessionUri);
     if (!session || disposed) return;
@@ -631,9 +574,10 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
       const session = sessions.get(sessionUri);
       if (!session) return;
       liveChatStates.set(workerId, { sessionUri, state });
-      const usage = usageFromChat(state);
+      const usage = projectChatUsage(state);
       if (usage) workerUsageByChat.set(workerId, usage);
-      session.chatDetails = { ...session.chatDetails, [workerId]: details };
+      else workerUsageByChat.delete(workerId);
+      session.chatDetails = { ...session.chatDetails, [workerId]: { ...details, usage } };
       const chats = workerChatsBySession.get(sessionUri) ?? [];
       const next = chats.map((chat) => chat.resource === workerId ? {
         ...chat, status: state.status, activity: state.activity,

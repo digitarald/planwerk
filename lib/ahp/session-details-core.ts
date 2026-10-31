@@ -10,6 +10,7 @@ interface ErrorInfoLike {
 interface SessionStateLike {
   defaultChat?: unknown;
   creationError?: ErrorInfoLike;
+  chats?: readonly { resource?: string; interactivity?: string }[];
 }
 
 interface ResponsePartLike {
@@ -29,6 +30,7 @@ interface TurnLike {
 interface ChatStateLike {
   resource?: unknown;
   turns?: readonly TurnLike[] | null;
+  interactivity?: string;
 }
 
 const MAX_ERROR_MESSAGE_LENGTH = 4_000;
@@ -56,6 +58,8 @@ export function projectSessionDetails(
   sessionState: SessionStateLike,
   chatState?: ChatStateLike,
 ): SessionDetails {
+  if (chatState?.interactivity === "hidden"
+    || sessionState.chats?.some((chat) => chat.resource === sessionState.defaultChat && chat.interactivity === "hidden")) return {};
   const turns = chatState?.turns ?? [];
   const latestTurn = turns.at(-1);
   const finalPart = latestTurn?.responseParts?.at(-1);

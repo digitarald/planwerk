@@ -22,7 +22,7 @@ import {
 
 type ManagedSession = Pick<
   CopilotSession,
-  "sessionId" | "abort" | "disconnect" | "on" | "sendAndWait"
+  "sessionId" | "abort" | "disconnect" | "on" | "send" | "sendAndWait"
 >;
 
 export interface CtoSessionClient {
@@ -77,7 +77,7 @@ const defaultRenewalScheduler: CtoLeaseRenewalScheduler = {
 export interface CtoSessionHandle {
   session: ManagedSession;
   resumed: boolean;
-  release(options?: { abort?: boolean }): Promise<CopilotCleanupReport>;
+  release(options?: { abort?: boolean; retainQuarantine?: boolean }): Promise<CopilotCleanupReport>;
 }
 
 export interface CtoSessionOpenOptions {
@@ -448,7 +448,7 @@ export class CtoSessionManager {
       return {
         session,
         resumed,
-        release: ({ abort = false } = {}) => {
+        release: ({ abort = false, retainQuarantine = false } = {}) => {
           if (releasePromise) return releasePromise;
           releasePromise = (async () => {
             const report: CopilotCleanupReport = { failures: [] };
@@ -482,7 +482,7 @@ export class CtoSessionManager {
               );
               report.failures.push(...disconnected.failures);
 
-              if (report.failures.length === 0) {
+              if (report.failures.length === 0 && !retainQuarantine) {
                 try {
                   if (!this.store.restoreQuarantinedSession(
                     session.sessionId,

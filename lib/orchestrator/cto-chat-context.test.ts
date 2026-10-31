@@ -69,6 +69,7 @@ test("create and resume receive refreshed context without additional human sends
     abort: async () => {},
     disconnect: async () => {},
     on: () => () => {},
+    send: async () => "message",
     sendAndWait: async (message: MessageOptions | string) => {
       assert.notEqual(typeof message, "string");
       messages.push(message as MessageOptions);
