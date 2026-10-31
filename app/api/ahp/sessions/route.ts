@@ -1,24 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AHPSessionSummary, shouldShowSession } from "@/lib/ahp/types";
+import { type AHPSessionSummary, shouldShowSession } from "@/lib/ahp/types";
 import { listAllSessions } from "@/lib/ahp/catalog";
 import { connectInitializedAhpClient } from "@/lib/ahp/endpoint";
-import { withAHPClient } from "@/lib/ahp/client-operation";
 import { mapSdkSessionSummary } from "@/lib/ahp/session-summary";
-import { injectMessageWithClient } from "@/lib/ahp/session-messenger";
+import { runTaskCreation, type TaskCreationEvent } from "@/lib/ahp/task-creation";
+import { parseCreationRequest } from "@/lib/ahp/creation-request";
+import { CreationConfigError } from "@/lib/ahp/session-config";
 import { ahpErrorResponse } from "@/lib/ahp/api-error";
 import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
 
-/** Default agent provider for new sessions on this host. */
-const DEFAULT_PROVIDER = "copilotcli";
-
-/**
- * Session config applied to every new task:
- * - `mode: "plan"` — the agent plans first and asks clarifying questions
- *   before writing code (surfaced on the board as input requests).
- * - `autoApprove: "autoApprove"` — bypass per-tool approval prompts so the
- *   session can proceed autonomously once the plan is accepted.
- */
-const NEW_SESSION_CONFIG = { mode: "plan", autoApprove: "autoApprove" } as const;
 
 export async function GET(request: NextRequest) {
   const hostUrl = request.nextUrl.searchParams.get("host");
@@ -65,56 +55,33 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: requestError }, { status: 403 });
   }
 
-  const { hostUrl, title, prompt, provider, workingDirectory } =
-    (await request.json()) as {
-      hostUrl?: string;
-      title?: string;
-      prompt?: string;
-      provider?: string;
-      workingDirectory?: string;
-    };
-
-  if (!hostUrl) {
-    return NextResponse.json({ error: "hostUrl required" }, { status: 400 });
-  }
-
-  // The task description doubles as the title and the first message. Accept
-  // either field; the agent host derives the real session title from the
-  // first message, so `title` is just a fallback label for the response.
-  const task = (prompt ?? title ?? "").trim();
-  if (!task) {
-    return NextResponse.json({ error: "task description required" }, { status: 400 });
-  }
-
-  const agentProvider = provider || DEFAULT_PROVIDER;
-
   try {
-    const sessionId = crypto.randomUUID();
-    // The session URI scheme must match the provider so the host routes it to
-    // the right agent (e.g. `copilotcli:/<uuid>`).
-    const channel = `${agentProvider}:/${sessionId}`;
-
-    const delivered = await withAHPClient(hostUrl, async (client) => {
-      // Model selection is provider-defined session config (not a
-      // top-level createSession field); the provider applies its default here and
-      // the selection is surfaced from SessionState.config afterwards.
-      await client.request("createSession", {
-        channel,
-        provider: agentProvider,
-        workingDirectories: workingDirectory ? [workingDirectory] : undefined,
-        config: NEW_SESSION_CONFIG,
-      });
-      return injectMessageWithClient(client, channel, task);
-    });
-    if (!delivered.success) {
-      return NextResponse.json(
-        { error: "Session created but failed to start the task" },
-        { status: 502 }
-      );
+    const input = parseCreationRequest(await request.json(), true);
+    const streaming = request.headers.get("accept")?.includes("application/x-ndjson");
+    if (!streaming) {
+      const result = await runTaskCreation(input, () => {});
+      return NextResponse.json(result, { status: result.outcome === "invalid" ? 409 : ["started", "queued"].includes(result.outcome) ? 200 : 502 });
     }
-
-    return NextResponse.json({ resource: channel, title: title ?? task });
+    const encoder = new TextEncoder();
+    let disconnected = false;
+    const stream = new ReadableStream({
+      start(controller) {
+        const emit = (event: TaskCreationEvent) => {
+          if (!disconnected) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+        };
+        // Disconnecting the browser must not abandon a possibly-created session or retry it.
+        void Promise.resolve().then(() => runTaskCreation(input, emit)).then(
+          (result) => emit(result),
+          (err) => emit({ type: "result", outcome: "invalid", error: err instanceof Error ? err.message : "Task setup failed" }),
+        ).finally(() => { if (!disconnected) controller.close(); });
+      },
+      cancel() { disconnected = true; },
+    });
+    return new Response(stream, { headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store", "X-Accel-Buffering": "no" } });
   } catch (err) {
+    if (err instanceof CreationConfigError || err instanceof SyntaxError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
     return ahpErrorResponse(err, "Failed to create session");
   }
 }

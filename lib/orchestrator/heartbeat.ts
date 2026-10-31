@@ -43,7 +43,8 @@ import { getEffectiveCoordinatorMode } from "./coordinator-mode-store";
 import { isCardAutomationEligible } from "./automation-eligibility";
 import { assessRisk } from "./risk-assessor";
 import { reassessAndPersistRisk } from "./risk-reassessment";
-import { OperationAdmission } from "./operation-admission";
+import { getCoordinatorOperationAdmission } from "./operation-admission";
+import { reconcileCoordinatorGoals } from "./coordinator-goal-reconciler";
 import {
   assertOperationCurrent,
   getOperationSignal,
@@ -126,7 +127,7 @@ interface HeartbeatGeneration {
 }
 
 const heartbeatScheduler = new SerializedGenerationScheduler();
-const operationAdmission = new OperationAdmission();
+const operationAdmission = getCoordinatorOperationAdmission();
 let reviewCleanupInFlight: Promise<unknown> | null = null;
 const heartbeatGenerationStorage =
   new AsyncLocalStorage<HeartbeatGeneration>();
@@ -321,7 +322,11 @@ async function runSchedulerTick(
     if (!generation.hostControllers.has(hostUrl)) {
       generation.hostControllers.set(hostUrl, new AbortController());
     }
+    const hostSignal = generation.hostControllers.get(hostUrl)!.signal;
     results.push(await runTick(generation, hostUrl, cards, recovery ? null : dirty.get(hostUrl)));
+    if (!signal.aborted && !hostSignal.aborted) {
+      await reconcileCoordinatorGoals(hostUrl, AbortSignal.any([signal, hostSignal]));
+    }
   }
   return results;
 }
@@ -931,10 +936,8 @@ async function processCard(
     const nudges = state.nudgeCount.get(card.id) ?? 0;
     if (nudges < 3) {
       const msg = buildNudgeMessage(card, nudges);
-      // Note: in production this would use the session URI from the card
-      // For now, emit the action for the feed
-      emit(hostUrl, { type: "nudge-sent", cardId: card.id, message: msg });
-      actions.push({ type: "nudge-sent", cardId: card.id, message: msg });
+      emit(hostUrl, { type: "escalated", cardId: card.id, reason: `Session is idle beyond the stale threshold. Suggested follow-up: ${msg}` });
+      actions.push({ type: "escalated", cardId: card.id, reason: "Session needs a follow-up; no message was sent." });
       state.nudgeCount.set(card.id, nudges + 1);
     }
   }

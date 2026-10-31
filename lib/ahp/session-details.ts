@@ -18,7 +18,8 @@ export async function readSessionDetailsForState(
   sessionState: SessionState,
   signal?: AbortSignal,
 ): Promise<SessionDetails> {
-  const chatState = sessionState.defaultChat
+  const visibleDefault = sessionState.chats.find((chat) => chat.resource === sessionState.defaultChat);
+  const chatState = sessionState.defaultChat && visibleDefault && visibleDefault.interactivity !== "hidden"
     ? await readChatState(client, sessionState.defaultChat, signal)
     : undefined;
   return projectSessionDetails(sessionState, chatState);

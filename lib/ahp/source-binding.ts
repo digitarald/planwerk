@@ -178,6 +178,7 @@ export function mergeFreshEnrichment(
     planContentHash: planContent ? hashPlanContent(planContent) : undefined,
     planSource: sessionPlanSource ?? changesetResult?.planSource,
     lastAgentMessage: sessionDetails?.lastAgentMessage,
+    outcomeEvidence: sessionDetails?.outcomeEvidence,
     runtimeError: sessionDetails?.runtimeError,
   };
 }

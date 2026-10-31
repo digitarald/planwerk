@@ -41,6 +41,9 @@ registerHooks({
       "./cto-override-authorization":
         "export function authorizeAndRunOverride(){return {authorized:false,reason:'not implemented'}};" +
         "export function getAuthoritativeApprovalBinding(){return null}",
+      "../inbox/service": "export function projectCoordinatorGoalToInbox(){}",
+      "../ahp/create-session": "export async function createAndStartSession(){throw new Error('test has no live host')}",
+      "./auto-answerer": "export async function submitAuthorizedAnswer(){return {answered:false,reason:'Human input required'}}",
     };
     if (virtualModules[specifier]) {
       return {
@@ -116,6 +119,35 @@ const [
 
 const db = getDb();
 const hostUrl = "vscode-local://desktop";
+const { registerCoordinatorHostReader } = await import("./coordinator-hosts.ts");
+const { setCoordinatorDefaultMode, setCoordinatorSessionOverride } = await import("./coordinator-mode-store.ts");
+setCoordinatorDefaultMode("coordinate");
+
+test("a failed goal notification reports that the command was saved and retry reuses its receipt", async () => {
+  const { manageCoordinatorGoal, listCoordinatorGoals } = await import("./coordinator-goal-service.ts");
+  const { coordinatorGoalEvents } = await import("./coordinator-goal-events.ts");
+  registerCoordinatorHostReader(() => ({ generation: 1, cards: [card("goal-notification", "build")], scopes: [new Set<string>()] }));
+  const scope = { hostUrl, workspaceScope: [] };
+  const args = { action: "create", objective: "Verify integration", acceptanceCriteria: "Tests pass" };
+  const unsubscribe = coordinatorGoalEvents.subscribe(() => { throw new Error("Subscriber failed"); });
+  try {
+    assert.throws(() => manageCoordinatorGoal(scope, args, "notification-command"), /Goal saved.*Reload goals/);
+  } finally { unsubscribe(); }
+  const saved = listCoordinatorGoals(scope);
+  assert.equal(saved.length, 1);
+  const retried = manageCoordinatorGoal(scope, args, "notification-command");
+  assert.equal(retried.id, saved[0].id);
+  assert.equal(retried.revision, saved[0].revision);
+  assert.equal(listCoordinatorGoals(scope).length, 1);
+  for (const authority of [{ signal: AbortSignal.abort() }, { isCurrent: () => false }]) {
+    const stopped = await executeToolCall("manage_goal", args, {
+      ...scope, cards: [], idempotencyKey: "cancelled-goal", sdkSessionId: "test", toolCallId: "cancelled-goal",
+      ...authority,
+    });
+    assert.equal(stopped.success, false);
+    assert.equal(listCoordinatorGoals(scope).length, 1);
+  }
+});
 
 test("nested folders pick up custom YAML gates, scripts, and review policy", async () => {
   const project = path.join(scratchRoot, "custom-project");
@@ -180,6 +212,7 @@ function card(id: string, phase: Phase): KanbanCard {
     planSteps: { total: 1, done: 0 },
     modifiedAt: Date.now(),
     workingDirectory: repositoryRoot,
+    project: { path: repositoryRoot, name: "test" },
   };
 }
 
@@ -235,15 +268,22 @@ function nativeTools(
   cards: KanbanCard[],
   services: NonNullable<Parameters<typeof executeToolCall>[2]["services"]>,
 ) {
+  registerCoordinatorHostReader((host) => host === hostUrl ? ({ generation: 1, cards, scopes: [new Set<string>()] }) : undefined);
+  const executeGateCommand: NonNullable<Parameters<typeof executeToolCall>[2]["services"]>["executeGateCommand"] =
+    (runId, _command, _directory, onComplete) => {
+      completeGateRun(runId, "passed", "configured check passed");
+      onComplete?.("passed");
+    };
   return createOrchestratorSdkTools({
     dispatch: (toolName, args, auditKey, toolInvocation) =>
       executeToolCall(toolName, args, {
         hostUrl,
+        workspaceScope: [],
         cards,
         idempotencyKey: auditKey,
         sdkSessionId: toolInvocation.sessionId,
         toolCallId: toolInvocation.toolCallId,
-        services,
+        services: { executeGateCommand, ...services },
       }),
   });
 }
@@ -274,7 +314,7 @@ test("native trigger_gate stores the configured name and authoritative revision,
     JSON.parse(second.textResultForLlm),
     JSON.parse(first.textResultForLlm),
   );
-  assert.equal(injections, 1);
+  assert.equal(injections, 0);
   const rows = db.prepare(`
     SELECT id, from_phase, to_phase, gate_type, gate_name, changeset_ref
     FROM gate_runs WHERE card_id = ?
@@ -289,7 +329,7 @@ test("native trigger_gate stores the configured name and authoritative revision,
     gate_name: "Lint",
     changeset_ref: expectedRevision,
   }]);
-  assert.equal(completeGateRun(runId, "passed", "lint passed"), true);
+  assert.equal(completeGateRun(runId, "passed", "lint passed"), false);
 
   const { pendingGates } = canAdvancePhase(
     value.id,
@@ -357,7 +397,7 @@ for (const scenario of [
     };
     assert.equal(row.gate_name, scenario.gateName);
     assert.equal(row.changeset_ref, expectedRevision);
-    assert.equal(completeGateRun(row.id, "passed", "gate passed"), true);
+    assert.equal(completeGateRun(row.id, "passed", "gate passed"), false);
 
     const { pendingGates } = canAdvancePhase(
       value.id,
@@ -536,4 +576,60 @@ test("native trigger_review rejects final and invalid card phases before dispatc
   assert.equal(invalidResult.resultType, "failure");
   assert.match(invalidResult.error ?? "", /invalid SDLC phase "unknown"/);
   assert.equal(starts, 0);
+});
+
+test("Observe ignores forged client cards, supports bounded desktop queries and rejects worker effects", async () => {
+  const cards = Array.from({ length: 30 }, (_, index) => card(`session-${String(index).padStart(2, "0")}`, "build"));
+  registerCoordinatorHostReader((host) => host === hostUrl ? { generation: 1, cards, scopes: [new Set<string>()] } : undefined);
+  setCoordinatorDefaultMode("observe");
+  const context = { hostUrl, workspaceScope: [], cards: [card("forged", "build")], idempotencyKey: "observe", sdkSessionId: "test", toolCallId: "test" };
+  try {
+    const listed = await executeToolCall("list_sessions", { limit: 25 }, context);
+    const data = listed.data as { sessions: { id: string }[]; nextOffset: number };
+    assert.equal(data.sessions.length, 25);
+    assert.equal(data.nextOffset, 25);
+    assert.equal(data.sessions.some((item) => item.id === "forged"), false);
+    await assert.rejects(() => executeToolCall("send_message", { cardId: cards[0].id, message: "do it" }, context), /does not permit/);
+    await assert.rejects(() => executeToolCall("create_session", { title: "Work", prompt: "Do work", workingDirectory: repositoryRoot }, context), /does not permit/);
+    await assert.rejects(() => executeToolCall("send_message", { cardId: "forged", message: "do it" }, context), /outside/);
+    await assert.rejects(() => executeToolCall("list_sessions", {}, { ...context, hostUrl: "ws://other" }), /Connect/);
+    assert.equal((await executeToolCall("list_sessions", {}, { ...context, workspaceScope: ["/outside"] })).message.startsWith("0 scoped"), true);
+  } finally { setCoordinatorDefaultMode("coordinate"); }
+});
+
+test("per-session mode and mid-operation downgrade fence the next effect", async () => {
+  const value = card("mode-fence", "build");
+  registerCoordinatorHostReader(() => ({ generation: 1, cards: [value], scopes: [new Set<string>()] }));
+  const { withCoordinatorAuthority } = await import("./coordinator-authority.ts");
+  const { runOperationEffect } = await import("./operation-context.ts");
+  let effects = 0;
+  setCoordinatorSessionOverride(hostUrl, value.id, "observe");
+  await assert.rejects(() => withCoordinatorAuthority({ hostUrl, workspaceScope: [] }, { cardId: value.id }, "interact", undefined, async () => { effects++; }), /does not permit/);
+  setCoordinatorSessionOverride(hostUrl, value.id, null);
+  await assert.rejects(() => withCoordinatorAuthority({ hostUrl, workspaceScope: [] }, { cardId: value.id }, "interact", undefined, async () => {
+    setCoordinatorDefaultMode("observe");
+    await runOperationEffect("interact", async () => { effects++; });
+  }), /current|authority|changed|permit|cancelled/i);
+  setCoordinatorDefaultMode("coordinate");
+  assert.equal(effects, 0);
+});
+
+test("Verify invokes independent report-only reviews without primary instructions", async () => {
+  const value = card("verify-review", "build");
+  seedAuthoritativeRevision(value);
+  setCoordinatorDefaultMode("verify");
+  let observed = false;
+  try {
+    const tool = nativeTools([value], {
+      startReview: async (_host, _uri, _id, skill, _transition, _risk, _revision, options) => {
+        assert.equal(skill.autoFix, false);
+        assert.equal(options?.independent, true);
+        observed = true;
+        return { success: true, reviewRunId: 99, disposition: "terminal" };
+      },
+    }).find((tool) => tool.name === "trigger_review")!;
+    const result = await tool.handler!({ cardId: value.id, skillId: "code-review" }, invocation("trigger_review", "verify-review")) as ToolResultObject;
+    assert.equal(result.resultType, "success");
+    assert.equal(observed, true);
+  } finally { setCoordinatorDefaultMode("coordinate"); }
 });

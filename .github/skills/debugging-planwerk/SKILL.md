@@ -63,6 +63,30 @@ Tables: `card_phases`, `card_risk`, `card_status_history`, `coherence_conflicts`
 `heartbeat_log`, `inbox_items`, `inbox_item_actions`, `review_chat_cleanups`,
 `review_runs`, `session_cache`.
 
+Chief-of-staff goals use `coordinator_goals`, `coordinator_work_items`, and
+`coordinator_dependencies`. Inspect state, revision, saved `workspace_scope_json`,
+claim owner/expiry, item `action_key`, baseline, delivery, and outcome evidence.
+`coordinator_goal_commands` stores idempotent goal-edit receipts;
+`coordinator_deliveries` reserves the actual resource/chat/message identity before
+a create or send. An uncertain item is never blindly retried. A queued
+`pendingMessageId` is not proof of an eventual turn or successful result.
+`coordinator-goal-reconciler.ts` runs on the existing heartbeat and logs explicit
+failures as `[coordinator:goal]`. Unchanged outcome evidence does not trigger
+another judgment. Observe/downgraded modes, disconnected hosts, and workspaces
+outside saved scope intersected with the connected automation scope leave goals
+persisted without authorizing future effects. The drawer's goals section and
+`GET /api/orchestrator/goals` show the current wait reason; host-scoped
+`coordinatorGoalsChanged` SSE events refresh it. Only completed/needs-human
+goals project to the inbox through stable goal-specific source keys.
+Coordinator chat reads the same live server catalogue and policy as heartbeat.
+`list_sessions` exposes bounded pages; `read_session_messages` returns the latest
+cached agent outcome only, not a transcript. Missing outcomes must be explicitly
+inspected or refreshed, not recovered by subscribing to every cold session.
+`enrichment_json.outcomeEvidence` contains the latest completed chat/turn identity,
+bounded text, and truncation flag. Goals require that identity to match their
+recorded dispatch. A legacy message snippet, truncated outcome, or unrelated
+later turn cannot release dependencies.
+
 ```bash
 node -e '
 const path = require("node:path");

@@ -61,6 +61,7 @@ function harness() {
     disconnect: async () => { calls.push(`disconnect:${sessionId}`); },
     on: () => () => {},
     sendAndWait: async () => undefined,
+    send: async () => "message",
   });
   const client: CtoSessionClient = {
     createSession: async () => {
@@ -1122,6 +1123,24 @@ test("abort cleanup failure remains quarantined after disconnect resolves", asyn
 
   assert.equal(store.getSessionBinding()?.lifecycleState, "deleting");
   assert.deepEqual(invalidations, [abortError]);
+  db.close();
+});
+
+test("interrupted admission stays quarantined even after confirmed disconnect", async () => {
+  const { db, store, client, calls } = harness();
+  const manager = new CtoSessionManager(store);
+  const first = await manager.open(client, "model-1", config);
+  assert.deepEqual((await first.release({
+    abort: true,
+    retainQuarantine: true,
+  })).failures, []);
+  assert.equal(store.getSessionBinding()?.lifecycleState, "deleting");
+  const replacement = await manager.open(client, "model-1", config);
+  assert.equal(replacement.resumed, false);
+  assert.equal(replacement.session.sessionId, "created-2");
+  assert.equal(calls.includes("resume:created-1"), false);
+  assert.equal(calls.includes("delete:created-1"), true);
+  await replacement.release();
   db.close();
 });
 

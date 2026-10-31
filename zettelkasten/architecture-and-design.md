@@ -42,15 +42,56 @@ finish and be recorded, but the new mode gates every downstream iteration, sessi
 and phase mutation. Project config and risk policy remain additional constraints: a mode
 can remove authority but never bypass or enable a disabled protection.
 
-Mode governs unsolicited background work. Explicit human commands, pending-input answers,
-and manual gated transitions remain available and keep their existing approval and audit
-paths.
+Mode governs all coordinator-originated work, including tools invoked through chat.
+Explicit human UI actions, pending-input answers, and manual gated transitions keep
+their separate approval and audit paths.
 
 ### 3. Orchestrator Is Conversational (Not Just a Feed)
 
 The left sidebar is both a live decision log AND the primary input for managing the board. You read what the CTO is doing AND talk to it in the same surface. This eliminates context-switching between monitoring and control.
 
-User can say: "Start a task for rate limiting", "Why is auth stuck?", "Override the review gate", "Pause all sessions".
+User can say: "Start a task for rate limiting", "Why is auth stuck?", or
+"Coordinate the API and UI work, and pause if either needs my decision."
+Chat cannot override gates or upgrade its authority.
+
+Session tools use the server's connected host partition, not client-supplied
+cards. `list_sessions` returns bounded pages with stable IDs; `read_session`
+includes current policy and gate evidence; `read_session_messages` exposes only
+the latest cached agent outcome, with its limits explicit. None of these tools
+cold-subscribes to every session. Creating work uses the same AHP create/start
+service as the human UI and requires a known, enabled working directory.
+
+Goals live in `coordinator_goals`, `coordinator_work_items`, and
+`coordinator_dependencies`. Display lists filter by saved workspace scope before
+their limit and prioritize decisions and active work over terminal history.
+Heartbeat scans active goals independently of that display limit.
+Goal revisions and expiring claims fence late
+continuations. `coordinator_goal_commands` deduplicates edits;
+`coordinator_deliveries` reserves session/chat/message identities before effects.
+The existing heartbeat reconciles one claimed goal per host tick. It submits
+ready work with stable audit keys and independently evaluates changed, idle
+outcomes against acceptance criteria. Completed-turn evidence must match the
+delegated chat and turn; an older response or another person's later turn
+cannot satisfy the work. Captured outcomes have an eight-thousand-character
+budget and disclose truncation, which requires human inspection.
+Informational edges require accepted,
+source-current results; verified edges additionally require current gates.
+Gate drift reopens the need for human review rather than silently releasing a
+dependent session. Idle, queue acceptance, and the Ship column alone never
+complete a work item or goal.
+
+A goal's saved scope intersects the host's currently connected automation
+scope. Observe can read and draft goals; Verify can run checks and report-only
+reviews; Coordinate can delegate. Disconnects, mode downgrades, scope changes,
+and explicit pause/cancel prevent future effects while preserving the record.
+Already-accepted host work continues. Restart recovery never blindly repeats
+an uncertain create or send, and a pending-message ID does not prove which
+later turn consumed queued instructions.
+
+The goals API hydrates the drawer and accepts revision-bound pause, resume,
+and cancel commands. Goal changes publish a host-scoped SSE refresh signal.
+Only completed goals and decisions requiring a human project into the existing
+inbox, with stable source keys rather than one inbox item per heartbeat.
 
 ### 4. Quality Gates Are First-Class Records
 
@@ -147,6 +188,62 @@ Think of it as a desktop app using Next.js for its UI layer.
   changing timestamps.
 - Retain per-subscriber ordering and byte budgets. A slow archive reader must
   not disconnect the active board or another host.
+
+#### Task configuration and conversation controls
+
+- Task creation resolves providers, models and contextual configuration from the
+  selected host. Workspace, provider and model changes trigger a fresh resolution;
+  stale responses cannot replace newer choices. The server resolves and validates
+  again before creation. Branch completions and reasoning/context options come
+  from advertised schemas rather than model-name heuristics.
+- Copilot tasks retain Plan mode and bypassed tool approvals when the host
+  supports them. Both settings are visible and configurable. Other providers use
+  their own supported defaults; task permissions do not grant coordinator
+  authority. Startup uses host progress notifications when available, otherwise
+  an indeterminate state. A failed initial prompt preserves the created session
+  URI for recovery. Uncertain creation or delivery never triggers a blind retry.
+- Normal messages start an idle chat or queue behind busy work. Steering is an
+  explicit action. Pending-message edits and cancellations use stable IDs and
+  fresh state; stale reorders retain other pending messages. AHP has no atomic
+  compare-and-swap for pending messages, so consumption during transport remains
+  a disclosed race. An acknowledgment means accepted, not acted upon.
+- Older conversation evidence loads only on an explicit detail request, in
+  bounded pages using the host's opaque cursor. `fetchTurns` acknowledges the
+  request; `chat/turnsLoaded` supplies the history. These reads do not authorize
+  background hydration of cold or archived sessions. History keeps recent
+  outcomes when older pages exceed the display limit. Cached
+  excerpts and pending messages disappear when catalog visibility is lost.
+- Contextual side chats and completed-turn forks require the provider's matching
+  capability, an owned source chat and a retained source turn. Selected text is
+  an immutable snapshot. Source provenance stays visible. Gate reviewers remain
+  fresh and independent of the author's conversation.
+- Lead-chat and worker usage describe the observed turn window, not lifetime
+  consumption. Missing measurements stay unknown, and loading older pages or
+  reconnecting cannot count the same turn twice. Conversation inspection shows
+  the subtotal from that read, not a live subscription with a different turn
+  window.
+
+#### SDK coordinator observations
+
+- Managed permission provenance is distinct from an outstanding human decision.
+  Standard runtime prompt contexts can clear a previously satisfied managed
+  requirement, but never Planwerk's independent high-risk approval. Grants
+  remain one-shot; absent or nonstandard prompt contexts retain the raw marker.
+- Subscribe before message admission and correlate policy warnings with the SDK
+  message ID. A blocked request may have no recorded user message or model turn;
+  show it as not submitted, preserve the warning, and restore the editable draft.
+  Timeout, cancellation and transport cleanup retain the coordinator lease and
+  quarantine protections. Unresolved admission retires the runtime and keeps the
+  session quarantined even after disconnect, preventing a late send from reaching
+  a resumed coordinator turn. Never resend an uncertain request automatically.
+- Context occupancy is not consumption. The coordinator feed records the last
+  observed context pressure and compaction state separately from model usage.
+  Stream-only usage is labelled as such. Session checkpoints replace preceding
+  receipts and watermark authority, preventing replay double-counting. Only
+  sequenced receipts covered by the current checkpoint can extend its totals.
+  Missing usage stays
+  unknown and incomplete receipts are labelled partial. Nano-AI units are
+  checkpoint observations, not dollar estimates.
 
 ### 8. DnD Is Gate-Aware (Not Free Movement)
 

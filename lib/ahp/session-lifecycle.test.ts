@@ -59,7 +59,8 @@ function harness() {
   const requests: string[] = [];
   const session: SessionState = {
     provider: "copilotcli", title: "Lifecycle", status: AHPStatus.Idle,
-    lifecycle: "ready" as SessionState["lifecycle"], chats: [], activeClients: [],
+    lifecycle: "ready" as SessionState["lifecycle"],
+    chats: [{ resource: chatUri, title: "Default" }] as SessionState["chats"], activeClients: [],
     config: { schema: { type: "object", properties: {} }, values: {} },
     defaultChat: chatUri, inputNeeded: [],
     changesets: [{ uriTemplate: changesetUri, label: "Changes", changeKind: "session", capabilities: { review: {} } }] as SessionState["changesets"],
@@ -75,6 +76,7 @@ function harness() {
   const h = {
     session, chat, changeset, reads, releases, actions, requests, resident,
     missing: false,
+    mismatchedSnapshot: false,
     echo: true,
     shutdowns: 0,
     cleanupError: undefined as Error | undefined,
@@ -111,7 +113,7 @@ function harness() {
       await h.onRead?.(resource);
       return {
         result: { snapshot: h.missing && resource === uri
-          ? undefined : { resource, state: structuredClone(state), fromSeq: 0 } as Snapshot },
+          ? undefined : { resource: h.mismatchedSnapshot ? "copilotcli:/other" : resource, state: structuredClone(state), fromSeq: 0 } as Snapshot },
         subscription: new Subscription(resource, {
           ...stream.iterator,
           async return() {
@@ -332,6 +334,17 @@ test("explicit cold sends retain the session through writable checks and preserv
     assert.deepEqual(active.reads, [uri, chatUri]);
     assert.equal(active.releases.at(-1), uri);
   }
+});
+
+test("mismatched snapshot envelopes cannot authorize a scoped operation", async () => {
+  active = harness();
+  active.mismatchedSnapshot = true;
+  await withSessionState(active.client, uri, async (initial, access) => {
+    assert.equal(initial, undefined);
+    assert.equal(access.getState(), undefined);
+  });
+  assert.deepEqual(active.releases, [uri]);
+  assert.equal(active.actions.length, 0);
 });
 
 test("details and verified resume retain session and chat without confirmation polling", async () => {

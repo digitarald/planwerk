@@ -14,6 +14,7 @@ export class OperationAdmission {
     if (!Number.isSafeInteger(capacity) || capacity < 1) {
       throw new RangeError("Operation admission capacity must be a positive integer");
     }
+
     this.capacity = capacity;
   }
 
@@ -72,4 +73,12 @@ export class OperationAdmission {
     const state = this.leases.get(JSON.stringify([hostUrl, cardId]));
     return state !== undefined && (state.quarantined || (state.finished && state.pending > 0));
   }
+}
+
+const shared = globalThis as typeof globalThis & {
+  __planwerkCoordinatorAdmission?: OperationAdmission;
+};
+
+export function getCoordinatorOperationAdmission(): OperationAdmission {
+  return shared.__planwerkCoordinatorAdmission ??= new OperationAdmission();
 }

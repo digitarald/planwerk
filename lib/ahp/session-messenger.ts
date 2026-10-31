@@ -85,6 +85,7 @@ export async function injectMessageWithClient(
     chatUri: string;
     turnId: string;
     disposablePeerChat: boolean;
+    queued?: boolean;
   }) => void,
 ): Promise<{
   turnId: string;
@@ -117,6 +118,7 @@ export async function injectMessageWithClient(
       chatUri,
       turnId: messageId,
       disposablePeerChat: false,
+      queued: isInProgress,
     });
     await runOperationEffect("interact", () => dispatchAndConfirm(
       client,
@@ -143,6 +145,7 @@ export function injectMessage(
       chatUri: string;
       turnId: string;
       disposablePeerChat: boolean;
+      queued?: boolean;
     }) => void;
   },
 ): Promise<{

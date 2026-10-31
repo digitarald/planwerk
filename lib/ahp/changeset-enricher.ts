@@ -14,6 +14,7 @@ import type {
   ChangesetReview,
   FileChange,
   SessionRuntimeError,
+  SessionOutcomeEvidence,
 } from "../types";
 
 import { readSessionState } from "./snapshot";
@@ -54,6 +55,7 @@ export interface ChangesetEnrichment {
   planContentHash?: string;
   planSource?: PlanSource;
   lastAgentMessage?: string;
+  outcomeEvidence?: SessionOutcomeEvidence;
   runtimeError?: SessionRuntimeError;
   planContent?: string;
   /** Selected channel and AHP review facts; informational only. */

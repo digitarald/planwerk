@@ -42,7 +42,7 @@ export function buildBoardContext(cards: KanbanCard[]): string {
       if (card.runtime === "input-needed") reasons.push("input-needed");
       if (card.attention === "needs-human") reasons.push("needs-human");
       if (card.attention === "stale") reasons.push("stale");
-      sections.push(`- **${card.title}** [${card.phase}] — ${reasons.join(", ")}`);
+      sections.push(`- **${card.title}** (${card.id}) [${card.phase}] — ${reasons.join(", ")}`);
     }
   }
 
@@ -51,7 +51,7 @@ export function buildBoardContext(cards: KanbanCard[]): string {
   if (riskCards.length > 0) {
     sections.push("## Risk");
     for (const card of riskCards.slice(0, 5)) {
-      sections.push(`- **${card.title}** — ${card.risk} risk${card.riskFactors?.length ? `: ${card.riskFactors.join(", ")}` : ""}`);
+      sections.push(`- **${card.title}** (${card.id}) — ${card.risk} risk${card.riskFactors?.length ? `: ${card.riskFactors.join(", ")}` : ""}`);
     }
   }
 
@@ -62,7 +62,7 @@ export function buildBoardContext(cards: KanbanCard[]): string {
   if (recentCards.length > 0) {
     sections.push("## Running");
     for (const card of recentCards) {
-      sections.push(`- **${card.title}** [${card.phase}] — ${card.activity || "active"}`);
+      sections.push(`- **${card.title}** (${card.id}) [${card.phase}] — ${card.activity || "active"}`);
     }
   }
 
@@ -75,6 +75,7 @@ export function buildBoardContext(cards: KanbanCard[]): string {
 export function buildCardDetail(card: KanbanCard): string {
   const lines: string[] = [
     `## Selected: ${card.title}`,
+    `Session ID: ${card.id}`,
     `Phase: ${card.phase} | Runtime: ${card.runtime} | Gate: ${card.gateStatus}`,
   ];
 

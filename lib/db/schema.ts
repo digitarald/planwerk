@@ -6,6 +6,8 @@ import path from "node:path";
 import { dataDirectory } from "../data-directory";
 import { ensureCtoContinuitySchema } from "./cto-continuity-schema";
 import { ensureCoordinatorModeSchema } from "./coordinator-mode-schema";
+import { ensureCoordinatorGoalsSchema } from "./coordinator-goals";
+import { ensureCoordinatorDeliveriesSchema } from "./coordinator-deliveries";
 import { ensureSdkObservabilitySchema } from "./sdk-observability-schema";
 import { ensureReviewChatCleanupSchema } from "./review-chat-cleanup-schema";
 import { ensureCardRiskSchema } from "./card-risk-schema";
@@ -171,6 +173,8 @@ export function getDb(): Database.Database {
     ensureSdkObservabilitySchema(db);
     ensureCtoContinuitySchema(db);
     ensureCoordinatorModeSchema(db);
+    ensureCoordinatorGoalsSchema(db);
+    ensureCoordinatorDeliveriesSchema(db);
 
     runSchemaMigration(db, () => {
       const gateRunsColumns = tableColumns(db!, "gate_runs");
