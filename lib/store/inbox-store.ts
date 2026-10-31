@@ -40,6 +40,7 @@ export interface InboxBriefing {
   freshness: {
     sourceRevision?: string;
     generatedAt: number;
+    sourceObservedAt?: number;
     stale: boolean;
   };
   provenance: string;
@@ -58,7 +59,9 @@ export interface InboxItem {
   priorityScore: number;
   priorityReasons: string[];
   title: string;
+  sessionTitle?: string;
   projectName?: string;
+  workspacePath?: string;
   briefing: InboxBriefing;
   evidence: Record<string, unknown>;
   createdAt: number;
@@ -173,6 +176,8 @@ function normalizeItem(value: InboxItem): InboxItem {
       freshness: {
         sourceRevision: briefing.freshness?.sourceRevision,
         generatedAt: itemTimestamp(briefing.freshness?.generatedAt),
+        sourceObservedAt: typeof briefing.freshness?.sourceObservedAt === "number"
+          ? briefing.freshness.sourceObservedAt : undefined,
         stale: briefing.freshness?.stale === true,
       },
       provenance: briefing.provenance || "Planwerk",
@@ -219,9 +224,9 @@ export function filterInboxItemsByWorkspace(
   if (workspaceFilters.size === 0) return items;
   const cardsById = new Map(cards.map((card) => [card.id, card]));
   return items.filter((item) => {
-    const project = cardsById.get(item.cardId)?.project;
-    return project
-      ? workspaceFilters.has(project.path)
+    const workspacePath = cardsById.get(item.cardId)?.project?.path ?? item.workspacePath;
+    return workspacePath
+      ? workspaceFilters.has(workspacePath)
       : workspaceFilters.has(UNASSIGNED_WORKSPACE);
   });
 }

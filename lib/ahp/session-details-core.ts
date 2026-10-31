@@ -10,6 +10,7 @@ interface ErrorInfoLike {
 interface SessionStateLike {
   defaultChat?: unknown;
   creationError?: ErrorInfoLike;
+  chats?: readonly { resource?: string; interactivity?: string }[];
 }
 
 interface ResponsePartLike {
@@ -29,6 +30,7 @@ interface TurnLike {
 interface ChatStateLike {
   resource?: unknown;
   turns?: readonly TurnLike[] | null;
+  interactivity?: string;
 }
 
 const MAX_ERROR_MESSAGE_LENGTH = 4_000;
@@ -56,6 +58,8 @@ export function projectSessionDetails(
   sessionState: SessionStateLike,
   chatState?: ChatStateLike,
 ): SessionDetails {
+  if (chatState?.interactivity === "hidden"
+    || sessionState.chats?.some((chat) => chat.resource === sessionState.defaultChat && chat.interactivity === "hidden")) return {};
   const turns = chatState?.turns ?? [];
   const latestTurn = turns.at(-1);
   const finalPart = latestTurn?.responseParts?.at(-1);
@@ -87,8 +91,13 @@ export function projectSessionDetails(
   }
 
   const creationError = errorDetail(sessionState.creationError);
+  const outcome = latestTurn?.state === "complete" ? extractLastAgentMessage([latestTurn], 8_001) : undefined;
+  const chatUri = chatState?.resource ?? sessionState.defaultChat;
   return {
     lastAgentMessage: extractLastAgentMessage(turns),
+    outcomeEvidence: outcome && typeof latestTurn?.id === "string" && typeof chatUri === "string"
+      ? { chatUri, turnId: latestTurn.id, state: "complete", text: outcome.slice(0, 8_000), truncated: outcome.length > 8_000 }
+      : undefined,
     runtimeError: creationError
       ? {
           source: "creation",

@@ -54,7 +54,18 @@ jobs:
           bun-version: "1.3.13"
 
       - name: Prepare desktop toolchain
-        run: npm run native:setup
+        run: |
+          for attempt in 1 2 3; do
+            if npm run native:setup; then
+              exit 0
+            fi
+            echo "::warning::Desktop toolchain setup failed (attempt $attempt/3)"
+            if [ "$attempt" -lt 3 ]; then
+              sleep 15
+            fi
+          done
+          echo "::error::Desktop toolchain setup failed after three attempts"
+          exit 1
 
       - name: Test
         run: npm test

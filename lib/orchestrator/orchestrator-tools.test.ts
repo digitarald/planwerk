@@ -50,14 +50,14 @@ test("tool handler validates and dispatches typed arguments with a stable audit 
   });
 
   const result = (await tool.handler!(
-    { title: "Implement tools" },
+    { title: "Implement tools", prompt: "Implement native tools", workingDirectory: "/workspace" },
     invocation("create_session"),
   )) as ToolResultObject;
 
   const auditKey = "cto-tool:v1:session-1:call-7";
   assert.deepEqual(calls, [{
     name: "create_session",
-    args: { title: "Implement tools" },
+    args: { title: "Implement tools", prompt: "Implement native tools", workingDirectory: "/workspace" },
     auditKey,
   }]);
   assert.equal(result.resultType, "success");

@@ -41,6 +41,20 @@ async function availablePort() {
   return address.port;
 }
 
+async function waitForProcessExit(pid: number) {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      throw error;
+    }
+    await delay(25);
+  }
+  assert.fail(`Process ${pid} remained after watchdog shutdown`);
+}
+
 test("owned backend becomes ready and is stopped without leaving its listener behind", async () => {
   const resources = await fixture();
   const backend = new Backend({ resources, dataDir: resources, port: await availablePort(), onExit: assert.fail, runId: "fixture-launch" });
@@ -121,7 +135,7 @@ test("normal shutdown waits for the watchdog to reap a SIGTERM-resistant server"
     await backend.start();
     const serverPid = Number(await readFile(join(resources, "server.pid"), "utf8"));
     await backend.stop();
-    assert.throws(() => process.kill(serverPid, 0), { code: "ESRCH" });
+    await waitForProcessExit(serverPid);
     await assert.rejects(fetch(backend.origin));
     await backend.stop();
   } finally {
@@ -160,8 +174,7 @@ test("watchdog reaps a server that ignores SIGTERM after the desktop parent cras
     assert.ok(serverPid);
     parent.kill("SIGKILL");
     await exited;
-    await delay(100);
-    assert.throws(() => process.kill(serverPid, 0), { code: "ESRCH" });
+    await waitForProcessExit(serverPid);
   } finally {
     parent.kill("SIGKILL");
     if (watchdog.pid) {

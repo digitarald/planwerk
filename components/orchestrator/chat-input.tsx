@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import { Loader2, Send } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
@@ -10,16 +9,18 @@ import { useConnectionStore } from "@/lib/store/connection-store";
 import { useBoardStore } from "@/lib/store/board-store";
 
 export function ChatInput() {
-  const [value, setValue] = useState("");
+  const value = useOrchestratorStore((state) => state.draft);
+  const setValue = useOrchestratorStore((state) => state.setDraft);
   const sendMessage = useOrchestratorStore((s) => s.sendMessage);
   const isProcessing = useOrchestratorStore((s) => s.isProcessing);
   const hostUrl = useConnectionStore((s) => s.hostUrl);
-  const cards = useBoardStore((s) => s.cards);
+  const workspaceFilters = useBoardStore((s) => s.workspaceFilters);
+  const selectedCardId = useBoardStore((s) => s.detailCardId);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!value.trim() || isProcessing) return;
-    void sendMessage(value.trim(), hostUrl ?? undefined, cards);
+    void sendMessage(value.trim(), hostUrl ?? undefined, [...workspaceFilters], selectedCardId);
     setValue("");
   };
 
@@ -34,6 +35,8 @@ export function ChatInput() {
     <form onSubmit={handleSubmit} className="p-2">
       <div className="relative">
         <Textarea
+          id="coordinator-message"
+          aria-label="Message the coordinator"
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={handleKeyDown}
