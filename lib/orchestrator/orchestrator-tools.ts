@@ -15,10 +15,101 @@ export const ORCHESTRATOR_TOOLS = [
         type: "object",
         properties: {
           title: { type: "string", minLength: 1, description: "Task title" },
-          workingDirectory: { type: "string", minLength: 1, description: "Optional working directory path" },
+          prompt: { type: "string", minLength: 1, description: "Outcome, acceptance criteria and essential constraints; leave implementation to the worker" },
+          workingDirectory: { type: "string", minLength: 1, description: "Absolute in-scope working directory" },
         },
-        required: ["title"],
+        required: ["title", "prompt", "workingDirectory"],
         additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_sessions",
+      description: "Search the connected host's scoped session catalogue, without waking sessions. Paginated, maximum 25 per page.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          offset: { type: "integer", minimum: 0 },
+          limit: { type: "integer", minimum: 1, maximum: 25 },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "read_session",
+      description: "Inspect one scoped session's outcome, pending input, plan, gate/review evidence and provenance. Missing cold evidence requires explicit human refresh.",
+      parameters: {
+        type: "object",
+        properties: { cardId: { type: "string", minLength: 1 } },
+        required: ["cardId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "read_session_messages",
+      description: "Read the latest cached agent outcome, with chat/turn identity and truncation when captured. Not a full transcript; never restores a cold session.",
+      parameters: {
+        type: "object",
+        properties: {
+          cardId: { type: "string", minLength: 1 },
+          offset: { type: "integer", minimum: 0 },
+          limit: { type: "integer", minimum: 1, maximum: 20 },
+        },
+        required: ["cardId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_goals",
+      description: "List durable chief-of-staff goals in the current host and workspace scope.",
+      parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "read_goal",
+      description: "Read a goal's revision, work graph, delivery identities, blockers and result evidence before changing it.",
+      parameters: {
+        type: "object", properties: { goalId: { type: "string", minLength: 1 } },
+        required: ["goalId"], additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "manage_goal",
+      description: "Create a draft goal, edit undispatched work/dependencies, activate, pause, resume or cancel future follow-ups. Criteria must reflect the human objective; ask when unclear. Lower modes allow drafting/activation but never launch workers. No action may declare work completed.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["create", "update", "add_work", "dependencies", "activate", "pause", "resume", "cancel"] },
+          goalId: { type: "string", minLength: 1 },
+          revision: { type: "integer", minimum: 1 },
+          objective: { type: "string", minLength: 1 },
+          acceptanceCriteria: { type: "string", minLength: 1 },
+          itemId: { type: "string", minLength: 1 },
+          instructions: { type: "string", minLength: 1, description: "Desired outcome and essential constraints, not implementation steps" },
+          workingDirectory: { type: "string", minLength: 1 },
+          cardId: { type: "string", minLength: 1 },
+          dependencies: { type: "array", items: { type: "string" }, maxItems: 32 },
+          dependencyKind: { type: "string", enum: ["result", "verified"] },
+        },
+        required: ["action"], additionalProperties: false,
       },
     },
   },
@@ -151,6 +242,7 @@ export interface ToolCallResult {
   success: boolean;
   message: string;
   auditKey?: string;
+  data?: unknown;
 }
 
 export interface OrchestratorToolDispatch {
@@ -170,9 +262,13 @@ export interface OrchestratorToolResultEvent {
 }
 
 type JsonProperty = {
-  type: "string";
+  type: "string" | "integer" | "array";
   minLength?: number;
   enum?: readonly string[];
+  minimum?: number;
+  maximum?: number;
+  items?: { type: "string" };
+  maxItems?: number;
 };
 
 type ActionSchema = {
@@ -216,8 +312,19 @@ export function validateToolArguments(
   }
   for (const [key, raw] of Object.entries(args)) {
     const property = schema.properties[key];
-    if (typeof raw !== property.type) {
+    if (property.type === "integer" ? !Number.isSafeInteger(raw)
+      : property.type === "array" ? !Array.isArray(raw)
+      : typeof raw !== property.type) {
       throw new Error(`${key} must be a ${property.type}`);
+    }
+    if (Array.isArray(raw) &&
+        (raw.length > (property.maxItems ?? 32) || !raw.every((entry) => typeof entry === "string" && entry.length <= 256))) {
+      throw new Error(`${key} must be a bounded array of strings`);
+    }
+    if (typeof raw === "number" &&
+        ((property.minimum !== undefined && raw < property.minimum) ||
+         (property.maximum !== undefined && raw > property.maximum))) {
+      throw new Error(`${key} is outside the permitted range`);
     }
     if (
       typeof raw === "string" &&

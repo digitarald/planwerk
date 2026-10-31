@@ -58,6 +58,30 @@ Tables: `card_phases`, `card_risk`, `card_status_history`, `coherence_conflicts`
 `heartbeat_log`, `inbox_items`, `inbox_item_actions`, `review_chat_cleanups`,
 `review_runs`, `session_cache`.
 
+Chief-of-staff goals use `coordinator_goals`, `coordinator_work_items`, and
+`coordinator_dependencies`. Inspect state, revision, saved `workspace_scope_json`,
+claim owner/expiry, item `action_key`, baseline, delivery, and outcome evidence.
+`coordinator_goal_commands` stores idempotent goal-edit receipts;
+`coordinator_deliveries` reserves the actual resource/chat/message identity before
+a create or send. An uncertain item is never blindly retried. A queued
+`pendingMessageId` is not proof of an eventual turn or successful result.
+`coordinator-goal-reconciler.ts` runs on the existing heartbeat and logs explicit
+failures as `[coordinator:goal]`. Unchanged outcome evidence does not trigger
+another judgment. Observe/downgraded modes, disconnected hosts, and workspaces
+outside saved scope intersected with the connected automation scope leave goals
+persisted without authorizing future effects. The drawer's goals section and
+`GET /api/orchestrator/goals` show the current wait reason; host-scoped
+`coordinatorGoalsChanged` SSE events refresh it. Only completed/needs-human
+goals project to the inbox through stable goal-specific source keys.
+Coordinator chat reads the same live server catalogue and policy as heartbeat.
+`list_sessions` exposes bounded pages; `read_session_messages` returns the latest
+cached agent outcome only, not a transcript. Missing outcomes must be explicitly
+inspected or refreshed, not recovered by subscribing to every cold session.
+`enrichment_json.outcomeEvidence` contains the latest completed chat/turn identity,
+bounded text, and truncation flag. Goals require that identity to match their
+recorded dispatch. A legacy message snippet, truncated outcome, or unrelated
+later turn cannot release dependencies.
+
 ```bash
 node -e '
 const db = require("better-sqlite3")(".planwerk/planwerk.db", { readonly: true });
@@ -431,8 +455,14 @@ startup. Opening a card whose outcome/error detail is missing uses the guarded
 before dispatch.
 
 ### 4. Copilot CLI per-session files — what the agent actually did
-`~/.copilot/session-state/<session-uuid>/` (the UUID is the tail of a `copilotcli:/<uuid>`
-card id). Contents worth reading:
+`~/.copilot/session-state/<session-uuid>/` (the UUID is the tail of a legacy
+`copilotcli:/<uuid>` card id). Current `ahp-session:/<uuid>` identities are host-owned
+and need not match the underlying SDK conversation UUID. Peer chats have separate
+SDK conversation directories as well. Resolve the actual backing before inspecting
+files; do not construct its path from an AHP session or chat UUID.
+`lib/ahp/plan-artifact.ts` currently recognizes only legacy `copilotcli:/` IDs, so
+an empty artifact list for an `ahp-session:/` card does not prove its plan is absent.
+Contents worth reading:
 - `plan.md` — the agent's plan artifact (Planwerk reads this via
   `lib/ahp/plan-artifact.ts` for sessions with no in-tree plan).
 - `events.jsonl` — the agent's internal event log (turns, tool calls, permission
@@ -547,9 +577,13 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
 - `lib/orchestrator/{heartbeat,gate-engine,triage,risk-*}.ts` — the autonomous loop.
   A card blocked on Copilot's plan-review input resolves its required `plan->build`
   review gates from `.github/planwerk.yml`. Each configured skill prompt runs in a
-  peer chat in the owning AHP session, so the reviewer
-  reads that session's `plan.md` and workspace context without Planwerk embedding the
-  plan in a separate SDK prompt. The exact peer `chat_uri` and `turn_id` are stored in
+  peer chat in the owning AHP session. A peer chat is not a subagent or an
+  inherited conversation: plain `createChat` creates a fresh SDK backing with its
+  own session-state directory. The current review prompt does not transfer the
+  parent's plan bytes or resource reference, so a reviewer can report that no plan
+  exists even when the default chat has one. Compare the parent's actual plan
+  with the peer's tool calls before diagnosing a missing source plan.
+  The exact peer `chat_uri` and `turn_id` are stored in
   `review_runs` against the current `plan:<hash>`, with a linked `gate_runs` row.
   Blocking findings are returned on the **original** AHP input as
   `chat/inputCompleted(response:"accept")` with a selected answer carrying

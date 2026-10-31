@@ -45,13 +45,19 @@ test("API serialization matches the frontend briefing contract", () => {
         model: "test-model",
         generatedAt: "2026-09-22T00:00:00.000Z",
       },
-      freshness: { observedAt: "2026-09-22T00:00:00.000Z" },
+      freshness: {
+        observedAt: "2026-09-22T00:00:00.000Z",
+        sourceObservedAt: "2026-09-22T00:00:00.000Z",
+      },
       provenance: {
         sourceType: "ahp-session",
         sourceKey: "session:card-1:pending-input:request-1",
         eventType: "pending-input",
         cardId: "card-1",
         sourceRevision: "revision-1",
+        sessionTitle: "Deploy API",
+        projectName: "Project",
+        workspacePath: "/project",
       },
     },
     createdAt: "2026-09-22T00:00:00.000Z",
@@ -67,6 +73,9 @@ test("API serialization matches the frontend briefing contract", () => {
     Date.parse("2026-09-22T00:05:00.000Z"),
   );
   assert.equal(serialized.sourceKind, "pending-input");
+  assert.equal(serialized.sessionTitle, "Deploy API");
+  assert.equal(serialized.projectName, "Project");
+  assert.equal(serialized.workspacePath, "/project");
   assert.equal(serialized.category, "action");
   assert.equal(serialized.priorityBand, 2);
   assert.equal(serialized.priorityScore, 320);
@@ -112,4 +121,11 @@ test("API serialization matches the frontend briefing contract", () => {
     inboxItemMatchesHost(item, "ws://127.0.0.1:9000"),
     true,
   );
+  item.briefing.synthesis!.generatedAt = "2026-09-22T01:00:00.000Z";
+  const refreshed = serializeInboxItem(item, Date.parse("2026-09-22T01:00:00.000Z"));
+  assert.equal(refreshed.briefing.freshness.generatedAt, Date.parse("2026-09-22T01:00:00.000Z"));
+  assert.equal(refreshed.briefing.freshness.sourceObservedAt, Date.parse("2026-09-22T00:00:00.000Z"));
+  assert.equal(refreshed.briefing.freshness.stale, true);
+  delete item.briefing.freshness.sourceObservedAt;
+  assert.equal(serializeInboxItem(item).briefing.freshness.stale, true);
 });
