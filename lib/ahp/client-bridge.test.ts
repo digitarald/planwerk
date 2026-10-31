@@ -79,7 +79,11 @@ function harness(status: number = AHPStatus.Idle) {
       if (readWait) { const wait = readWait; readWait = undefined; await wait; }
       const state = {
         provider: summary.provider, title: summary.title, status: summary.status,
-        lifecycle: "ready" as SessionState["lifecycle"], activeClients: [], chats: [],
+        lifecycle: "ready" as SessionState["lifecycle"], activeClients: [],
+        chats: chat ? [{
+          resource: chat.resource, title: chat.title ?? "Test",
+          status: chat.status, modifiedAt: chat.modifiedAt ?? summary.modifiedAt,
+        }] : [],
         config: { schema: { type: "object", properties: {} }, values: { model: "test" } },
         defaultChat: chat?.resource,
       } satisfies SessionState;

@@ -161,6 +161,62 @@ Think of it as a desktop app using Next.js for its UI layer.
 - Retain per-subscriber ordering and byte budgets. A slow archive reader must
   not disconnect the active board or another host.
 
+#### Task configuration and conversation controls
+
+- Task creation resolves providers, models and contextual configuration from the
+  selected host. Workspace, provider and model changes trigger a fresh resolution;
+  stale responses cannot replace newer choices. The server resolves and validates
+  again before creation. Branch completions and reasoning/context options come
+  from advertised schemas rather than model-name heuristics.
+- Copilot tasks retain Plan mode and bypassed tool approvals when the host
+  supports them. Both settings are visible and configurable. Other providers use
+  their own supported defaults; task permissions do not grant coordinator
+  authority. Startup uses host progress notifications when available, otherwise
+  an indeterminate state. A failed initial prompt preserves the created session
+  URI for recovery. Uncertain creation or delivery never triggers a blind retry.
+- Normal messages start an idle chat or queue behind busy work. Steering is an
+  explicit action. Pending-message edits and cancellations use stable IDs and
+  fresh state; stale reorders retain other pending messages. AHP has no atomic
+  compare-and-swap for pending messages, so consumption during transport remains
+  a disclosed race. An acknowledgment means accepted, not acted upon.
+- Older conversation evidence loads only on an explicit detail request, in
+  bounded pages using the host's opaque cursor. `fetchTurns` acknowledges the
+  request; `chat/turnsLoaded` supplies the history. These reads do not authorize
+  background hydration of cold or archived sessions. History keeps recent
+  outcomes when older pages exceed the display limit. Cached
+  excerpts and pending messages disappear when catalog visibility is lost.
+- Contextual side chats and completed-turn forks require the provider's matching
+  capability, an owned source chat and a retained source turn. Selected text is
+  an immutable snapshot. Source provenance stays visible. Gate reviewers remain
+  fresh and independent of the author's conversation.
+- Lead-chat and worker usage describe the observed turn window, not lifetime
+  consumption. Missing measurements stay unknown, and loading older pages or
+  reconnecting cannot count the same turn twice. Conversation inspection shows
+  the subtotal from that read, not a live subscription with a different turn
+  window.
+
+#### SDK coordinator observations
+
+- Managed permission provenance is distinct from an outstanding human decision.
+  Standard runtime prompt contexts can clear a previously satisfied managed
+  requirement, but never Planwerk's independent high-risk approval. Grants
+  remain one-shot; absent or nonstandard prompt contexts retain the raw marker.
+- Subscribe before message admission and correlate policy warnings with the SDK
+  message ID. A blocked request may have no recorded user message or model turn;
+  show it as not submitted, preserve the warning, and restore the editable draft.
+  Timeout, cancellation and transport cleanup retain the coordinator lease and
+  quarantine protections. Unresolved admission retires the runtime and keeps the
+  session quarantined even after disconnect, preventing a late send from reaching
+  a resumed coordinator turn. Never resend an uncertain request automatically.
+- Context occupancy is not consumption. The coordinator feed records the last
+  observed context pressure and compaction state separately from model usage.
+  Stream-only usage is labelled as such. Session checkpoints replace preceding
+  receipts and watermark authority, preventing replay double-counting. Only
+  sequenced receipts covered by the current checkpoint can extend its totals.
+  Missing usage stays
+  unknown and incomplete receipts are labelled partial. Nano-AI units are
+  checkpoint observations, not dollar estimates.
+
 ### 8. DnD Is Gate-Aware (Not Free Movement)
 
 Dragging a card forward logs a "manual override" to the orchestrator feed and marks the card with a warning. Moving backward is always allowed (rework). This preserves the gate enforcement model while still giving users escape hatches.

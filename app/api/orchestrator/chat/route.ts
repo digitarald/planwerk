@@ -46,6 +46,7 @@ import {
   getAuthoritativeApprovalBinding,
 } from "@/lib/orchestrator/tool-executor";
 import { TurnSubmission } from "@/lib/orchestrator/turn-submission";
+import { sendSdkTurn } from "@/lib/orchestrator/sdk-turn";
 import type { KanbanCard } from "@/lib/types";
 import type { CopilotClient } from "@github/copilot-sdk";
 import { currentCoordinatorCards } from "@/lib/orchestrator/coordinator-authority";
@@ -371,13 +372,28 @@ export async function POST(request: NextRequest) {
   const submission = new TurnSubmission();
   let controllerClosed = false;
   let cleanupPromise: Promise<void> | null = null;
+  let admissionPending = false;
 
   const cleanup = (abort: boolean, transportError?: unknown) => {
     lifecycleAbort.abort();
     permissionPolicy.cancelPending();
     cleanupPromise ??= (async () => {
       let cleanupInvalidationReason = transportError;
-      const cleanup = await sessionHandle.release({ abort });
+      const interruptedAdmission = admissionPending;
+      if (interruptedAdmission) {
+        // Public send() cannot retract pending admission. Retire the runtime
+        // and quarantine its session so a late send cannot reach a resumed turn.
+        await withSdkCleanupTimeout(
+          () => runtimeLease.invalidate(new Error("SDK message admission was interrupted")),
+          "invalidate-runtime",
+        ).catch((error) => {
+          console.warn("[orchestrator-chat] Pending admission invalidation failed:", error);
+        });
+      }
+      const cleanup = await sessionHandle.release({
+        abort,
+        retainQuarantine: interruptedAdmission,
+      });
       const cleanupFailure = cleanup.failures.find(
         ({ error }) => isCopilotRuntimeInvalidatingFailure(error),
       );
@@ -467,18 +483,18 @@ export async function POST(request: NextRequest) {
           abortOnCleanup = true;
           return;
         }
-        await session.sendAndWait(chatTurn.message, SESSION_TIMEOUT_MS);
+        const outcome = await sendSdkTurn(session, chatTurn.message, SESSION_TIMEOUT_MS, lifecycleAbort.signal,
+          (pending) => { admissionPending = pending; });
         submission.finish();
         if (submission.cancelled) {
           abortOnCleanup = true;
           return;
         }
-        if (mapper.error) {
+        if (outcome.status === "blocked") {
+          send({ type: "done", status: "blocked", actionsDisabled: true, message: outcome.message });
+        } else if (mapper.error) {
           abortOnCleanup = true;
           const mappedError = mapper.error;
-          if (mappedError.type !== "error") {
-            throw new Error("Invalid SDK error event");
-          }
           const sessionError = Object.assign(
             new Error(mappedError.message),
             { name: mappedError.errorType ?? "SessionError" }

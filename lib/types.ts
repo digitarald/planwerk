@@ -48,6 +48,8 @@ export interface ChatChangesetFacts {
 
 export interface ChatDetails {
   changesets: ChatChangesetFacts[];
+  usage?: ChatUsage;
+  pendingMessages?: ConversationDetails["pending"];
 }
 
 export interface SessionBackgroundWork {
@@ -73,11 +75,45 @@ export interface WorkerActivity {
   activity?: string;
   isActive: boolean;
   history: StatusEntry[];
-  usage?: {
-    inputTokens?: number;
-    outputTokens?: number;
-    cacheReadTokens?: number;
-  };
+  usage?: Partial<ChatUsage>;
+}
+
+/** Provider receipts for the loaded window, never context occupancy or lifetime billing. */
+export interface ChatUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  models: string[];
+  scope: "loaded-turns";
+  loadedTurns: number;
+  measuredTurns: number;
+  hasOlderTurns: boolean;
+  partial: boolean;
+  observedAt: string;
+}
+
+export interface ConversationTurn {
+  chatUri: string;
+  turnId: string;
+  state: string;
+  startedAt?: string;
+  prompt?: string;
+  text?: string;
+  truncated: boolean;
+}
+
+export interface ConversationDetails {
+  chatUri: string;
+  writable: boolean;
+  running: boolean;
+  turns: ConversationTurn[];
+  turnsNextCursor?: string;
+  pending: Array<{ id: string; kind: "queued" | "steering"; text: string }>;
+  capabilities: { sideChat: boolean; fork: boolean; ordinary: boolean };
+  usage?: ChatUsage;
+  origin?: { kind: string; chat?: string; turnId?: string; selection?: { text: string; responsePartId?: string } };
+  observedAt: string;
+  historyTruncated?: boolean;
 }
 
 export type PendingInputOptionKind = "text" | "number" | "boolean" | "single-select" | "multi-select";

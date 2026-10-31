@@ -6,6 +6,16 @@ import {
   projectSessionDetails,
 } from "./session-details-core.ts";
 
+test("hidden default chats cannot disclose transcript or error content", () => {
+  assert.deepEqual(projectSessionDetails({ defaultChat: "hidden" }, {
+    resource: "hidden", interactivity: "hidden",
+    turns: [{ id: "turn", state: "complete", responseParts: [{ kind: "markdown", content: "Private" }] }],
+  }), {});
+  assert.deepEqual(projectSessionDetails({ defaultChat: "hidden", chats: [{ resource: "hidden", interactivity: "hidden" }] }, {
+    resource: "hidden", turns: [{ id: "turn", state: "complete", responseParts: [{ kind: "markdown", content: "Private" }] }],
+  }), {});
+});
+
 test("projects final agent markdown for zero-file completion sessions", () => {
   const details = projectSessionDetails(
     { defaultChat: "ahp-chat://default/session" },

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { orchestratorHttpErrorMessage } from "./orchestrator-response.ts";
+import type { SdkUsageSummary } from "../orchestrator/sdk-usage.ts";
 
 export type FeedItemType =
   | "intervention"
@@ -36,6 +37,9 @@ export interface FeedItem {
   toolName?: string;
   approval?: PendingCtoApproval;
   decisionPending?: boolean;
+  submissionStatus?: "blocked";
+  context?: { currentTokens?: number; tokenLimit?: number; compacting: boolean; updatedAt: string };
+  usage?: SdkUsageSummary;
 }
 
 export function closeCtoApprovals(
@@ -118,6 +122,7 @@ export const useOrchestratorStore = create<OrchestratorState>()(
             ...updated[idx],
             message,
             isStreaming: !done,
+            ...(done && updated[idx].context ? { context: { ...updated[idx].context, compacting: false } } : {}),
           };
           return { feedItems: updated };
         });
@@ -198,8 +203,10 @@ export const useOrchestratorStore = create<OrchestratorState>()(
       sendMessage: async (message: string, hostUrl?: string, workspaceScope: string[] = [], selectedCardId?: string | null) => {
         const { addFeedItem, updateLastResponse } = get();
         const streamApprovals = new Set<string>();
+        let streamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
         addFeedItem({ type: "user", message });
+        const submittedFeedId = get().feedItems[0]?.id;
         set({ isProcessing: true });
 
         try {
@@ -230,11 +237,13 @@ export const useOrchestratorStore = create<OrchestratorState>()(
 
             const reader = response.body?.getReader();
             if (!reader) throw new Error("No response body");
+            streamReader = reader;
 
             const decoder = new TextDecoder();
             let buffer = "";
             let receivedText = false;
             let receivedError = false;
+            const warnings = new Set<string>();
 
             while (true) {
               const { done, value } = await reader.read();
@@ -296,19 +305,46 @@ export const useOrchestratorStore = create<OrchestratorState>()(
                         expiresAtMs: event.expiresAtMs,
                       },
                     });
+                  } else if (event.type === "warning" && typeof event.message === "string") {
+                    if (!warnings.has(event.id)) {
+                      warnings.add(event.id);
+                      addFeedItem({ type: "alert", message: event.message });
+                    }
+                  } else if (event.type === "context" || event.type === "usage") {
+                    if (typeof event.error === "string") addFeedItem({ type: "alert", message: event.error });
+                    set((state) => ({
+                      feedItems: state.feedItems.map((item) => item.isStreaming
+                        ? { ...item, ...(event.type === "context" ? { context: {
+                          currentTokens: event.currentTokens, tokenLimit: event.tokenLimit,
+                          compacting: event.compacting, updatedAt: event.updatedAt,
+                        } } : { usage: event.usage }) }
+                        : item),
+                    }));
                   } else if (event.type === "error") {
                     receivedError = true;
                     updateLastResponse(
                       `${event.message ?? "CTO stream failed"}. Please try again.`
                     );
                   } else if (event.type === "done") {
+                    if (event.status === "blocked") {
+                      receivedError = true;
+                      if (!get().draft) set({ draft: message });
+                      set((state) => ({
+                        feedItems: state.feedItems.map((item) => item.isStreaming || item.id === submittedFeedId
+                          ? { ...item, submissionStatus: "blocked" }
+                          : item),
+                      }));
+                      updateLastResponse(`Not submitted: ${event.message ?? "Blocked by policy."}`, true);
+                      continue;
+                    }
                     updateLastResponse(
                       get().feedItems.find((f) => f.isStreaming)?.message ?? "",
                       true
                     );
                   }
-                } catch {
-                  // Skip malformed events
+                } catch (error) {
+                  console.error("Invalid coordinator stream event", error);
+                  throw new Error("The coordinator stream could not be read.");
                 }
               }
             }
@@ -352,6 +388,12 @@ export const useOrchestratorStore = create<OrchestratorState>()(
             });
           }
         } finally {
+          if (streamReader) {
+            await streamReader.cancel().catch((error) => {
+              console.error("Failed to cancel coordinator stream", error);
+            });
+            streamReader.releaseLock();
+          }
           set((state) => ({
             isProcessing: false,
             feedItems: closeCtoApprovals(
