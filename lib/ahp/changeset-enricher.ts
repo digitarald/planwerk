@@ -20,6 +20,9 @@ import type {
 import { readSessionState } from "./snapshot";
 import { readReadyChangesetState } from "./changeset-readiness";
 import { readTextResource } from "./resource-read";
+import { hashPlanContent, type PlanSource } from "./plan-source";
+import { awaitAbortable } from "../abort";
+export { hashPlanContent } from "./plan-source";
 import { changesetReviewSummary, isChangesetFileReviewed } from "./changeset-review";
 import { classifyArtifactFile, isNonCodeFile } from "./artifact-classification";
 import { throwIfAborted } from "../abort";
@@ -50,6 +53,7 @@ export interface ChangesetEnrichment {
   /** Opaque freshness ref for the plan artifact content (`plan:<hash>`), when a
    *  plan with content is present. */
   planContentHash?: string;
+  planSource?: PlanSource;
   lastAgentMessage?: string;
   outcomeEvidence?: SessionOutcomeEvidence;
   runtimeError?: SessionRuntimeError;
@@ -58,13 +62,6 @@ export interface ChangesetEnrichment {
   changesetReview?: ChangesetReview;
 }
 
-/** Stable, short freshness ref for plan content. Whitespace-insensitive so
- *  cosmetic reflows don't invalidate a passed plan review. */
-export function hashPlanContent(content: string): string {
-  const normalized = content.replace(/\s+/g, " ").trim();
-  const digest = createHash("sha1").update(normalized).digest("hex").slice(0, 12);
-  return `plan:${digest}`;
-}
 function extractFilePath(file: ChangesetFile): string {
   // Use after.uri for creates/edits, before.uri for deletions
   const uri = file.edit.after?.uri ?? file.edit.before?.uri ?? file.id;
@@ -131,11 +128,31 @@ export async function enrichFromChangeset(
       return { artifacts: [], codeFileCount: 0, totalFileCount: 0, fileChanges: [], additions: 0, deletions: 0, changesetVerified: false };
     }
 
-    return await enrichChangesetState(client, changeset, csState);
+    return await enrichChangesetState(client, changeset, csState, false, undefined, undefined, sessionUri);
   } catch (err) {
     debug("enrichment failed for", sessionUri, err);
     return null;
   }
+}
+
+/** Compare resource bytes, not counts or tool names, across a report-only review. */
+export async function readReviewSourceDigest(
+  client: AhpClient,
+  sessionUri: string,
+  state: SessionState,
+  budget: EvidenceCaptureBudget,
+): Promise<string> {
+  const changeset = findSessionChangeset(state.changesets ?? []);
+  if (!changeset || changeset.uriTemplate.includes("{")) {
+    throw new Error("A readable session changeset is required to verify report-only review.");
+  }
+  const current = await awaitAbortable(
+    () => readReadyChangesetState(client, changeset.uriTemplate), budget.signal,
+  );
+  if (!current || current.status !== "ready") throw new Error("Review source evidence is unavailable.");
+  const enrichment = await enrichChangesetState(client, changeset, current, true, budget.signal, budget, sessionUri);
+  if (!enrichment.capturedFilesDigest) throw new Error("Review source bytes are unavailable.");
+  return enrichment.capturedFilesDigest;
 }
 
 /** Classify an already-owned changeset, optionally capturing every file side. */
@@ -146,6 +163,7 @@ export async function enrichChangesetState(
   captureEvidence = false,
   signal?: AbortSignal,
   budget?: EvidenceCaptureBudget,
+  sessionUri?: string,
 ): Promise<ChangesetEnrichment> {
     if (csState.status !== "ready") throw new Error("Session changeset is not ready");
     budget?.assertFileCount(csState.files.length);
@@ -183,6 +201,7 @@ export async function enrichChangesetState(
             removed: file.edit.diff?.removed ?? 0,
           });
         }
+
         return files;
       })()
       : undefined;
@@ -259,7 +278,10 @@ export async function enrichChangesetState(
     );
 
     // Extract plan content from the first plan artifact that has it
-    const planContent = artifacts.find((a) => a.type === "plan" && a.contentRef)?.contentRef;
+    const plans = artifactFiles.filter((entry) => entry.type === "plan");
+    const planContent = plans.length === 1
+      ? artifacts.find((a) => a.type === "plan" && a.contentRef)?.contentRef : undefined;
+    const planUri = plans.length === 1 ? plans[0].file.edit.after?.content?.uri : undefined;
     const planContentHash = planContent ? hashPlanContent(planContent) : undefined;
 
     return {
@@ -272,6 +294,7 @@ export async function enrichChangesetState(
       changesetVerified: true,
       capturedFilesDigest,
       planContentHash,
+      planSource: planUri && sessionUri ? { sessionUri, uri: planUri } : undefined,
       planContent,
       changesetReview: changesetReviewSummary(changeset, csState.files),
     };

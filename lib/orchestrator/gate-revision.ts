@@ -7,6 +7,7 @@ import {
 } from "../ahp/source-binding-match.ts";
 
 import type { Phase } from "../types.ts";
+import { hashPlanContent, isPlanSource, type PlanEvidence } from "../ahp/plan-source.ts";
 import {
   isPlanChangesetRef,
   normalizeChangesetRef,
@@ -17,7 +18,9 @@ type SourceBinding = EvidenceSourceBinding;
 
 interface CachedSummary {
   resource?: unknown;
-  _planwerkRiskFacts?: SourceBinding;
+  _planwerkRiskFacts?: SourceBinding & {
+    pendingInput?: { requestId?: unknown; planReview?: { planUri?: unknown } | null };
+  };
 }
 
 interface CachedEnrichment {
@@ -26,6 +29,8 @@ interface CachedEnrichment {
   additions?: unknown;
   deletions?: unknown;
   planContentHash?: unknown;
+  planContent?: unknown;
+  planSource?: unknown;
   _planwerkSource?: SourceBinding;
 }
 
@@ -35,6 +40,7 @@ type GateRevisionResult =
       changesetRef: string;
       sourceRevision: string;
       hostUrl: string;
+      plan?: PlanEvidence;
     }
   | {
       ok: false;
@@ -52,7 +58,7 @@ function validCount(value: unknown): value is number {
 export function resolveAuthoritativeGateRevision(
   db: Database.Database,
   cardId: string,
-  phase: Phase,
+  reviewedPhase: Phase,
   expectedHostUrl?: string,
 ): GateRevisionResult {
   const row = db.prepare(`
@@ -100,12 +106,21 @@ export function resolveAuthoritativeGateRevision(
   }
 
   let changesetRef: string;
-  if (phase === "plan") {
+  if (reviewedPhase === "plan") {
     if (
       !nonEmptyString(enrichment.planContentHash)
       || !isPlanChangesetRef(enrichment.planContentHash)
+      || !nonEmptyString(enrichment.planContent)
+      || hashPlanContent(enrichment.planContent) !== enrichment.planContentHash
+      || !isPlanSource(enrichment.planSource, cardId)
     ) {
       return { ok: false, reason: "current plan revision is unavailable" };
+    }
+    const pending = summarySource?.pendingInput;
+    if (pending?.planReview !== undefined && (!pending.planReview
+      || enrichment.planSource.requestId !== pending.requestId
+      || enrichment.planSource.uri !== pending.planReview.planUri)) {
+      return { ok: false, reason: "current plan evidence does not identify the pending parent request" };
     }
     changesetRef = normalizeChangesetRef(enrichment.planContentHash);
   } else {
@@ -132,5 +147,9 @@ export function resolveAuthoritativeGateRevision(
     changesetRef,
     sourceRevision,
     hostUrl: row.host_url,
+    ...(reviewedPhase === "plan" && typeof enrichment.planContent === "string"
+      && isPlanSource(enrichment.planSource, cardId) ? {
+        plan: { content: enrichment.planContent, changesetRef, source: enrichment.planSource },
+      } : {}),
   };
 }

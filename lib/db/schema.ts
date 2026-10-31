@@ -13,6 +13,7 @@ import { ensureReviewChatCleanupSchema } from "./review-chat-cleanup-schema";
 import { ensureCardRiskSchema } from "./card-risk-schema";
 import { ensureReviewRunSchema } from "./review-run-schema";
 import { ensureInboxSchema } from "./inbox-schema";
+import { ensurePlanAnswerSchema } from "./plan-answer-store";
 import { runSchemaMigration, tableColumns } from "./schema-migration";
 import {
   ensureWorkLeaseSchema,
@@ -198,6 +199,7 @@ export function getDb(): Database.Database {
 
     ensureCardRiskSchema(db);
     ensureInboxSchema(db);
+    ensurePlanAnswerSchema(db);
 
     db.exec(`
       UPDATE card_phases SET phase = 'review' WHERE phase = 'verify';

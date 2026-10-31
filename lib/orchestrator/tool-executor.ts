@@ -484,7 +484,7 @@ async function handleTriggerReview(
   }
 
   const transition = resolveNextToolTransition(
-    getPersistedCardPhase(cardId) ?? card.phase,
+    card.pendingInput?.planReview ? "plan" : getPersistedCardPhase(cardId) ?? card.phase,
   );
   if (!transition.ok) {
     return {

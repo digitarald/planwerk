@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ToolInvocation, ToolResultObject } from "@github/copilot-sdk";
 
 import type { KanbanCard, Phase } from "../types.ts";
+import { hashPlanContent } from "../ahp/plan-source.ts";
 import { createOrchestratorSdkTools } from "./orchestrator-tools.ts";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
@@ -207,7 +208,7 @@ function card(id: string, phase: Phase): KanbanCard {
     filesChanged: 1,
     changesetVerified: true,
     sourceRevision: `${id}-source`,
-    planContentHash: `plan:${id}-plan`,
+    planContentHash: hashPlanContent(`# Plan for ${id}`),
     planSteps: { total: 1, done: 0 },
     modifiedAt: Date.now(),
     workingDirectory: repositoryRoot,
@@ -235,6 +236,7 @@ function seedAuthoritativeRevision(value: KanbanCard): string {
         sourceRevision,
         planVersion,
         contentRevision,
+        pendingInput: value.pendingInput,
       },
     }),
     JSON.stringify({
@@ -243,6 +245,13 @@ function seedAuthoritativeRevision(value: KanbanCard): string {
       additions: value.additions,
       deletions: value.deletions,
       planContentHash: value.planContentHash,
+      planContent: `# Plan for ${value.id}`,
+      planSource: {
+        sessionUri: value.id, uri: value.pendingInput?.planReview?.planUri ?? `file:///host/${value.id}/plan.md`,
+        ...(value.pendingInput?.planReview ? {
+          requestId: value.pendingInput.requestId, chatUri: "ahp-chat:/writer", turnId: "writer-turn",
+        } : {}),
+      },
       _planwerkSource: {
         sourceRevision,
         planVersion,
@@ -334,6 +343,27 @@ test("native trigger_gate stores the configured name and authoritative revision,
     pendingGates.some((gate) => gate.gateName === "Lint"),
     false,
   );
+});
+
+test("native plan review uses the pending plan transition without changing a persisted Build phase", async () => {
+  const value = card("build-with-plan", "build");
+  value.pendingInput = {
+    requestId: "plan-request", questions: [],
+    planReview: { questionId: "choice", actionIds: ["interactive"], planUri: "file:///host/plan.md" },
+  };
+  seedAuthoritativeRevision(value);
+  const tool = nativeTools([value], {
+    startReview: async (_host, _session, _card, _skill, transition, _risk, ref) => {
+      assert.equal(transition, "plan->build");
+      assert.equal(ref, value.planContentHash);
+      return { success: true, started: true, reviewRunId: 1, disposition: "terminal" };
+    },
+  }).find((candidate) => candidate.name === "trigger_review")!;
+  const result = await tool.handler!(
+    { cardId: value.id, skillId: "plan-review" }, invocation("trigger_review", "pending-plan-call"),
+  ) as ToolResultObject;
+  assert.equal(result.resultType, "success");
+  assert.equal((db.prepare("SELECT phase FROM card_phases WHERE card_id = ?").get(value.id) as { phase: string }).phase, "build");
 });
 
 for (const scenario of [

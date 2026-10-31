@@ -206,7 +206,6 @@ before(async () => {
   for (const name of [
     "app",
     "lib",
-    "next-env.d.ts",
     "next.config.ts",
     "package.json",
     "tsconfig.json",
@@ -666,7 +665,7 @@ test("AHP event stream rejects cross-origin setup before connecting and permits 
     });
     assert.equal(blocked.status, 403);
     assert.deepEqual(await blocked.json(), {
-      error: "request Origin and Host must match the local Planwerk server",
+      error: "cross-origin request is not allowed",
     });
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(connectionCount, 0);
@@ -692,10 +691,11 @@ test("AHP event stream rejects cross-origin setup before connecting and permits 
     assert.ok(reader);
     const firstEvent = await reader.read();
     assert.equal(firstEvent.done, false);
-    assert.match(
-      new TextDecoder().decode(firstEvent.value),
-      /^data: \{"type":"init","cards":\[\]\}/,
-    );
+    const firstFrame = new TextDecoder().decode(firstEvent.value).split("\n\n", 1)[0].trim();
+    assert.ok(firstFrame.startsWith("data: "));
+    const snapshot = JSON.parse(firstFrame.slice("data: ".length));
+    assert.equal(snapshot.type, "init");
+    assert.deepEqual(snapshot.cards, []);
     controller.abort();
     await reader.cancel().catch(() => undefined);
   } finally {

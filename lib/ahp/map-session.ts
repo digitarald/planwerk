@@ -10,6 +10,7 @@ import type {
 } from "@microsoft/agent-host-protocol";
 
 import { visibleChatCatalog } from "./chat-facts";
+import { isPlanReviewRequest, readPlanReviewInput } from "./plan-source";
 
 import { AHPSessionSummary, AHPStatus, parseAHPStatus } from "./types";
 import type { ChangesetEnrichment } from "./changeset-enricher";
@@ -137,6 +138,7 @@ export function mapInputRequests(requests: ChatInputRequest[] | undefined): Pend
     requestId: req.id,
     message: req.message,
     questions,
+    ...(isPlanReviewRequest(req) ? { planReview: readPlanReviewInput(req) } : {}),
   };
 }
 

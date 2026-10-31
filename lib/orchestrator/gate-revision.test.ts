@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 
 import { resolveAuthoritativeGateRevision } from "./gate-revision.ts";
 import { claimSessionOwnership } from "../db/session-ownership.ts";
+import { hashPlanContent } from "../ahp/plan-source.ts";
 
 function createDb(): Database.Database {
   const db = new Database(":memory:");
@@ -57,7 +58,9 @@ function seed(
           totalFileCount: 1,
           additions: 2,
           deletions: 1,
-          planContentHash: options.planContentHash ?? "plan:hash-a",
+          planContentHash: options.planContentHash ?? hashPlanContent("# Plan"),
+          planContent: "# Plan",
+          planSource: { sessionUri: "card-1", uri: "file:///host/parent-plan.md" },
           _planwerkSource: {
             sourceRevision: enrichmentRevision,
             planVersion: "plan-a",
@@ -152,6 +155,19 @@ test("plan revision and host binding fail closed independently", () => {
   db.close();
 });
 
+test("an old in-tree plan cannot substitute for the pending parent's published resource", () => {
+  const db = createDb();
+  seed(db);
+  const row = db.prepare("SELECT summary_json FROM session_cache").get() as { summary_json: string };
+  const summary = JSON.parse(row.summary_json);
+  summary._planwerkRiskFacts.pendingInput = {
+    requestId: "new-request", planReview: { planUri: "file:///host/new-parent-plan.md" },
+  };
+  db.prepare("UPDATE session_cache SET summary_json = ?").run(JSON.stringify(summary));
+  assert.equal(resolveAuthoritativeGateRevision(db, "card-1", "plan").ok, false);
+  db.close();
+});
+
 test("captured byte evidence, not the observation fence, identifies code gate verdicts", () => {
   const db = createDb();
   seed(db, { evidenceDigest: "captured-a", manifestRevision: "manifest-unchanged" });
@@ -169,7 +185,7 @@ test("captured byte evidence, not the observation fence, identifies code gate ve
   assert.equal(summary._planwerkRiskFacts.sourceRevision, "revision-a");
   // Plan review remains scoped to its actual plan content, not unrelated code bytes.
   const plan = resolveAuthoritativeGateRevision(db, "card-1", "plan");
-  assert.equal(plan.ok && plan.changesetRef, "plan:hash-a");
+  assert.equal(plan.ok && plan.changesetRef, hashPlanContent("# Plan"));
   db.close();
 });
 

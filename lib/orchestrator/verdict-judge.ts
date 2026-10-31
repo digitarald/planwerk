@@ -11,7 +11,6 @@ import {
 import {
   judgeWithTransport,
   type JudgeVerdict,
-  type VerdictJudgeTransport,
 } from "./verdict-judge-core";
 import {
   acquireCopilotRuntimeClient,
@@ -34,7 +33,7 @@ Respond with ONLY a JSON object:
 
 "findings" must contain only concrete unresolved blockers. It must be empty for "passed" and non-empty for "failed".`;
 
-const sdkTransport: VerdictJudgeTransport = async (reviewResponse) => {
+const sdkTransport = async (reviewResponse: string, reviewedRevision?: string): Promise<unknown> => {
   let client: CopilotClient | undefined;
   let runtimeLease: CopilotRuntimeLease<CopilotClient> | undefined;
   try {
@@ -46,7 +45,9 @@ const sdkTransport: VerdictJudgeTransport = async (reviewResponse) => {
     const session = await client.createSession({
       model: selectedModel.model,
       reasoningEffort: selectedModel.reasoningEffort,
-      systemMessage: { content: SYSTEM_PROMPT },
+      systemMessage: { content: SYSTEM_PROMPT + (reviewedRevision?.startsWith("plan:")
+        ? "\nThis is a report-only plan review. Pass only a substantive assessment of the supplied complete parent plan. A missing plan, inability to inspect it, partial review, or reviewer edits is insufficient evidence: return needs-human, never passed merely because no blockers were listed."
+        : "") },
       availableTools: [],
       skipCustomInstructions: true,
     });
@@ -57,6 +58,7 @@ const sdkTransport: VerdictJudgeTransport = async (reviewResponse) => {
         {
           prompt: JSON.stringify({
             reviewResponse,
+            reviewedRevision,
           }),
           source: "system",
         },
@@ -98,7 +100,8 @@ const sdkTransport: VerdictJudgeTransport = async (reviewResponse) => {
 };
 
 export function judgeReviewResponse(
-  reviewResponse: string | undefined
+  reviewResponse: string | undefined,
+  reviewedRevision?: string,
 ): Promise<JudgeVerdict> {
-  return judgeWithTransport(reviewResponse, sdkTransport);
+  return judgeWithTransport(reviewResponse, (response) => sdkTransport(response, reviewedRevision));
 }

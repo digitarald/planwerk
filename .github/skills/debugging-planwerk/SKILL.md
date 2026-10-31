@@ -49,9 +49,14 @@ Two invariants worth re-checking before deep debugging (see `AGENTS.md`):
 ## The sources (where the truth lives)
 
 ### 1. SQLite persistence DB — Planwerk's own state
-`.planwerk/planwerk.db` (better-sqlite3; schema in `lib/db/schema.ts`). This is where
-persisted phase, gates, risk, and orchestrator decisions live. **Read-only inspect** it
-out-of-band; the running app holds a write connection.
+The DB is `planwerk.db` under `dataDirectory()` (`lib/data-directory.ts`;
+better-sqlite3 schema in `lib/db/schema.ts`). Production macOS uses
+`~/Library/Application Support/Planwerk/planwerk.db`; development desktop uses
+`~/Library/Application Support/Planwerk Dev/planwerk.db`. Local web runs default
+to `.planwerk/planwerk.db` under the server working directory.
+`PLANWERK_DATA_DIR`, when set, overrides that directory. Check the running app's
+data directory before inspecting persisted phase, gates, risk, or decisions.
+**Read-only inspect** it out-of-band; the running app holds a write connection.
 
 Tables: `card_phases`, `card_risk`, `card_status_history`, `coherence_conflicts`,
 `cto_sdk_sessions`, `cto_session_leases`, `gate_configs`, `gate_runs`,
@@ -84,7 +89,9 @@ later turn cannot release dependencies.
 
 ```bash
 node -e '
-const db = require("better-sqlite3")(".planwerk/planwerk.db", { readonly: true });
+const path = require("node:path");
+const dir = process.env.PLANWERK_DATA_DIR || path.join(require("node:os").homedir(), "Library", "Application Support", "Planwerk");
+const db = require("better-sqlite3")(path.join(dir, "planwerk.db"), { readonly: true });
 for (const r of db.prepare("SELECT name FROM sqlite_master WHERE type = ?").all("table")) console.log(r.name);
 '
 ```
@@ -455,19 +462,27 @@ startup. Opening a card whose outcome/error detail is missing uses the guarded
 before dispatch.
 
 ### 4. Copilot CLI per-session files — what the agent actually did
-`~/.copilot/session-state/<session-uuid>/` (the UUID is the tail of a legacy
-`copilotcli:/<uuid>` card id). Current `ahp-session:/<uuid>` identities are host-owned
-and need not match the underlying SDK conversation UUID. Peer chats have separate
-SDK conversation directories as well. Resolve the actual backing before inspecting
-files; do not construct its path from an AHP session or chat UUID.
-`lib/ahp/plan-artifact.ts` currently recognizes only legacy `copilotcli:/` IDs, so
-an empty artifact list for an `ahp-session:/` card does not prove its plan is absent.
-Contents worth reading:
-- `plan.md` — the agent's plan artifact (Planwerk reads this via
-  `lib/ahp/plan-artifact.ts` for sessions with no in-tree plan).
+Current `ahp-session:/<uuid>` identities are host-owned. That UUID is not the
+backing SDK conversation UUID, and a peer chat has its own SDK conversation.
+Do not construct a `~/.copilot/session-state/` path from a session or chat ID.
+Inspect only a backing path already established by authorized diagnostics.
+Contents worth reading there:
+- `plan.md` — the backing conversation's plan, not necessarily the owning
+  AHP session's or another chat's plan.
 - `events.jsonl` — the agent's internal event log (turns, tool calls, permission
   requests, mode changes). Verbose; grep it.
 - `session.db`, `research/`, `files/`, `checkpoints/`, `workspace.yaml`.
+
+`lib/ahp/plan-artifact.ts` reads the original input request's published
+`planReview.planUri` through `resourceRead`, with its owning chat and exact
+request turn verified. There is no legacy session-state discovery or UUID
+fallback. `planReview.content` can be a summary, not the complete plan.
+Missing metadata, multiple pending plans, denied resources and empty content
+are unavailable evidence. For non-pending plans, a single readable plan in a
+ready session changeset remains supported.
+Inspect `enrichment_json.planSource` and `planContent` alongside
+`planContentHash`. The hash is SHA-256 over the exact captured UTF-8 text;
+Markdown indentation changes invalidate old verdicts.
 
 ### 5. Server-side logs — the dev server console
 Run the app with `npm run dev` (Next.js, port 3000) and watch its terminal. Log lines are
@@ -577,14 +592,26 @@ git log -p -S 'some_exact_substring' -- lib/ahp/<file>.ts   # when a line appear
 - `lib/orchestrator/{heartbeat,gate-engine,triage,risk-*}.ts` — the autonomous loop.
   A card blocked on Copilot's plan-review input resolves its required `plan->build`
   review gates from `.github/planwerk.yml`. Each configured skill prompt runs in a
-  peer chat in the owning AHP session. A peer chat is not a subagent or an
-  inherited conversation: plain `createChat` creates a fresh SDK backing with its
-  own session-state directory. The current review prompt does not transfer the
-  parent's plan bytes or resource reference, so a reviewer can report that no plan
-  exists even when the default chat has one. Compare the parent's actual plan
-  with the peer's tool calls before diagnosing a missing source plan.
-  The exact peer `chat_uri` and `turn_id` are stored in
-  `review_runs` against the current `plan:<hash>`, with a linked `gate_runs` row.
+  peer chat in the owning AHP session. A peer chat is not a subagent or inherited
+  conversation: plain `createChat` creates a fresh SDK conversation. Planwerk
+  explicitly embeds the complete captured parent plan, resource provenance and
+  hash in the report-only review prompt. Inspect that evidence block, not the
+  peer's own session-state plan.
+  The peer `chat_uri` and `turn_id` are stored in `review_runs` with a linked
+  `gate_runs` row. Both use `plan:<hash>` even when the card's persisted phase is
+  Build. A historical `plan->build` row using `source:` is not plan authority.
+  `plan_source_json` records original request provenance; `source_digest` records
+  captured session-changeset bytes before review. Those bytes are checked again
+  before verdict acceptance, so shell edits cannot evade checks merely by
+  avoiding known edit-tool names. This checks host-reported session resources,
+  not arbitrary filesystem writes or a sandbox. Writer changes during an opt-in
+  busy review can also invalidate that evidence; do not infer who edited from a
+  changed digest alone.
+  Peer identities are reserved before `createChat`; an exact host turn echo is
+  required after dispatch. Disposal does not make uncertain prompt delivery
+  safe to replay. Existing start/judgment leases and cleanup quarantine apply.
+  A completed peer turn is not ready for judgment while its `backgroundWork`
+  still reports active shells or subagents.
   Blocking findings are returned on the **original** AHP input as
   `chat/inputCompleted(response:"accept")` with a selected answer carrying
   `freeformValues`. VS Code maps that to Copilot's
@@ -611,10 +638,18 @@ the aggregate
 (`client.ping()` alone flushes the transport — it does NOT confirm the host
 applied the answer). The presence/removal predicate is the alias-free, unit-
 tested `lib/ahp/input-presence.ts` (`isInputResolved` etc.). When an accept
-dispatches but never gets consumed, `runPlanApprovalPipeline` retries once then
-emits a **`plan-approve-failed`** heartbeat action (mirror of
-`plan-rubber-duck-failed`) instead of a phantom `plan-approved` — so look for
-that action in `heartbeat_log`/the orchestrator feed.
+dispatches but never gets consumed, `runPlanApprovalPipeline` emits
+**`plan-approve-failed`** rather than a phantom `plan-approved`. It does not
+retry that mutation within the call. A timeout or lost confirmation is not
+proof the host rejected the answer; do not manually replay it without checking
+the original request and dispatch evidence.
+
+Automatic plan answers additionally reserve a `plan_answers` receipt before
+dispatch, keyed by host/session/original request. Inspect its `plan_ref`, `action`,
+`status` and `detail`: `reserved` or `ambiguous` prevents replay after a crash;
+`consumed` requires the original host input to disappear. A changed hash/action
+does not authorize a second answer to the same request. Explicit human input
+keeps its existing route and is not governed by automatic-answer receipts.
 
 **Plan-review feedback not applied** — look for `plan-feedback-delivered` versus
 `plan-review-failed` in `heartbeat_log`. The former is emitted only after the
@@ -667,8 +702,10 @@ Pure-logic tests live in `lib/orchestrator/changeset-freshness.test.ts`.
    **session-state files** (source 4) to get ground truth.
 3. Turn on **`AHP_DEBUG`** and watch the **dev server logs** (source 5) to see the
    derivation/enrichment/input-fetch path execute.
-4. Confirm the exact card id: `copilotcli:/<uuid>` — the app's own dogfood session is a
-   card too, so make sure you're inspecting the *right* one before drawing conclusions.
+4. Confirm the exact card id and host: `ahp-session:/<uuid>`. Keep the owning
+   session, original input chat/turn, peer chat/turn and backing SDK identities
+   separate. Historical diagnostic identities are not permission to restore or
+   mutate those sessions.
 5. If a card is unexpectedly not being automated, inspect the workspace filters in every
    connected board tab. Cards outside their union are intentionally deferred: triage,
    gates, reviews, nudges, auto-answers, phase advances, and coherence checks do not run.

@@ -289,6 +289,8 @@ export function prepareOwnedReviewDispatch(
     chatUri: string;
     turnId: string;
     disposablePeerChat: boolean;
+    planSourceJson?: string;
+    sourceDigest?: string;
     now?: number;
   },
 ): { state: "ready" | "lost" | "blocked"; summary?: string } {
@@ -313,7 +315,9 @@ export function prepareOwnedReviewDispatch(
             chat_uri = ?,
             turn_id = ?,
             dispatch_host_url = ?,
-            dispatch_chat_disposable = ?
+            dispatch_chat_disposable = ?,
+            plan_source_json = ?,
+            source_digest = ?
         WHERE id = ? AND status = 'pending'
           AND start_owner_id = ?
           AND start_lease_expires_at_ms > ?
@@ -322,6 +326,8 @@ export function prepareOwnedReviewDispatch(
         input.turnId,
         new URL(input.hostUrl).href,
         input.disposablePeerChat ? 1 : 0,
+        input.planSourceJson ?? null,
+        input.sourceDigest ?? null,
         input.reviewRunId,
         input.ownerId,
         now,
