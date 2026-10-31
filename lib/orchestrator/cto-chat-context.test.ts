@@ -48,6 +48,7 @@ test("snapshot data cannot close its boundary or impersonate capabilities", () =
     board: evidence,
     gates: evidence,
     selectedCard: evidence,
+    goals: [],
   });
   assert.ok(!/[<>&\u2028\u2029]/.test(snapshot));
   assert.equal(content.match(/<\/untrusted_board_snapshot>/g)?.length, 1);

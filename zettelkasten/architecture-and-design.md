@@ -42,15 +42,56 @@ finish and be recorded, but the new mode gates every downstream iteration, sessi
 and phase mutation. Project config and risk policy remain additional constraints: a mode
 can remove authority but never bypass or enable a disabled protection.
 
-Mode governs unsolicited background work. Explicit human commands, pending-input answers,
-and manual gated transitions remain available and keep their existing approval and audit
-paths.
+Mode governs all coordinator-originated work, including tools invoked through chat.
+Explicit human UI actions, pending-input answers, and manual gated transitions keep
+their separate approval and audit paths.
 
 ### 3. Orchestrator Is Conversational (Not Just a Feed)
 
 The left sidebar is both a live decision log AND the primary input for managing the board. You read what the CTO is doing AND talk to it in the same surface. This eliminates context-switching between monitoring and control.
 
-User can say: "Start a task for rate limiting", "Why is auth stuck?", "Override the review gate", "Pause all sessions".
+User can say: "Start a task for rate limiting", "Why is auth stuck?", or
+"Coordinate the API and UI work, and pause if either needs my decision."
+Chat cannot override gates or upgrade its authority.
+
+Session tools use the server's connected host partition, not client-supplied
+cards. `list_sessions` returns bounded pages with stable IDs; `read_session`
+includes current policy and gate evidence; `read_session_messages` exposes only
+the latest cached agent outcome, with its limits explicit. None of these tools
+cold-subscribes to every session. Creating work uses the same AHP create/start
+service as the human UI and requires a known, enabled working directory.
+
+Goals live in `coordinator_goals`, `coordinator_work_items`, and
+`coordinator_dependencies`. Display lists filter by saved workspace scope before
+their limit and prioritize decisions and active work over terminal history.
+Heartbeat scans active goals independently of that display limit.
+Goal revisions and expiring claims fence late
+continuations. `coordinator_goal_commands` deduplicates edits;
+`coordinator_deliveries` reserves session/chat/message identities before effects.
+The existing heartbeat reconciles one claimed goal per host tick. It submits
+ready work with stable audit keys and independently evaluates changed, idle
+outcomes against acceptance criteria. Completed-turn evidence must match the
+delegated chat and turn; an older response or another person's later turn
+cannot satisfy the work. Captured outcomes have an eight-thousand-character
+budget and disclose truncation, which requires human inspection.
+Informational edges require accepted,
+source-current results; verified edges additionally require current gates.
+Gate drift reopens the need for human review rather than silently releasing a
+dependent session. Idle, queue acceptance, and the Ship column alone never
+complete a work item or goal.
+
+A goal's saved scope intersects the host's currently connected automation
+scope. Observe can read and draft goals; Verify can run checks and report-only
+reviews; Coordinate can delegate. Disconnects, mode downgrades, scope changes,
+and explicit pause/cancel prevent future effects while preserving the record.
+Already-accepted host work continues. Restart recovery never blindly repeats
+an uncertain create or send, and a pending-message ID does not prove which
+later turn consumed queued instructions.
+
+The goals API hydrates the drawer and accepts revision-bound pause, resume,
+and cancel commands. Goal changes publish a host-scoped SSE refresh signal.
+Only completed goals and decisions requiring a human project into the existing
+inbox, with stable source keys rather than one inbox item per heartbeat.
 
 ### 4. Quality Gates Are First-Class Records
 

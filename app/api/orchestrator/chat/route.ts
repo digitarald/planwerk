@@ -2,7 +2,6 @@ import type { SessionConfig } from "@github/copilot-sdk";
 import { NextRequest, NextResponse } from "next/server";
 
 import { getCtoContinuityStore } from "@/lib/db/cto-continuity";
-import { getDb } from "@/lib/db/schema";
 import { createSdkObservabilityIngestor } from "@/lib/db/sdk-observability";
 import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
 import {
@@ -22,7 +21,6 @@ import {
 import {
   buildBoardContext,
   buildCardDetail,
-  getGateSummary,
 } from "@/lib/orchestrator/board-context";
 import { buildCtoChatTurn } from "@/lib/orchestrator/cto-chat-context";
 import {
@@ -50,6 +48,9 @@ import {
 import { TurnSubmission } from "@/lib/orchestrator/turn-submission";
 import type { KanbanCard } from "@/lib/types";
 import type { CopilotClient } from "@github/copilot-sdk";
+import { currentCoordinatorCards } from "@/lib/orchestrator/coordinator-authority";
+import { getCoordinatorDefaultMode } from "@/lib/orchestrator/coordinator-mode-store";
+import { listCoordinatorGoals } from "@/lib/orchestrator/coordinator-goal-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -57,47 +58,14 @@ export const dynamic = "force-dynamic";
 const TOOL_NAMES = ORCHESTRATOR_TOOLS.map((tool) => tool.function.name);
 const SESSION_TIMEOUT_MS = getCtoTurnTimeoutMs();
 
-function isLocalHost(url: string): boolean {
+function isSupportedHost(url: string): boolean {
+  if (url === "vscode-local://desktop") return true;
   try {
-    const host = new URL(url).hostname;
-    return (
-      host === "localhost" ||
-      host === "127.0.0.1" ||
-      host === "::1" ||
-      host === "[::1]"
-    );
+    const parsed = new URL(url);
+    return parsed.protocol === "ws:" || parsed.protocol === "wss:";
   } catch {
     return false;
   }
-}
-
-type CardPhaseRow = {
-  card_id: string;
-  phase: string;
-  updated_at: string;
-};
-
-function getCardsFromDb(): KanbanCard[] {
-  const db = getDb();
-  const rows = db
-    .prepare("SELECT card_id, phase, updated_at FROM card_phases")
-    .all() as CardPhaseRow[];
-
-  return rows.map((row) => ({
-    id: row.card_id,
-    title: row.card_id,
-    phase: row.phase as KanbanCard["phase"],
-    runtime: "idle" as const,
-    gateStatus: "pending" as const,
-    attention: "none" as const,
-    risk: "low" as const,
-    activity: "",
-    additions: 0,
-    deletions: 0,
-    filesChanged: 0,
-    planSteps: { total: 0, done: 0 },
-    modifiedAt: new Date(row.updated_at).getTime(),
-  }));
 }
 
 function generateReadOnlyFallback(
@@ -202,7 +170,7 @@ export async function POST(request: NextRequest) {
   let body: {
     message?: string;
     selectedCardId?: string;
-    cards?: KanbanCard[];
+    workspaceScope?: string[];
     hostUrl?: string;
   };
   try {
@@ -223,18 +191,28 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { message, selectedCardId, cards: clientCards, hostUrl } = body;
-  if (!message) {
+  if (!body || typeof body !== "object") return NextResponse.json({ error: "JSON object required" }, { status: 400 });
+  const { message, selectedCardId, workspaceScope, hostUrl } = body;
+  if (typeof message !== "string" || !message.trim() || message.length > 32_000) {
     return NextResponse.json({ error: "message required" }, { status: 400 });
   }
-  if (hostUrl && !isLocalHost(hostUrl)) {
+  if (hostUrl !== undefined && (typeof hostUrl !== "string" || hostUrl.length > 4_096 || !isSupportedHost(hostUrl))) {
     return NextResponse.json(
-      { error: "hostUrl must be localhost" },
+      { error: "hostUrl must be a supported AHP endpoint" },
       { status: 400 },
     );
   }
 
-  const cards = clientCards ?? getCardsFromDb();
+  if (!Array.isArray(workspaceScope) || workspaceScope.length > 256 ||
+      !workspaceScope.every((entry) => typeof entry === "string" && entry.length <= 4_096)) {
+    return NextResponse.json({ error: "Explicit workspaceScope is required." }, { status: 400 });
+  }
+  let cards: KanbanCard[] = [];
+  try {
+    if (hostUrl) cards = currentCoordinatorCards({ hostUrl, workspaceScope });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 });
+  }
   const selectedCard = selectedCardId
     ? cards.find((card) => card.id === selectedCardId)
     : undefined;
@@ -242,9 +220,15 @@ export async function POST(request: NextRequest) {
   const chatTurn = buildCtoChatTurn({
     message,
     boardContext: buildBoardContext(cards),
-    gateSummary: getGateSummary(),
+    gateSummary: cards.filter((card) => card.gateBlocker).slice(0, 10)
+      .map((card) => `${card.id}: ${card.gateBlocker}`).join("\n"),
+    authorityContext: `Board default: ${getCoordinatorDefaultMode()}. Selected workspaces: ${JSON.stringify(workspaceScope)} (empty means connected board workspaces). Use list_sessions for IDs and current per-session modes. Observe drafts only; Verify checks/reviews only; Coordinate may delegate and follow up. No mode is upgraded by a chat instruction.`,
     selectedCardContext: selectedCard ? buildCardDetail(selectedCard) : undefined,
     actionsEnabled,
+    activeGoals: hostUrl ? listCoordinatorGoals({ hostUrl, workspaceScope }).filter((goal) =>
+      !["completed", "cancelled"].includes(goal.state)).slice(0, 10).map((goal) => ({
+        id: goal.id, revision: goal.revision, objective: goal.objective.slice(0, 500), state: goal.state,
+      })) : [],
   });
 
   let runtimeLease: CopilotRuntimeLease<CopilotClient>;
@@ -296,6 +280,7 @@ export async function POST(request: NextRequest) {
             executeToolCall(toolName, args, {
               hostUrl: hostUrl!,
               cards,
+              workspaceScope,
               idempotencyKey: auditKey,
               sdkSessionId: invocation.sessionId,
               toolCallId: invocation.toolCallId,

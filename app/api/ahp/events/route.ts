@@ -35,6 +35,8 @@ import type { InboxStreamEvent } from "@/lib/inbox/types";
 import { KanbanCard, type Phase, type RiskLevel } from "@/lib/types";
 import { registerDesktopHosts } from "@/lib/desktop/status";
 import { isWorkspaceEnabled } from "@/lib/orchestrator/config-file";
+import { registerCoordinatorHostReader } from "@/lib/orchestrator/coordinator-hosts";
+import { coordinatorGoalEvents } from "@/lib/orchestrator/coordinator-goal-events";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,6 +46,7 @@ type CardStreamEvent =
   | { type: "cardChanged"; card: KanbanCard; triage?: TriageEvent; pendingInputCleared?: boolean }
   | { type: "cardRemoved"; cardId: string; archivedSession?: ArchivedSession }
   | { type: "heartbeat"; action: HeartbeatAction }
+  | { type: "coordinatorGoalsChanged" }
   | InboxStreamEvent
   | ConnectionError;
 
@@ -254,6 +257,20 @@ registerDesktopHosts(() => Array.from(hostStreams.entries(), ([hostUrl, partitio
   connected: partition.resource.connected,
   running: partition.cards.filter((card) => card.runtime === "running").length,
 })));
+
+registerCoordinatorHostReader((hostUrl) => {
+  const partition = hostStreams.get(hostUrl);
+  if (!partition?.resource.connected) return undefined;
+  const scopes = Array.from(partition.subscribers.values())
+    .map((subscriber) => subscriber.workspaceScope)
+    .filter((scope): scope is Set<string> => scope !== null);
+  if (!scopes.length) return undefined;
+  return {
+    generation: partition.generation,
+    cards: partition.cards.filter(isWorkspaceEnabled),
+    scopes,
+  };
+});
 
 function getAutomationHosts() {
   return Array.from(hostStreams.entries())
@@ -566,6 +583,7 @@ function createRemoteStream(
   const streamId = nextStreamId++;
   let closed = false;
   let unsubscribeInbox: (() => void) | undefined;
+  let unsubscribeGoals: (() => void) | undefined;
   const epoch = crypto.randomUUID();
   let sequence = 0;
   const maxBufferedBytes = 8 * 1024 * 1024;
@@ -574,6 +592,7 @@ function createRemoteStream(
     if (closed) return;
     closed = true;
     unsubscribeInbox?.();
+    unsubscribeGoals?.();
     const partition = hostStreams.get(hostUrl);
     if (partition?.subscribers.size === 1 && partition.subscribers.has(streamId)) invalidateHostWork(hostUrl);
     const { activeHostCount } = hostStreams.unsubscribe(hostUrl, streamId);
@@ -639,6 +658,9 @@ function createRemoteStream(
         subscriber,
       );
       if (!archivedOnly) {
+        unsubscribeGoals = coordinatorGoalEvents.subscribe((changedHost) => {
+          if (changedHost === hostUrl) subscriber.send({ type: "coordinatorGoalsChanged" });
+        });
         unsubscribeInbox = inboxEvents.subscribe((event) => {
           if (inboxEventMatchesHost(event, hostUrl)) {
             subscriber.send(event);

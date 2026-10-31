@@ -87,8 +87,13 @@ export function projectSessionDetails(
   }
 
   const creationError = errorDetail(sessionState.creationError);
+  const outcome = latestTurn?.state === "complete" ? extractLastAgentMessage([latestTurn], 8_001) : undefined;
+  const chatUri = chatState?.resource ?? sessionState.defaultChat;
   return {
     lastAgentMessage: extractLastAgentMessage(turns),
+    outcomeEvidence: outcome && typeof latestTurn?.id === "string" && typeof chatUri === "string"
+      ? { chatUri, turnId: latestTurn.id, state: "complete", text: outcome.slice(0, 8_000), truncated: outcome.length > 8_000 }
+      : undefined,
     runtimeError: creationError
       ? {
           source: "creation",
