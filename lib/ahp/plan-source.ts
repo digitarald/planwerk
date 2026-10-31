@@ -6,6 +6,7 @@ export interface PlanSource {
   chatUri?: string;
   turnId?: string;
   requestId?: string;
+  publishedRequestId?: string;
 }
 
 export interface PlanEvidence {
@@ -54,10 +55,11 @@ export function isPlanSource(value: unknown, sessionUri: string): value is PlanS
   const source = record(value);
   if (!source || source.sessionUri !== sessionUri
     || typeof source.uri !== "string" || !source.uri.trim()) return false;
-  for (const key of ["chatUri", "turnId", "requestId"]) {
+  for (const key of ["chatUri", "turnId", "requestId", "publishedRequestId"]) {
     if (source[key] !== undefined && (typeof source[key] !== "string" || !source[key].trim())) return false;
   }
-  return source.requestId === undefined || (source.chatUri !== undefined && source.turnId !== undefined);
+  return (source.requestId === undefined && source.publishedRequestId === undefined)
+    || (source.chatUri !== undefined && source.turnId !== undefined);
 }
 
 export function hashPlanContent(content: string): string {

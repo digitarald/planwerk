@@ -10,9 +10,11 @@ import { classifyError, type ConnectionError } from "./connection-error";
 import { classifyAhpError } from "./rpc-error";
 import { enrichFromChangeset, type ChangesetEnrichment } from "./changeset-enricher";
 import { fetchSessionPlan } from "./plan-artifact";
+import { throwIfAborted } from "../abort";
+import { isPlanReviewRequest } from "./plan-source";
 import { extractModelFromConfig } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
-import { asSessionState, withSessionState } from "./snapshot";
+import { asSessionState, withSessionState, withChatState } from "./snapshot";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT, type CachedSession } from "@/lib/db/session-cache";
 import { getDb } from "@/lib/db/schema";
 import { claimSessionOwnership, isSessionOwnedByHost } from "@/lib/db/session-ownership";
@@ -36,7 +38,7 @@ import { currentToolFromChat, observeChatFacts, shouldObserveChat, visibleBackgr
 import { projectChatUsage } from "./chat-usage";
 import { mapWorkerChats, retainInactiveWorkers, type WorkerChatSummary } from "./worker-activity";
 import { getWorkerActivityHistory, recordWorkerActivity } from "@/lib/orchestrator/worker-activity-store";
-import { readSessionDetailsForState } from "./session-details";
+import { projectSessionDetails } from "./session-details-core";
 import {
   attachAHPSourceRevision,
   beginEvidenceRead,
@@ -285,13 +287,34 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
       versionAtStart = enrichmentVersions.get(sessionUri);
       return withSessionState(detailClient, sessionUri, async (state) => {
         if (!state) throw new Error("The agent host did not return session state");
-        const plan = await fetchSessionPlan(detailClient, sessionUri, state);
-        return Promise.all([
-          (session.changes?.files ?? 0) > 0 ? enrichFromChangeset(detailClient, sessionUri, state) : null,
-          plan,
-          session.model ?? extractModelFromConfig(state.config),
-          readSessionDetailsForState(detailClient, state),
-        ]);
+        const collect = async (chat?: ChatState) => {
+          let plan;
+          let planReadFailed = false;
+          try {
+            plan = await fetchSessionPlan(detailClient, sessionUri, state, undefined, chat);
+          } catch (error) {
+            throwIfAborted(readsController.signal);
+            warn("parent plan unavailable:", sessionUri, error instanceof Error ? error.message : error);
+            plan = null;
+            planReadFailed = true;
+          }
+          const changeset = (session.changes?.files ?? 0) > 0
+            ? await enrichFromChangeset(detailClient, sessionUri, state) : null;
+          const planUnavailable = planReadFailed || (plan === null && (state.inputNeeded ?? []).some(
+            (entry) => entry.kind === "chatInput" && isPlanReviewRequest(entry.request),
+          ));
+          if (changeset && planUnavailable) {
+            changeset.artifacts = changeset.artifacts.filter((artifact) => artifact.type !== "plan");
+            changeset.planContent = changeset.planContentHash = undefined;
+            changeset.planSource = undefined;
+          }
+          return [changeset, plan, session.model ?? extractModelFromConfig(state.config),
+            projectSessionDetails(state, chat)] as const;
+        };
+        const visibleDefault = state.chats.find((chat) => chat.resource === state.defaultChat);
+        return state.defaultChat && visibleDefault && visibleDefault.interactivity !== "hidden"
+          ? withChatState(detailClient, state.defaultChat, async (chat) => collect(chat), readsController.signal)
+          : collect();
       });
     }, readsController.signal)
       .then((result) => {

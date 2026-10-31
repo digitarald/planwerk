@@ -432,6 +432,18 @@ test("only closed benign formatting, naming, and test choices are allowed", () =
   assert.equal(authorizePendingElicitation(unrelated).allowed, false);
 });
 
+test("plan metadata changes authorization and its digest even for benign closed questions", () => {
+  const ordinary = safeInput();
+  const allowed = authorizePendingElicitation(ordinary);
+  assert.equal(allowed.allowed, true);
+  for (const planReview of [null, { questionId: "runner", actionIds: ["node", "vitest"], planUri: "file:///host/plan.md" }]) {
+    const plan = authorizePendingElicitation({ ...ordinary, planReview });
+    assert.equal(plan.allowed, false);
+    assert.notEqual(plan.digest, allowed.digest);
+    assert.match(plan.reason ?? "", /plan-bound/);
+  }
+});
+
 test("a new sensitive elicitation invalidates prior low risk and is rejected", () => {
   const db = createDb();
   const before = snapshot(db);

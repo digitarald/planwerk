@@ -1,10 +1,12 @@
 import { getCachedSession } from "../db/session-cache";
-import { getGateRunsForCard } from "./gate-engine";
+import { getGateRunsForCard, getNextPhase, getPersistedCardPhase } from "./gate-engine";
 import { getEffectiveCoordinatorMode } from "./coordinator-mode-store";
 import { resolveAuthoritativeGateRevision } from "./gate-revision";
 import { getDb } from "../db/schema";
-import type { KanbanCard } from "../types";
+import type { KanbanCard, Phase } from "../types";
 import type { ToolCallResult } from "./orchestrator-tools";
+import { getApplicableSkills, loadConfig } from "./skill-config";
+import { getRiskForAutomation } from "./risk-store";
 
 export function queryCoordinatorSessions(
   name: string,
@@ -53,18 +55,35 @@ export function queryCoordinatorSessions(
         nextOffset: null, truncated: card.outcomeEvidence?.truncated ?? Boolean(card.lastAgentMessage), provenance },
     };
   }
-  const revision = resolveAuthoritativeGateRevision(getDb(), card.id, card.phase, hostUrl);
+  const revisions = new Map<Phase, ReturnType<typeof resolveAuthoritativeGateRevision>>();
+  const revisionFor = (phase: Phase) => {
+    const existing = revisions.get(phase);
+    if (existing) return existing;
+    const revision = resolveAuthoritativeGateRevision(getDb(), card.id, phase, hostUrl);
+    revisions.set(phase, revision);
+    return revision;
+  };
+  const reviewedPhase = card.pendingInput?.planReview !== undefined ? "plan" : getPersistedCardPhase(card.id) ?? card.phase;
+  const next = getNextPhase(reviewedPhase);
+  const plan = cached?.enrichment?.planContent;
   return {
     success: true, message: `Cached evidence for ${card.title}. Idle and delivery are not task success.`,
     data: {
       ...summary(card), provenance, outcome: card.lastAgentMessage?.slice(0, 12_000),
       runtimeError: card.runtimeError, pendingInput: card.pendingInput,
-      plan: cached?.enrichment?.planContent?.slice(0, 12_000),
+      plan: plan?.slice(0, 12_000),
+      planTruncated: (plan?.length ?? 0) > 12_000,
+      planSource: cached?.enrichment?.planSource,
+      availableReviewSkills: next ? getApplicableSkills(`${reviewedPhase}->${next}`,
+        getRiskForAutomation(card.id, hostUrl), loadConfig(card.workingDirectory)).map((skill) => ({
+          id: skill.id, transition: `${reviewedPhase}->${next}`,
+        })) : [],
       planSteps: card.planSteps, reviewFindings: card.reviewFindings?.slice(0, 20),
-      gates: getGateRunsForCard(card.id).slice(0, 20).map((gate) => ({
-        ...gate, output: gate.output?.slice(0, 2_000),
-        current: revision.ok && gate.changesetRef === revision.changesetRef,
-      })),
+      gates: getGateRunsForCard(card.id).slice(0, 20).map((gate) => {
+        const revision = revisionFor(gate.fromPhase);
+        return { ...gate, output: gate.output?.slice(0, 2_000),
+          current: revision.ok && gate.changesetRef === revision.changesetRef };
+      }),
     },
   };
 }

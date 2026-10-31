@@ -14,7 +14,7 @@ export async function createAndStartSession(options: {
   beforeDispatch?: Parameters<typeof injectMessageWithClient>[4];
 }) {
   const provider = options.provider ?? "copilotcli";
-  const resource = options.resource ?? `${provider}:/${randomUUID()}`;
+  const resource = options.resource ?? `ahp-session:/${randomUUID()}`;
   return withAHPClient(options.hostUrl, async (client) => {
     assertOperationCurrent("interact");
     await runOperationEffect("interact", () => client.request("createSession", {

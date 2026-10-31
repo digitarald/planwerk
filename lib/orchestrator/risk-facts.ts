@@ -17,6 +17,7 @@ import { RISK_POLICY_VERSION } from "./risk-classifier.ts";
 export interface NormalizedPendingInput {
   requestId: string;
   kind: NonNullable<PendingInput["kind"]>;
+  planReview: boolean;
   message: string;
   questions: Array<{
     id: string;
@@ -146,6 +147,7 @@ export function normalizePendingInput(
   return {
     requestId: normalizeText(input.requestId),
     kind: input.kind ?? "elicitation",
+    planReview: input.planReview !== undefined,
     message: normalizeText(input.message),
     questions: input.questions.map(normalizeQuestion),
   };
@@ -232,12 +234,14 @@ export function authorizePendingElicitation(
       reason: "No server-observed pending input",
     };
   }
-  if (facts.kind !== "elicitation") {
+  if (facts.kind !== "elicitation" || facts.planReview) {
     return {
       allowed: false,
       digest,
       facts,
-      reason: "Pending input is not an automatable elicitation",
+      reason: facts.planReview
+        ? "Plan approval requires the plan-bound review pipeline"
+        : "Pending input is not an automatable elicitation",
     };
   }
   if (!facts.requestId || facts.questions.length !== 1 || !facts.questions[0]?.id) {

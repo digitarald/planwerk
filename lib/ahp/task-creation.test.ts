@@ -180,7 +180,7 @@ test("creation uses current values, unique progress token, and model on the firs
   const events: string[] = [];
   const result = await performTaskCreation({ ...input, provider: resolved.provider, config: resolved.values, model: resolved.model, revision: resolved.revision }, (event) => events.push(event.type === "stage" ? event.stage : event.type));
   assert.equal(result.outcome, "started");
-  assert.equal(result.resource, `copilotcli:/${input.requestId}`);
+  assert.equal(result.resource, `ahp-session:/${input.requestId}`);
   assert.deepEqual(state.creates[0].config, resolved.values);
   assert.deepEqual(state.creates[0].workingDirectories, ["file:///workspace"]);
   assert.equal(state.creates[0].activeClient, undefined);

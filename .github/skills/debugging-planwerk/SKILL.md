@@ -476,10 +476,21 @@ Contents worth reading there:
 `lib/ahp/plan-artifact.ts` reads the original input request's published
 `planReview.planUri` through `resourceRead`, with its owning chat and exact
 request turn verified. There is no legacy session-state discovery or UUID
-fallback. `planReview.content` can be a summary, not the complete plan.
+fallback. Planwerk's UI and coordinator create host-owned `ahp-session:/`
+identities independently of the selected provider. `planReview.content` can be
+a summary, not the complete plan.
 Missing metadata, multiple pending plans, denied resources and empty content
 are unavailable evidence. For non-pending plans, a single readable plan in a
-ready session changeset remains supported.
+ready session changeset remains supported. After approval, the latest published
+plan request in the original default chat remains a discovery source. Its URI
+is read again; a newer unpublished plan never falls back to an older one or a
+peer's plan. `planSource.publishedRequestId` identifies completed publication;
+`requestId` identifies still-pending approval. Chat/turn/publication drift
+invalidates that evidence.
+Live enrichment reuses its owned default-chat read for plan and outcome facts.
+A failed plan read clears plan authority, but preserves independently collected
+code and transcript facts. Explicit full evidence capture still fails as a whole
+when its required plan resource cannot be read.
 Inspect `enrichment_json.planSource` and `planContent` alongside
 `planContentHash`. The hash is SHA-256 over the exact captured UTF-8 text;
 Markdown indentation changes invalidate old verdicts.
@@ -650,6 +661,20 @@ dispatch, keyed by host/session/original request. Inspect its `plan_ref`, `actio
 `consumed` requires the original host input to disappear. A changed hash/action
 does not authorize a second answer to the same request. Explicit human input
 keeps its existing route and is not governed by automatic-answer receipts.
+
+The generic coordinator `answer_input` lane rejects every recognized plan input,
+including unsupported metadata, before benign-question policy is evaluated.
+Plan classification participates in the authorization/risk digest. Plan approval
+belongs only to the plan-bound review pipeline.
+`POST /api/orchestrator/review` validates the requested adjacent transition and
+folder-configured skill, resolves evidence for that transition rather than the
+card's persisted column, and reports reused work as `existing`.
+`read_session.availableReviewSkills` lists the actual configured IDs;
+`trigger_review` accepts those IDs and validates their applicability server-side.
+Gate readouts check each run against its own reviewed phase. A pending plan
+request projects Plan-to-Build gates even if the card remains in Build.
+`read_session.planTruncated` discloses its bounded plan preview; use the published
+resource in `planSource` for the complete plan, not that preview as review input.
 
 **Plan-review feedback not applied** — look for `plan-feedback-delivered` versus
 `plan-review-failed` in `heartbeat_log`. The former is emitted only after the

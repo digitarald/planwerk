@@ -8,15 +8,18 @@ import {
   loadConfig,
   getApplicableSkills,
 } from "@/lib/orchestrator/skill-config";
-import type { RiskLevel } from "@/lib/types";
+import { PHASE_ORDER, type RiskLevel } from "@/lib/types";
 import { getRiskForAutomation } from "@/lib/orchestrator/risk-store";
 import { getDb } from "@/lib/db/schema";
 import {
   getCardPhase,
+  getNextPhase,
 } from "@/lib/orchestrator/gate-engine";
 import { resolveAuthoritativeGateRevision } from "@/lib/orchestrator/gate-revision";
 import { normalizeChangesetRef } from "@/lib/types";
 import { validateLocalMutationRequest } from "@/lib/http/local-mutation";
+import { getCachedSession } from "@/lib/db/session-cache";
+import { ahpErrorResponse } from "@/lib/ahp/api-error";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -51,21 +54,31 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const config = loadConfig();
-  const skill = config.skills[skillId];
+  if (sessionUri !== cardId) {
+    return NextResponse.json({ error: "sessionUri must identify the reviewed card" }, { status: 400 });
+  }
+  const cached = getCachedSession(hostUrl, cardId);
+  const phase = getCardPhase(cardId);
+  const transition = phaseTransition ?? `${phase}->${getNextPhase(phase)}`;
+  const reviewedPhase = PHASE_ORDER.find((phase) =>
+    getNextPhase(phase) !== null && transition === `${phase}->${getNextPhase(phase)}`);
+  if (!reviewedPhase) {
+    return NextResponse.json({ error: "A valid adjacent phaseTransition is required" }, { status: 400 });
+  }
+  const config = loadConfig(cached?.summary.workingDirectory);
+  const risk = getRiskForAutomation(cardId, hostUrl);
+  const skill = getApplicableSkills(transition, risk, config).find((skill) => skill.id === skillId);
   if (!skill) {
     return NextResponse.json(
-      { error: `Unknown skill: ${skillId}` },
+      { error: `Skill ${skillId} is not configured for ${transition} at ${risk} risk` },
       { status: 400 }
     );
   }
 
-  const transition = phaseTransition ?? "review->ship";
-  const phase = getCardPhase(cardId);
   const revision = resolveAuthoritativeGateRevision(
     getDb(),
     cardId,
-    phase,
+    reviewedPhase,
     hostUrl,
   );
   if (!revision.ok) {
@@ -88,35 +101,38 @@ export async function POST(request: NextRequest) {
       { status: 409 },
     );
   }
-  const risk = getRiskForAutomation(cardId, hostUrl);
-
-  const { reviewRunId, success } = await startReview(
-    hostUrl,
-    sessionUri,
-    cardId,
-    skill,
-    transition,
-    risk,
-    revision.changesetRef,
-    { signal: request.signal },
-  );
-
-  if (!success) {
-    return NextResponse.json(
-      { error: "Failed to start review", reviewRunId },
-      { status: 502 }
+  try {
+    const { reviewRunId, success, started } = await startReview(
+      hostUrl,
+      sessionUri,
+      cardId,
+      skill,
+      transition,
+      risk,
+      revision.changesetRef,
+      { signal: request.signal, independent: true },
     );
-  }
 
-  return NextResponse.json({
-    cardId,
-    skillId,
-    reviewRunId,
-    phaseTransition: transition,
-    riskLevel: risk,
-    status: "injected",
-    startedAt: new Date().toISOString(),
-  });
+    if (!success) {
+      return NextResponse.json(
+        { error: "Failed to start review", reviewRunId },
+        { status: 502 }
+      );
+    }
+
+    return NextResponse.json({
+      cardId,
+      skillId,
+      reviewRunId,
+      phaseTransition: transition,
+      riskLevel: risk,
+      status: started === false ? "existing" : "injected",
+      ...(started === false ? {} : { startedAt: new Date().toISOString() }),
+    });
+  } catch (error) {
+    console.error("[ahp:review] Failed to start configured review:", error);
+    return ahpErrorResponse(error, "Failed to start review");
+  }
 }
 
 export async function GET(request: NextRequest) {

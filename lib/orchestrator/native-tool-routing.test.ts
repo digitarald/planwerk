@@ -366,6 +366,68 @@ test("native plan review uses the pending plan transition without changing a per
   assert.equal((db.prepare("SELECT phase FROM card_phases WHERE card_id = ?").get(value.id) as { phase: string }).phase, "build");
 });
 
+test("coordinator readouts expose current plan and code gates plus configured custom reviewers", async () => {
+  const value = card("mixed-gates", "build");
+  const project = path.join(scratchRoot, "custom-plan-review");
+  mkdirSync(path.join(project, ".github"), { recursive: true });
+  writeFileSync(path.join(project, ".github/planwerk.yml"), `
+skills:
+  product-plan-critic:
+    prompt: /rubber-duck
+gates:
+  plan-to-build:
+    required:
+      - type: review
+        skill: product-plan-critic
+    optional: []
+`);
+  value.workingDirectory = project;
+  value.project = { path: project, name: "Custom" };
+  value.pendingInput = {
+    requestId: "request", questions: [],
+    planReview: { questionId: "choice", actionIds: ["interactive"], planUri: "file:///host/plan.md" },
+  };
+  const codeRef = seedAuthoritativeRevision(value);
+  const row = db.prepare("SELECT enrichment_json FROM session_cache WHERE session_uri = ?")
+    .get(value.id) as { enrichment_json: string };
+  const enrichment = JSON.parse(row.enrichment_json);
+  const content = "# Parent plan\n" + "x".repeat(19_950 - "# Parent plan\n".length);
+  enrichment.planContent = content;
+  enrichment.planContentHash = value.planContentHash = hashPlanContent(content);
+  db.prepare("UPDATE session_cache SET enrichment_json = ? WHERE session_uri = ?")
+    .run(JSON.stringify(enrichment), value.id);
+  for (const [fromPhase, toPhase, changesetRef] of [
+    ["plan", "build", value.planContentHash], ["build", "review", codeRef],
+  ] as const) {
+    const id = startGateRun({ cardId: value.id, fromPhase, toPhase, gateType: "review", changesetRef });
+    completeGateRun(id, "passed", "Reviewed");
+  }
+  let customStarted = false;
+  const tools = nativeTools([value], {
+    startReview: async (_host, _uri, _card, skill, transition, _risk, ref) => {
+      assert.equal(skill.id, "product-plan-critic");
+      assert.equal(transition, "plan->build");
+      assert.equal(ref, value.planContentHash);
+      customStarted = true;
+      return { success: true, reviewRunId: 99, started: true, disposition: "terminal" };
+    },
+  });
+  const read = await tools.find((tool) => tool.name === "read_session")!.handler!(
+    { cardId: value.id }, invocation("read_session", "mixed-read"),
+  ) as ToolResultObject;
+  const data = JSON.parse(read.textResultForLlm).data;
+  assert.equal(data.plan.length, 12_000);
+  assert.equal(data.planTruncated, true);
+  assert.equal(data.planContentHash, value.planContentHash);
+  assert.deepEqual(data.availableReviewSkills, [{ id: "product-plan-critic", transition: "plan->build" }]);
+  assert(data.gates.every((gate: { current: boolean }) => gate.current));
+  const trigger = await tools.find((tool) => tool.name === "trigger_review")!.handler!(
+    { cardId: value.id, skillId: "product-plan-critic" }, invocation("trigger_review", "custom-plan"),
+  ) as ToolResultObject;
+  assert.equal(trigger.resultType, "success");
+  assert.equal(customStarted, true);
+});
+
 for (const scenario of [
   { gateType: "typecheck", gateName: "Type Check" },
   { gateType: "test", gateName: "Test" },

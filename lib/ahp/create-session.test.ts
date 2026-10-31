@@ -27,9 +27,9 @@ registerHooks({
 });
 const { createAndStartSession } = await import("./create-session.ts");
 function admitted(operation: () => Promise<unknown>) {
-  const lease = new OperationAdmission().acquire("host", "copilotcli:/reserved")!;
+  const lease = new OperationAdmission().acquire("host", "ahp-session:/reserved")!;
   return withOperationContext({
-    hostUrl: "host", cardId: "copilotcli:/reserved", signal: new AbortController().signal,
+    hostUrl: "host", cardId: "ahp-session:/reserved", signal: new AbortController().signal,
     isCurrent: () => state.current, lease,
   }, operation).finally(() => lease.finish());
 }
@@ -37,28 +37,37 @@ function admitted(operation: () => Promise<unknown>) {
 test("shared create/start uses the actual reserved AHP resource and plan-first config", async () => {
   let recorded = false;
   const result = await admitted(() => createAndStartSession({
-    hostUrl: "host", resource: "copilotcli:/reserved", task: "Build feature", workingDirectory: "/workspace",
+    hostUrl: "host", resource: "ahp-session:/reserved", task: "Build feature", workingDirectory: "/workspace",
     beforeDispatch: (identity) => { recorded = true; assert.equal(identity.chatUri, "chat"); assert.equal(state.messages, 0); },
   }));
   assert.deepEqual(state.creates[0], {
-    channel: "copilotcli:/reserved", provider: "copilotcli", workingDirectories: ["/workspace"],
+    channel: "ahp-session:/reserved", provider: "copilotcli", workingDirectories: ["/workspace"],
     config: { mode: "plan", autoApprove: "autoApprove" },
   });
   assert.equal(recorded, true);
-  assert.deepEqual(result, { resource: "copilotcli:/reserved", success: true, chatUri: "chat", turnId: "message" });
+  assert.deepEqual(result, { resource: "ahp-session:/reserved", success: true, chatUri: "chat", turnId: "message" });
 });
 
 test("authority lost after create prevents its first instruction; partial create is surfaced", async () => {
   const before = state.messages;
   await assert.rejects(() => admitted(() => createAndStartSession({
-    hostUrl: "host", resource: "copilotcli:/reserved", task: "Build feature",
+    hostUrl: "host", resource: "ahp-session:/reserved", task: "Build feature",
     beforeStart: () => { state.current = false; },
   })), /cancelled/i);
   assert.equal(state.messages, before);
   state.current = true;
   state.failCreate = true;
   await assert.rejects(() => admitted(() => createAndStartSession({
-    hostUrl: "host", resource: "copilotcli:/reserved", task: "Build feature",
+    hostUrl: "host", resource: "ahp-session:/reserved", task: "Build feature",
   })), /transport failed after create/);
   assert.equal(state.messages, before);
+});
+
+test("unreserved creation mints a host-owned identity, separately from provider choice", async () => {
+  state.current = true;
+  state.failCreate = false;
+  const result = await createAndStartSession({ hostUrl: "host", provider: "copilotcli", task: "Plan a feature" });
+  assert.match(result.resource, /^ahp-session:\/[0-9a-f-]{36}$/);
+  assert.equal(state.creates.at(-1)?.channel, result.resource);
+  assert.equal(state.creates.at(-1)?.provider, "copilotcli");
 });
