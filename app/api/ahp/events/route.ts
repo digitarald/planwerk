@@ -87,6 +87,7 @@ function safeEnrich(
       gateStatus: "pending",
       attention: "stale",
       gateBlocker: "Card facts are unavailable. Automation is disabled.",
+      pendingInput: options?.pendingInput ?? undefined,
     };
   }
 }
