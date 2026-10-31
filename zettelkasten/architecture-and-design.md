@@ -110,6 +110,13 @@ conversation directory. Planwerk reads a pending request's published
 turn. It never guesses a backing SDK UUID or retains legacy discovery.
 An unambiguous in-tree plan can also come from a ready session changeset.
 
+Session creators always mint host-owned identities, independently of provider
+selection. Completed approvals retain their published plan URI in the original
+chat; discovery rereads its content and validates the latest publication.
+The live bridge shares its default-chat read between plan and outcome collection.
+Unavailable plan evidence does not erase independently collected code or outcome
+facts, but cannot authorize review or approval.
+
 The independent peer receives the complete plan text and provenance explicitly;
 plain `createChat` does not inherit the writer's conversation. Plan reviews
 always use `plan:<sha256-of-exact-text>`, independently of the persisted column.

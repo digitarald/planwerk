@@ -127,7 +127,7 @@ function needsHumanRecoveryResult(toolName: string): ToolCallResult {
 
 function coordinatorSessionResource(key: string): string {
   const digest = createHash("sha256").update(key).digest("hex");
-  return `copilotcli:/${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+  return `ahp-session:/${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }
 
 /**

@@ -8,6 +8,7 @@ import {
   WorkerActivity,
   normalizeChangesetRef,
   sourceChangesetRef,
+  type PendingInput,
 } from "@/lib/types";
 import {
   canAdvancePhase,
@@ -127,6 +128,7 @@ function computeGateBlocker(
 
 export interface EnrichOptions {
   hostUrl?: string;
+  pendingInput?: PendingInput | null;
   /** When false, read/attach status history but don't record the current
    *  activity. Used for cached rehydration so a stale cached activity can't be
    *  written with a fresh timestamp and surface as the card's "current" status. */
@@ -174,6 +176,7 @@ export function enrichSessionToCard(
   // Projection cannot advance an existing persisted phase. Only seed a new
   // live card; cached display and later re-projections are not gate authority.
   if (persistedPhase !== undefined) card.phase = persistedPhase;
+  if (card.runtime === "input-needed") card.pendingInput = options?.pendingInput ?? undefined;
   if (persistedPhase === undefined && options?.recordStatus !== false) {
     setCardPhase(session.resource, card.phase);
     authoritativeRisk = getAuthoritativeCardRisk(session.resource);
@@ -188,7 +191,8 @@ export function enrichSessionToCard(
     card.riskFactors = authoritativeRisk.assessment.factors;
   }
 
-  const nextPhase = getNextPhase(card.phase);
+  const reviewedPhase = card.pendingInput?.planReview !== undefined ? "plan" : card.phase;
+  const nextPhase = getNextPhase(reviewedPhase);
   // Freshness ref for the *display* gate status/blocker — must match what the
   // heartbeat uses so the rendered verdict agrees with what the orchestrator will
   // do. Plan→build gates key on the plan content; other transitions key on the
@@ -196,7 +200,7 @@ export function enrichSessionToCard(
   // (shared working-tree summary) → undefined ("unknown"), which never reads a
   // passing gate as stale.
   const changesetRef =
-    card.phase === "plan"
+    reviewedPhase === "plan"
       ? card.planContentHash
       : card.changesetVerified && card.sourceRevision
         ? sourceChangesetRef(card.sourceRevision)
@@ -204,7 +208,7 @@ export function enrichSessionToCard(
   if (nextPhase) {
     card.gateStatus = deriveGateStatus(
       session.resource,
-      card.phase,
+      reviewedPhase,
       nextPhase,
       riskPolicy.level,
       changesetRef,
@@ -234,11 +238,11 @@ export function enrichSessionToCard(
   if (nextPhase && card.gateStatus === "pending") {
     card.gateBlocker = computeGateBlocker(
       session.resource,
-      card.phase,
+      reviewedPhase,
       nextPhase,
       riskPolicy.level,
       reviewRuns,
-      `${card.phase}->${nextPhase}`,
+      `${reviewedPhase}->${nextPhase}`,
       changesetRef,
       card.workingDirectory
     );
@@ -256,7 +260,7 @@ export function enrichSessionToCard(
   // later pass already superseded. Precedence: runtime error/needs-human already
   // wins; escalation outranks coherence/stale.
   if (nextPhase && card.attention !== "error" && card.attention !== "needs-human") {
-    const transition = `${card.phase}->${nextPhase}`;
+    const transition = `${reviewedPhase}->${nextPhase}`;
     const latestStatusBySkill = new Map<string, string>();
     for (const run of reviewRuns) {
       if (run.phaseTransition !== transition) continue;

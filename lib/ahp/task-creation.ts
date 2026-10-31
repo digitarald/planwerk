@@ -87,7 +87,7 @@ export async function performTaskCreation(input: TaskCreationInput, notify: (eve
     const resolved = await resolveCreationConfiguration(client, { ...input, strict: true });
     if (input.revision && input.revision !== resolved.revision) throw new CreationConfigError("Task options changed on the host. Refresh task options before creating.");
     if (!input.revision && (input.config || input.model)) throw new CreationConfigError("Refresh task options before creating.");
-    resource = `${resolved.provider}:/${input.requestId}`;
+    resource = `ahp-session:/${input.requestId}`;
     stage = "creating";
     emit({ type: "stage", stage: "creating" });
     await client.request("createSession", {

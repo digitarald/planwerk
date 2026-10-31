@@ -18,6 +18,24 @@ function requestTurn(chat: ChatState | undefined, requestId: string): string {
   return matches[0].id;
 }
 
+function latestPublishedPlan(chat: ChatState | undefined) {
+  const turns = [...(chat?.turns ?? []), ...(chat?.activeTurn ? [chat.activeTurn] : [])];
+  for (const turn of turns.toReversed()) {
+    const parts = turn.responseParts.filter(
+      (part) => part.kind === "inputRequest" && isPlanReviewRequest(part.request),
+    );
+    if (!parts.length) continue;
+    if (parts.length !== 1 || parts[0].kind !== "inputRequest") {
+      throw new Error("The original chat publishes ambiguous plan evidence.");
+    }
+    const request = parts[0].request;
+    const review = readPlanReviewInput(request);
+    if (!review?.planUri) throw new Error("The latest parent plan has no complete published resource.");
+    return { uri: review.planUri, turnId: turn.id, publishedRequestId: request.id };
+  }
+  return undefined;
+}
+
 export async function fetchSessionPlan(
   client: AhpClient,
   sessionUri: string,
@@ -29,20 +47,28 @@ export async function fetchSessionPlan(
   const requests = (state.inputNeeded ?? []).filter(
     (entry) => entry.kind === "chatInput" && isPlanReviewRequest(entry.request),
   );
-  if (requests.length === 0) return null;
-  if (requests.length !== 1) throw new Error("More than one parent plan request is pending.");
+  if (requests.length > 1) throw new Error("More than one parent plan request is pending.");
   const entry = requests[0];
-  if (entry.kind !== "chatInput") return null;
-  const review = readPlanReviewInput(entry.request);
-  if (!review?.planUri) throw new Error("The host has not published a complete plan resource.");
+  if (entry && entry.kind !== "chatInput") return null;
   const budget = providedBudget ?? new EvidenceCaptureBudget();
   try {
-    const chat = providedChat?.resource === entry.chat
-      ? providedChat : await awaitAbortable(() => readChatState(client, entry.chat), budget.signal);
-    const source = {
-      sessionUri, uri: review.planUri, chatUri: entry.chat,
-      turnId: requestTurn(chat, entry.request.id), requestId: entry.request.id,
-    };
+    const chatUri = entry?.chat ?? state.defaultChat;
+    if (!chatUri) return null;
+    const chat = providedChat?.resource === chatUri
+      ? providedChat : await awaitAbortable(() => readChatState(client, chatUri, budget.signal), budget.signal);
+    let source: PlanEvidence["source"];
+    if (entry) {
+      const review = readPlanReviewInput(entry.request);
+      if (!review?.planUri) throw new Error("The host has not published a complete plan resource.");
+      source = {
+        sessionUri, uri: review.planUri, chatUri,
+        turnId: requestTurn(chat, entry.request.id), requestId: entry.request.id,
+      };
+    } else {
+      const published = latestPublishedPlan(chat);
+      if (!published) return null;
+      source = { sessionUri, chatUri, ...published };
+    }
     const content = await awaitAbortable(() => readTextResource(client, source.uri,
       (count) => budget.consumeDecodedBytes(count)), budget.signal);
     budget.assertCurrent();
@@ -80,6 +106,18 @@ export async function verifyPlanEvidence(
     const chat = await awaitAbortable(() => readChatState(client, entry.chat), budget.signal);
     if (requestTurn(chat, source.requestId) !== source.turnId) {
       throw new Error("The original plan request turn changed.");
+    }
+  }
+  if (source.publishedRequestId) {
+    if (!source.chatUri || state.defaultChat !== source.chatUri) {
+      throw new Error("The original plan chat changed.");
+    }
+    const chatUri = source.chatUri;
+    const chat = await awaitAbortable(() => readChatState(client, chatUri, budget.signal), budget.signal);
+    const published = latestPublishedPlan(chat);
+    if (!published || published.uri !== source.uri || published.turnId !== source.turnId
+      || published.publishedRequestId !== source.publishedRequestId) {
+      throw new Error("The latest published parent plan changed.");
     }
   }
   const content = await awaitAbortable(() => readTextResource(client, source.uri,

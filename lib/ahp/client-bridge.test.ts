@@ -103,6 +103,7 @@ function harness(status: number = AHPStatus.Idle) {
   return {
     root, client: client as unknown as AhpClient, reads, releases, shutdowns, emitted, cached, summary,
     seededCache, artifacts, actions, summaries, input: undefined as PendingInput | undefined,
+    planError: undefined as Error | undefined,
     setChat(value: ChatState) { chat = value; },
     ownsSession() { return owned; },
     setOwned(value: boolean) { owned = value; },
@@ -148,6 +149,7 @@ const hooks = registerHooks({
       export function hashPlanContent(content) { return "plan:" + content; }`;
     if (specifier === "./plan-artifact") source = `
       export async function fetchSessionPlan(_client, sessionUri) {
+        if(globalThis["${key}"].planError) throw globalThis["${key}"].planError;
         const artifact = globalThis["${key}"].artifacts.find((entry) => entry.type === "plan");
         return artifact ? { artifact, source: { sessionUri, uri: "file:///host/parent-plan.md" } } : null;
       }
@@ -180,6 +182,24 @@ const { invalidateEvidenceReads, publishEvidenceRefresh, publishOwnershipRecover
 const { readActiveSessionState, readSessionState, withSessionState } = await import("./snapshot.ts");
 const { fetchSessionDetails, resumeErroredTurn } = await import("./session-details.ts");
 const { injectMessageWithClient } = await import("./session-messenger.ts");
+
+test("failed plan discovery preserves unrelated code and transcript facts", async () => {
+  active = harness(AHPStatus.InProgress);
+  active.planError = new Error("Published parent plan unavailable");
+  active.setChat({
+    resource: "ahp-chat:/test", status: AHPStatus.InProgress,
+    turns: [{ id: "complete", state: "complete", responseParts: [{ kind: "markdown", content: "Writer outcome" }] }],
+  } as unknown as ChatState);
+  const bridge = await createAHPBridge({ hostUrl: "ws://fake", onEvent: (event) => active.emitted.push(event) });
+  await tick();
+  const facts = active.cached.get(uri)?.enrichment;
+  assert.equal(facts?.changesetVerified, true);
+  assert.equal(facts?.totalFileCount, 1);
+  assert.equal(facts?.lastAgentMessage, "Writer outcome");
+  assert.equal(facts?.planContentHash, undefined);
+  bridge();
+  await tick();
+});
 
 async function start(status: number = AHPStatus.Idle) {
   active = harness(status);

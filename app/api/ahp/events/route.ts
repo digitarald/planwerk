@@ -155,10 +155,8 @@ function projectRemoteEvent(
       });
       return false;
     }).map((s) => {
-      const card = safeEnrich(s, event.enrichments.get(s.resource), { hostUrl }, event.workers.get(s.resource));
       const pi = event.pendingInputs.get(s.resource);
-      if (pi) card.pendingInput = pi;
-      return card;
+      return safeEnrich(s, event.enrichments.get(s.resource), { hostUrl, pendingInput: pi }, event.workers.get(s.resource));
     });
     if (process.env.PLANWERK_DESKTOP_TOKEN) console.info("[performance]", JSON.stringify({
       metric: "server.project-init", durationMs: performance.now() - startedAt, cards: cards.length,
@@ -193,11 +191,9 @@ function projectRemoteEvent(
     return { type: "cardRemoved", cardId: event.session.resource, archivedSession };
   }
   archives.delete(event.session.resource);
-  const card = safeEnrich(event.session, event.enrichment, { hostUrl }, event.workers);
-  // Attach pending input if available (null means explicitly cleared)
-  if (event.pendingInput !== undefined) {
-    card.pendingInput = event.pendingInput ?? undefined;
-  }
+  const pendingInput = event.pendingInput !== undefined ? event.pendingInput
+    : hostStreams.get(hostUrl)?.cards.find((card) => card.id === event.session.resource)?.pendingInput;
+  const card = safeEnrich(event.session, event.enrichment, { hostUrl, pendingInput }, event.workers);
   return {
     type: "cardChanged",
     card,
@@ -304,12 +300,9 @@ function reprojectCard(
   const refreshed = safeEnrich(
     cached.summary,
     cached.enrichment,
-    { recordStatus: false, hostUrl },
+    { recordStatus: false, hostUrl, pendingInput: existing.pendingInput },
     existing.workers,
   );
-  if (existing.pendingInput && refreshed.runtime === "input-needed") {
-    refreshed.pendingInput = existing.pendingInput;
-  }
   partition.cards = [
     ...partition.cards.filter((card) => card.id !== cardId),
     refreshed,

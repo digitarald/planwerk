@@ -123,3 +123,51 @@ test("plan request classification uses host metadata, including unsupported requ
   assert.equal(readPlanReviewInput({ _meta: { purpose: "planReview" } }), null);
   assert.deepEqual(readPlanReviewInput(request), { questionId: "question-1", actionIds: ["interactive"], planUri: uri });
 });
+
+test("completed parent plan remains discoverable and current after approval", async () => {
+  const content = "# SDK / AHP adoption plan\n" + "x".repeat(19_950 - "# SDK / AHP adoption plan\n".length);
+  const host = client(content);
+  const completed = {
+    ...chat, activeTurn: undefined,
+    turns: [{ id: "writer-turn", responseParts: [{ kind: "inputRequest", request, response: "accept" }] }],
+  } as unknown as ChatState;
+  const idle = { defaultChat: chatUri, inputNeeded: [] } as unknown as SessionState;
+  const plan = await fetchSessionPlan(host.value, sessionUri, idle, undefined, completed);
+  assert(plan);
+  assert.equal(plan.artifact.contentRef, content);
+  assert.equal(plan.source.requestId, undefined);
+  assert.deepEqual(plan.source, { sessionUri, uri, chatUri, turnId: "writer-turn", publishedRequestId: request.id });
+  const subscribed = {
+    ...host.value,
+    async subscribe() { return {
+    result: { snapshot: { resource: chatUri, state: completed } }, subscription: { async close() {} },
+    }; },
+  } as unknown as AhpClient;
+  const budget = new EvidenceCaptureBudget();
+  try {
+    await verifyPlanEvidence(subscribed, idle, { content, changesetRef: hashPlanContent(content), source: plan.source }, budget);
+    await assert.rejects(verifyPlanEvidence(subscribed, { ...idle, defaultChat: "ahp-chat:/other" },
+      { content, changesetRef: hashPlanContent(content), source: plan.source }, budget), /original plan chat/);
+    completed.turns.push({
+      ...completed.turns[0], id: "new-writer-turn",
+    });
+    await assert.rejects(verifyPlanEvidence(subscribed, idle,
+      { content, changesetRef: hashPlanContent(content), source: plan.source }, budget), /latest published parent plan/);
+  } finally { budget.dispose(); }
+});
+
+test("a newer unpublished plan never falls back to an older published plan or a peer", async () => {
+  const host = client();
+  const history = {
+    ...chat, activeTurn: undefined,
+    turns: [
+      { id: "old", responseParts: [{ kind: "inputRequest", request, response: "accept" }] },
+      { id: "new", responseParts: [{ kind: "inputRequest", request: {
+        ...request, id: "new-request", planReview: { ...request.planReview, planUri: undefined },
+      }, response: "accept" }] },
+    ],
+  } as unknown as ChatState;
+  await assert.rejects(fetchSessionPlan(host.value, sessionUri,
+    { defaultChat: chatUri, inputNeeded: [] } as unknown as SessionState, undefined, history), /latest parent plan/);
+  assert.deepEqual(host.reads, []);
+});

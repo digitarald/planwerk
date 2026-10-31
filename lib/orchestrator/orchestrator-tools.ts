@@ -156,14 +156,8 @@ export const ORCHESTRATOR_TOOLS = [
           cardId: { type: "string", minLength: 1, description: "Card ID to review" },
           skillId: {
             type: "string",
-            enum: [
-              "plan-review",
-              "code-review",
-              "review-report",
-              "security-review",
-              "architecture-review",
-            ],
-            description: "Review skill to trigger",
+            minLength: 1,
+            description: "Configured review skill ID from read_session.availableReviewSkills",
           },
         },
         required: ["cardId", "skillId"],
