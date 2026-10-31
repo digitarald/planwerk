@@ -15,7 +15,20 @@ import {
   throwIfAborted,
 } from "../abort.ts";
 import { withAHPClient } from "./client-operation";
-import { readChatState, readRootState, withSessionState } from "./snapshot";
+import { readChatState, readRootState, withSessionState, withChatState } from "./snapshot";
+import { EvidenceCaptureBudget } from "./evidence-budget";
+import { verifyPlanEvidence } from "./plan-artifact";
+import { readReviewSourceDigest } from "./changeset-enricher";
+import type { PlanEvidence } from "./plan-source";
+import { getDb } from "../db/schema";
+import { claimPlanAnswer, completePlanAnswer } from "../db/plan-answer-store";
+import { resolveAuthoritativeGateRevision } from "../orchestrator/gate-revision";
+
+interface PlanAnswer {
+  hostUrl: string;
+  evidence: PlanEvidence;
+  action: "approve" | "feedback";
+}
 import { AHPStatus, parseAHPStatus } from "./types";
 import { buildPlanFeedbackAnswer } from "./answer-value";
 import {
@@ -174,10 +187,13 @@ export async function startPeerChatReview(
   message: string,
   options?: {
     signal?: AbortSignal;
+    plan?: import("./plan-source").PlanEvidence;
     beforeDispatch?: (identity: {
       chatUri: string;
       turnId: string;
       disposablePeerChat: boolean;
+      planSourceJson?: string;
+      sourceDigest?: string;
     }) => void;
   },
 ): Promise<PeerChatReviewStart> {
@@ -215,8 +231,26 @@ export async function startPeerChatReview(
 
       const params = buildCreatePeerChatParams(sessionUri, crypto.randomUUID());
       reviewChatUri = params.chat;
+      const turnId = crypto.randomUUID();
       throwIfAborted(signal);
       access.assertCurrent();
+      let sourceDigest: string | undefined;
+      if (options?.plan) {
+        const budget = new EvidenceCaptureBudget(undefined, signal);
+        try {
+          await verifyPlanEvidence(client, sessionState, options.plan, budget);
+          sourceDigest = await readReviewSourceDigest(client, sessionUri, sessionState, budget);
+          access.assertCurrent();
+          await verifyPlanEvidence(client, access.getState() ?? sessionState, options.plan, budget);
+        } finally {
+          budget.dispose();
+        }
+      }
+      options?.beforeDispatch?.({
+        chatUri: reviewChatUri, turnId, disposablePeerChat: true,
+        planSourceJson: options?.plan ? JSON.stringify(options.plan.source) : undefined,
+        sourceDigest,
+      });
       const created = await runOperationEffect("verify", async () => {
         try {
           await createPeerChatWithCleanupOnFailure(client, params);
@@ -232,19 +266,18 @@ export async function startPeerChatReview(
       throwIfAborted(signal);
       access.assertCurrent();
       assertOperationCurrent("verify");
-      const turnId = crypto.randomUUID();
-      options?.beforeDispatch?.({
-        chatUri: reviewChatUri,
-        turnId,
-        disposablePeerChat: true,
-      });
-      const result = await runOperationEffect("verify", () => dispatchPeerChatReviewWithClient(
-        client,
-        params.chat,
-        turnId,
-        message,
-        signal,
-      ));
+      if (options?.plan) {
+        const budget = new EvidenceCaptureBudget(undefined, signal);
+        try {
+          await verifyPlanEvidence(client, access.getState() ?? sessionState, options.plan, budget);
+        } finally { budget.dispose(); }
+      }
+      const result = await withChatState(client, params.chat, async (_chat, chat) =>
+        runOperationEffect("verify", () => dispatchPeerChatReviewWithClient(
+          client, params.chat, turnId, message, signal,
+          () => chat.waitFor((state) => state?.activeTurn?.id === turnId
+            || state?.turns.some((turn) => turn.id === turnId) === true, 3_000, signal),
+        )), signal);
       if (!result.success) return result;
       debug(
         "Started peer-chat review",
@@ -278,6 +311,28 @@ export async function disposePeerChat(
   return withAHPClient(hostUrl, async (client) => {
     await client.request("disposeChat", { channel: chatUri });
   });
+}
+
+export async function verifyPlanReviewSource(
+  hostUrl: string,
+  sessionUri: string,
+  evidence: PlanEvidence,
+  sourceDigest: string | undefined,
+  signal?: AbortSignal,
+): Promise<void> {
+  return withAHPClient(hostUrl, (client) => withSessionState(client, sessionUri, async (state, access) => {
+    if (!state) throw new Error("Parent session state is unavailable.");
+    const budget = new EvidenceCaptureBudget(undefined, signal);
+    try {
+      await verifyPlanEvidence(client, state, evidence, budget);
+      if (sourceDigest !== undefined
+        && await readReviewSourceDigest(client, sessionUri, state, budget) !== sourceDigest) {
+        throw new Error("Source bytes changed during the report-only plan review.");
+      }
+      access.assertCurrent();
+      await verifyPlanEvidence(client, access.getState() ?? state, evidence, budget);
+    } finally { budget.dispose(); }
+  }, signal), signal);
 }
 
 /** Find a mirrored chat elicitation in `inputNeeded` by its `ChatInputRequest.id`. */
@@ -365,6 +420,7 @@ export async function answerInputWithClient(
     verifyTimeoutMs?: number;
     pollIntervalMs?: number;
     signal?: AbortSignal;
+    planAnswer?: PlanAnswer;
   },
 ): Promise<{ success: boolean; stale?: boolean }> {
   const verifyTimeoutMs = options?.verifyTimeoutMs ?? 3_000;
@@ -388,10 +444,41 @@ export async function answerInputWithClient(
       return { success: false, stale: true };
     }
 
+    const planAnswer = options?.planAnswer;
+    let receipt: string | null = null;
+    const validatePlan = () => {
+      access.assertCurrent();
+      if (!planAnswer) return;
+      const current = resolveAuthoritativeGateRevision(getDb(), sessionUri, "plan", planAnswer.hostUrl);
+      if (!current.ok || current.changesetRef !== planAnswer.evidence.changesetRef
+        || planAnswer.evidence.source.requestId !== requestId
+        || planAnswer.evidence.source.chatUri !== chatEntry.chat) {
+        throw new Error("Plan approval evidence changed before dispatch.");
+      }
+    };
+    if (planAnswer) {
+      const budget = new EvidenceCaptureBudget(undefined, signal);
+      try {
+        await verifyPlanEvidence(client, sessionState!, planAnswer.evidence, budget);
+        validatePlan();
+        assertOperationCurrent("interact");
+        receipt = claimPlanAnswer(getDb(), {
+          hostUrl: planAnswer.hostUrl, sessionUri, requestId,
+          planRef: planAnswer.evidence.changesetRef, action: planAnswer.action,
+        });
+        if (!receipt) {
+          console.warn("[ahp:input] Plan answer already reserved; refusing replay:", requestId);
+          return { success: false };
+        }
+      } finally { budget.dispose(); }
+    }
+
     return runOperationEffect("interact", async () => {
+      let recorded = false;
+      try {
       await dispatchInputCompletion(
         client, chatEntry.chat, requestId, response, answers, signal,
-        () => access.assertCurrent(),
+        validatePlan,
       );
       let applied: boolean;
       try {
@@ -407,12 +494,23 @@ export async function answerInputWithClient(
       }
 
       if (!applied) {
+        if (receipt) {
+          completePlanAnswer(getDb(), receipt, false, "Host consumption was not confirmed.");
+          recorded = true;
+        }
         debug("Answer dispatched but request not consumed (not applied):", requestId, "on", sessionUri);
         return { success: false };
       }
 
       debug("Answered input", requestId, "on", sessionUri, "(applied)");
+      if (receipt) {
+        completePlanAnswer(getDb(), receipt, true);
+        recorded = true;
+      }
       return { success: true };
+      } finally {
+        if (receipt && !recorded) completePlanAnswer(getDb(), receipt, false, "Plan answer was interrupted.");
+      }
     });
   }, signal);
 }
@@ -427,6 +525,7 @@ export function answerInput(
     verifyTimeoutMs?: number;
     pollIntervalMs?: number;
     signal?: AbortSignal;
+    planAnswer?: PlanAnswer;
   },
 ): Promise<{ success: boolean; stale?: boolean }> {
   const signal = options?.signal ?? getOperationSignal();
@@ -458,6 +557,7 @@ export function submitPlanFeedback(
   questionId: string,
   selectedAction: string,
   feedback: string,
+  plan?: PlanEvidence,
 ): Promise<{ success: boolean; stale?: boolean }> {
   const answer = {
     state: "submitted",
@@ -465,7 +565,7 @@ export function submitPlanFeedback(
   };
   return answerInput(hostUrl, sessionUri, requestId, "accept", {
     [questionId]: answer,
-  });
+  }, plan ? { planAnswer: { hostUrl, evidence: plan, action: "feedback" } } : undefined);
 }
 
 /**
@@ -527,6 +627,7 @@ export async function fetchChatTurnById(
 ): Promise<Turn | undefined> {
   return withAHPClient(hostUrl, async (client) => {
     const chatState = await readChatState(client, chatUri);
+    if (chatState?.backgroundWork?.length) return undefined;
     return chatState?.turns.find((turn) => turn.id === turnId);
   });
 }

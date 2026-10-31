@@ -10,7 +10,7 @@ import { type AHPSessionSummary, type AHPEvent, AHPStatus, shouldShowSession } f
 import { classifyError, type ConnectionError } from "./connection-error";
 import { classifyAhpError } from "./rpc-error";
 import { enrichFromChangeset, type ChangesetEnrichment } from "./changeset-enricher";
-import { fetchCopilotCliArtifacts } from "./plan-artifact";
+import { fetchSessionPlan } from "./plan-artifact";
 import { extractModelFromConfig } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
 import { asChatState, asSessionState, withSessionState } from "./snapshot";
@@ -228,8 +228,7 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
    * Trigger async changeset enrichment for a session. On completion,
    * re-emits the card with enrichment data applied.
    *
-   * Also fetches plan.md from Copilot CLI session-state as a fallback
-   * artifact source (plan.md lives outside the git working tree).
+   * Also reads the original request's host-published plan resource.
    */
   // Track sessions that changed while enrichment was in-flight
   const dirtyEnrichments = new Set<string>();
@@ -286,9 +285,10 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
       versionAtStart = enrichmentVersions.get(sessionUri);
       return withSessionState(detailClient, sessionUri, async (state) => {
         if (!state) throw new Error("The agent host did not return session state");
+        const plan = await fetchSessionPlan(detailClient, sessionUri, state);
         return Promise.all([
           (session.changes?.files ?? 0) > 0 ? enrichFromChangeset(detailClient, sessionUri, state) : null,
-          fetchCopilotCliArtifacts(detailClient, sessionUri, session.modifiedAt, readsController),
+          plan,
           session.model ?? extractModelFromConfig(state.config),
           readSessionDetailsForState(detailClient, state),
         ]);
@@ -296,7 +296,7 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
     }, readsController.signal)
       .then((result) => {
         if (!result) return;
-        const [changesetResult, sessionArtifacts, model, sessionDetails] = result;
+        const [changesetResult, sessionPlan, model, sessionDetails] = result;
         if (disposed || !sessions.has(sessionUri) || !ownsSession(sessionUri)
           || !isEvidenceReadCurrent(hostUrl, sessionUri, readGeneration)) return;
 
@@ -319,8 +319,9 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
 
         const fresh = mergeFreshEnrichment(
           changesetResult,
-          sessionArtifacts,
+          sessionPlan ? [sessionPlan.artifact] : [],
           sessionDetails,
+          sessionPlan?.source,
         );
         const enrichment = fresh ? bindEnrichment(current, fresh) : null;
         if (enrichment) {

@@ -4,8 +4,10 @@ import { registerHooks } from "node:module";
 import path from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { RpcError, type AhpClient } from "@microsoft/agent-host-protocol/client";
+import type { AhpClient } from "@microsoft/agent-host-protocol/client";
+import type { ChatState, SessionState } from "@microsoft/agent-host-protocol";
 import { EvidenceCaptureBudget, EvidenceCaptureLimitError } from "./evidence-budget.ts";
+import { hashPlanContent, isPlanReviewRequest, readPlanReviewInput } from "./plan-source.ts";
 
 const hooks = registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -18,54 +20,106 @@ const hooks = registerHooks({
   },
 });
 after(() => hooks.deregister());
-const { fetchCopilotCliArtifacts } = await import("./plan-artifact.ts");
+const { fetchSessionPlan, verifyPlanEvidence } = await import("./plan-artifact.ts");
+const sessionUri = "ahp-session:/12345678-1234-1234-1234-123456789abc";
+const chatUri = "ahp-chat://parent/encoded-session";
+const uri = "file:///host-owned/custom-home/sdk-conversation-not-ahp-id/plan.md";
+const request = {
+  id: "request-1", questions: [],
+  _meta: { purpose: "planReview" },
+  planReview: { answerQuestionId: "question-1", actions: [{ id: "interactive" }], planUri: uri, content: "Only a summary" },
+};
+const state = {
+  inputNeeded: [{ kind: "chatInput", id: "opaque", chat: chatUri, request }],
+} as unknown as SessionState;
+const chat = {
+  resource: chatUri, turns: [],
+  activeTurn: { id: "writer-turn", responseParts: [{ kind: "inputRequest", request }] },
+} as unknown as ChatState;
 
-test("artifact misses are scoped to the observing connection and its revision", async () => {
-  let missingReads = 0;
-  const missing = { async request() { missingReads++; throw new RpcError(-32008, "Not found"); } } as unknown as AhpClient;
-  let existingReads = 0;
-  const existing = { async request() { existingReads++; return { encoding: "utf-8", data: "Current plan" }; } } as unknown as AhpClient;
-  const session = "copilotcli:/12345678-1234-1234-1234-123456789abc";
-  assert.deepEqual(await fetchCopilotCliArtifacts(missing, session, "rev-1"), []);
-  assert.deepEqual(await fetchCopilotCliArtifacts(missing, session, "rev-1"), []);
-  assert.equal(missingReads, 2);
-  assert.equal((await fetchCopilotCliArtifacts(existing, session, "rev-1")).length, 2);
-  assert.equal(existingReads, 2);
-  await fetchCopilotCliArtifacts(missing, session, "rev-2");
-  assert.equal(missingReads, 4);
+function client(content = "# Actual plan", encoding = "utf-8") {
+  const reads: string[] = [];
+  return {
+    reads,
+    value: {
+      async request(method: string, params: { uri: string }) {
+        assert.equal(method, "resourceRead");
+        reads.push(params.uri);
+        return { encoding, data: encoding === "base64" ? Buffer.from(content).toString("base64") : content };
+      },
+      async subscribe() {
+        return { result: { snapshot: { resource: chatUri, state: chat } },
+          subscription: { async close() {} } };
+      },
+      async unsubscribe() {},
+    } as unknown as AhpClient,
+  };
+}
+
+test("reads only the host-published parent resource with distinct SDK backing", async () => {
+  const host = client();
+  const plan = await fetchSessionPlan(host.value, sessionUri, state, undefined, chat);
+  assert.equal(plan?.artifact.contentRef, "# Actual plan");
+  assert.deepEqual(plan?.source, { sessionUri, uri, chatUri, turnId: "writer-turn", requestId: request.id });
+  assert.deepEqual(host.reads, [uri]);
 });
 
-test("a bridge shares misses across transient clients but not reconnects or other hosts", async () => {
-  let reads = 0;
-  const client = () => ({ async request() { reads++; throw new RpcError(-32008, "Not found"); } }) as unknown as AhpClient;
-  const session = "copilotcli:/12345678-1234-1234-1234-123456789abc";
-  const bridge = new AbortController();
-  await fetchCopilotCliArtifacts(client(), session, "v1", bridge);
-  await fetchCopilotCliArtifacts(client(), session, "v1", bridge);
-  assert.equal(reads, 2);
-  await fetchCopilotCliArtifacts(client(), session, "v1", new AbortController());
-  assert.equal(reads, 4);
+test("base64 Unicode plan bytes and exact whitespace survive capture", async () => {
+  const content = "# Plan\n\n    \u00e9 = 1\n";
+  const host = client(content, "base64");
+  const plan = await fetchSessionPlan(host.value, sessionUri, state, undefined, chat);
+  assert.equal(plan?.artifact.contentRef, content);
+  assert.notEqual(hashPlanContent(content), hashPlanContent(content.replace("    ", "")));
 });
 
-test("intentional captures propagate unreadable artifacts instead of certifying their absence", async () => {
-  const client = { async request() { throw new Error("transport interrupted"); } } as unknown as AhpClient;
-  const session = "copilotcli:/12345678-1234-1234-1234-123456789abc";
-  assert.deepEqual(await fetchCopilotCliArtifacts(client, session, "v1"), []);
-  await assert.rejects(fetchCopilotCliArtifacts(client, session, "v1", {}, true), /transport interrupted/);
-  const missing = { async request() { throw new RpcError(-32008, "Not found"); } } as unknown as AhpClient;
-  assert.deepEqual(await fetchCopilotCliArtifacts(missing, session, "v1", {}, true), []);
+test("missing, summary-only and ambiguous host evidence fail closed without guessed reads", async () => {
+  const host = client();
+  assert.equal(await fetchSessionPlan(host.value, sessionUri, { inputNeeded: [] } as unknown as SessionState), null);
+  assert.equal(await fetchSessionPlan(host.value, "copilotcli:/legacy", state), null);
+  const summaryOnly = { inputNeeded: [{ ...state.inputNeeded![0], request: {
+    ...request, planReview: { ...request.planReview, planUri: undefined },
+  } }] } as unknown as SessionState;
+  await assert.rejects(fetchSessionPlan(host.value, sessionUri, summaryOnly), /complete plan resource/);
+  await assert.rejects(fetchSessionPlan(host.value, sessionUri, {
+    inputNeeded: [state.inputNeeded![0], state.inputNeeded![0]],
+  } as unknown as SessionState), /More than one/);
+  await assert.rejects(fetchSessionPlan(host.value, sessionUri, state, undefined,
+    { ...chat, activeTurn: undefined } as ChatState), /turn is unavailable/);
+  assert.deepEqual(host.reads, []);
 });
 
-test("provider fallback artifacts share the cumulative decoded byte budget", async () => {
-  const budget = new EvidenceCaptureBudget({ maxFiles: 2, maxDecodedBytes: 3, timeoutMs: 1_000 });
-  const client = {
-    async request() { return { encoding: "base64", data: Buffer.from([0x80, 0x81]).toString("base64") }; },
-  } as unknown as AhpClient;
+test("denied resources are errors, not certified absence", async () => {
+  const host = client();
+  host.value.request = (async () => { throw new Error("Permission denied"); }) as AhpClient["request"];
+  await assert.rejects(fetchSessionPlan(host.value, sessionUri, state, undefined, chat), /Permission denied/);
+});
+
+test("capture observes decoded byte limits without truncating the plan", async () => {
+  const budget = new EvidenceCaptureBudget({ maxFiles: 1, maxDecodedBytes: 2, timeoutMs: 1_000 });
   try {
-    await assert.rejects(fetchCopilotCliArtifacts(client,
-      "copilotcli:/12345678-1234-1234-1234-123456789abc", "v1", {}, true, budget),
-    (error) => error instanceof EvidenceCaptureLimitError && error.detail === "byte-limit");
-  } finally {
-    budget.dispose();
-  }
+    await assert.rejects(fetchSessionPlan(client("long", "base64").value, sessionUri, state, budget, chat),
+      (error) => error instanceof EvidenceCaptureLimitError && error.detail === "byte-limit");
+  } finally { budget.dispose(); }
+});
+
+test("verification rejects changed content and stale original requests", async () => {
+  const host = client();
+  const plan = await fetchSessionPlan(host.value, sessionUri, state, undefined, chat);
+  assert(plan);
+  const evidence = { content: plan.artifact.contentRef!, changesetRef: hashPlanContent(plan.artifact.contentRef!), source: plan.source };
+  const budget = new EvidenceCaptureBudget();
+  try {
+    await verifyPlanEvidence(host.value, state, evidence, budget);
+    await assert.rejects(verifyPlanEvidence(client("# Changed").value, state, evidence, budget), /parent plan changed/);
+    await assert.rejects(verifyPlanEvidence(host.value, { inputNeeded: [] } as unknown as SessionState, evidence, budget),
+      /original plan request/);
+  } finally { budget.dispose(); }
+});
+
+test("plan request classification uses host metadata, including unsupported requests", () => {
+  assert.equal(isPlanReviewRequest(request), true);
+  assert.equal(isPlanReviewRequest({ _meta: { purpose: "planReview" } }), true);
+  assert.equal(isPlanReviewRequest({ questions: [{ options: [{ id: "autopilot" }] }] }), false);
+  assert.equal(readPlanReviewInput({ _meta: { purpose: "planReview" } }), null);
+  assert.deepEqual(readPlanReviewInput(request), { questionId: "question-1", actionIds: ["interactive"], planUri: uri });
 });

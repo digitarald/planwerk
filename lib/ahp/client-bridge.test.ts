@@ -140,10 +140,14 @@ const hooks = registerHooks({
       export function isSessionOwnedByHost(){return globalThis["${key}"].ownsSession();}`;
     if (specifier === "./changeset-enricher") source = `
       export async function enrichFromChangeset() { return ${JSON.stringify(enrichment)}; }
+      export async function readReviewSourceDigest() { return "source-digest"; }
       export function hashPlanContent(content) { return "plan:" + content; }`;
     if (specifier === "./plan-artifact") source = `
-      export async function fetchCopilotCliArtifacts() { return globalThis["${key}"].artifacts; }
-      export function clearPlanCache() {}`;
+      export async function fetchSessionPlan(_client, sessionUri) {
+        const artifact = globalThis["${key}"].artifacts.find((entry) => entry.type === "plan");
+        return artifact ? { artifact, source: { sessionUri, uri: "file:///host/parent-plan.md" } } : null;
+      }
+      export async function verifyPlanEvidence() {}`;
     if (specifier === "./telemetry-logs") source = `
       export function handleOtlpLogs() {}
       export async function rotateLogs() {}`;

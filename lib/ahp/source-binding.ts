@@ -4,6 +4,7 @@ import type { Artifact, PendingInput, SessionDetails } from "../types";
 import type { AHPSessionSummary } from "./types";
 import { hashPlanContent, type ChangesetEnrichment } from "./changeset-enricher";
 import { sourceBindingsMatch } from "./source-binding-match";
+import type { PlanSource } from "./plan-source";
 
 export interface RiskFactsSourceBinding {
   /** Catalog observation/invalidation fence, not a digest of file bytes. */
@@ -154,16 +155,19 @@ export function mergeFreshEnrichment(
   changesetResult: ChangesetEnrichment | null,
   sessionArtifacts: Artifact[],
   sessionDetails?: SessionDetails,
+  sessionPlanSource?: PlanSource,
 ): ChangesetEnrichment | null {
   if (!changesetResult && sessionArtifacts.length === 0
     && !sessionDetails?.lastAgentMessage && !sessionDetails?.runtimeError) return null;
   const artifacts = [...(changesetResult?.artifacts ?? [])];
   for (const artifact of sessionArtifacts) {
-    const index = artifacts.findIndex((candidate) => candidate.type === artifact.type);
-    if (index >= 0) artifacts.splice(index, 1, artifact);
-    else artifacts.push(artifact);
+    for (let index = artifacts.length - 1; index >= 0; index--) {
+      if (artifacts[index].type === artifact.type) artifacts.splice(index, 1);
+    }
+    artifacts.push(artifact);
   }
-  const planContent = artifacts.find((artifact) => artifact.type === "plan")?.contentRef;
+  const plans = artifacts.filter((artifact) => artifact.type === "plan");
+  const planContent = plans.length === 1 ? plans[0].contentRef : undefined;
   return {
     ...(changesetResult ?? {
       codeFileCount: 0, totalFileCount: 0, fileChanges: [], additions: 0, deletions: 0,
@@ -172,6 +176,7 @@ export function mergeFreshEnrichment(
     artifacts,
     planContent,
     planContentHash: planContent ? hashPlanContent(planContent) : undefined,
+    planSource: sessionPlanSource ?? changesetResult?.planSource,
     lastAgentMessage: sessionDetails?.lastAgentMessage,
     runtimeError: sessionDetails?.runtimeError,
   };

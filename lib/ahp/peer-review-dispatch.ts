@@ -90,6 +90,7 @@ export async function dispatchPeerChatReviewWithClient(
   turnId: string,
   message: string,
   signal?: AbortSignal,
+  confirmStarted?: () => Promise<boolean>,
 ): Promise<PeerReviewDispatchResult> {
   try {
     await dispatchAndConfirm(
@@ -99,6 +100,13 @@ export async function dispatchPeerChatReviewWithClient(
       "The peer review prompt may have been dispatched before confirmation failed.",
       signal,
     );
+    if (confirmStarted) {
+      try {
+        if (!await confirmStarted()) throw new Error("The exact peer review turn was not observed.");
+      } catch (error) {
+        throw new MessageDispatchAmbiguousError("The host did not confirm the exact peer review turn.", { cause: error });
+      }
+    }
     return { success: true, chatUri, turnId };
   } catch (dispatchError) {
     const ambiguous = dispatchError instanceof MessageDispatchAmbiguousError;
@@ -111,14 +119,9 @@ export async function dispatchPeerChatReviewWithClient(
     });
 
     if (ambiguous) {
-      return {
-        success: false,
-        chatUri,
-        turnId,
-        failureKind: "ambiguous-disposed",
-        reason:
-          `${dispatchError.message} Peer chat disposal was confirmed; retry is safe.`,
-      };
+      throw new MessageDispatchAmbiguousError(dispatchError.message, {
+        cause: dispatchError, chatUri, turnId,
+      });
     }
 
     return {

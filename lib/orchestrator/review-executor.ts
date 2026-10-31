@@ -18,6 +18,7 @@ import {
   injectMessage,
   startPeerChatReview,
   disposePeerChat,
+  verifyPlanReviewSource,
 } from "@/lib/ahp/session-messenger";
 import {
   loadConfig,
@@ -62,6 +63,9 @@ import {
   assertOperationCurrent,
   getOperationSignal,
 } from "./operation-context";
+import { resolveAuthoritativeGateRevision } from "./gate-revision";
+import { appendPlanReviewEvidence } from "./review-prompt";
+import { isPlanSource, type PlanEvidence } from "../ahp/plan-source";
 
 const REVIEW_JUDGMENT_LEASE_MS = 60_000;
 
@@ -134,6 +138,8 @@ interface ReviewRunRow {
   chat_cleanup_error: string | null;
   chat_cleanup_attempts: number;
   chat_cleanup_last_attempt_at: string | null;
+  plan_source_json: string | null;
+  source_digest: string | null;
 }
 
 function mapRow(row: ReviewRunRow): ReviewRun {
@@ -313,6 +319,7 @@ export async function startReview(
   reviewRunId: number;
   success: boolean;
   disposition: "terminal" | "retryable" | "needs-human";
+  started?: boolean;
 }> {
   if (normalizeChangesetRef(changesetRef) === "") {
     throw new Error(
@@ -320,6 +327,14 @@ export async function startReview(
     );
   }
   const db = getDb();
+  const planReview = phaseTransition === "plan->build";
+  const planRevision = planReview
+    ? resolveAuthoritativeGateRevision(db, cardId, "plan", hostUrl) : undefined;
+  const plan = planRevision?.ok ? planRevision.plan : undefined;
+  if (planReview && (!plan || plan.changesetRef !== changesetRef)) {
+    throw new Error("Cannot review a plan without matching complete parent evidence.");
+  }
+  if (planReview) skill = { ...skill, autoFix: false };
   const maxIterations = getEffectiveMaxIterations(skill.id, riskLevel);
   const signal = options?.signal ?? getOperationSignal();
   const startOwnerId = randomUUID();
@@ -354,11 +369,12 @@ export async function startReview(
       disposition: "needs-human",
     };
   }
-  if (startClaim.state === "active") {
+  if (startClaim.state === "active" || startClaim.state === "resolved") {
     return {
       reviewRunId: startClaim.reviewRunId,
       success: true,
       disposition: "terminal",
+      started: false,
     };
   }
   if (startClaim.state === "maxed") {
@@ -418,14 +434,17 @@ export async function startReview(
       throw new Error("Review start claim was lost before gate linkage.");
     }
 
-    const prompt = buildReviewPrompt(skill, iteration, maxIterations, cardId);
+    const basePrompt = buildReviewPrompt(skill, iteration, maxIterations, cardId);
+    const prompt = plan ? appendPlanReviewEvidence(basePrompt, plan) : basePrompt;
     const beforeDispatch = (identity: {
       chatUri: string;
       turnId: string;
       disposablePeerChat: boolean;
+      planSourceJson?: string;
+      sourceDigest?: string;
     }) => {
       assertOperationCurrent(
-        skill.autoFix ? "review-edits" : options?.independent || options?.pendingRequestId ? "verify" : "interact",
+        skill.autoFix ? "review-edits" : planReview || options?.independent || options?.pendingRequestId ? "verify" : "interact",
       );
       dispatchPreparation = prepareOwnedReviewDispatch(
         db,
@@ -444,14 +463,14 @@ export async function startReview(
       }
     };
     const usePeerChat =
-      options?.independent === true || Boolean(options?.pendingRequestId);
+      planReview || options?.independent === true || Boolean(options?.pendingRequestId);
     const injection = usePeerChat
       ? await startPeerChatReview(
           hostUrl,
           sessionUri,
           options?.pendingRequestId,
           prompt,
-          { signal, beforeDispatch },
+          { signal, beforeDispatch, plan },
         )
       : await injectMessage(
           hostUrl,
@@ -510,6 +529,7 @@ export async function startReview(
       reviewRunId,
       success,
       disposition: success ? "terminal" : "retryable",
+      started: success,
     };
   } catch (err) {
     if (dispatchPreparation?.state === "blocked") {
@@ -621,6 +641,7 @@ export async function processReviewResult(
   }
 
   const run = mapRow(row as ReviewRunRow);
+  const planRun = run.phaseTransition === "plan->build";
   const freshness = failOwnedReviewIfSourceChanged(
     db,
     reviewRunId,
@@ -667,6 +688,7 @@ export async function processReviewResult(
 
   let result: (ReviewVerdict & { action: ReviewAction }) | null = null;
   let committed = false;
+  let sourceGuard: import("../db/review-run-store").OwnedReviewOutcome["sourceGuard"];
   try {
     let verdict: ReviewVerdict;
     try {
@@ -694,7 +716,7 @@ export async function processReviewResult(
         } else {
           const evidence = extractReviewEvidence(turn);
           const judgment = await awaitAbortable(
-            () => judgeReviewResponse(evidence.response),
+            () => judgeReviewResponse(evidence.response, planRun ? run.changesetRef ?? undefined : undefined),
             signal,
           );
           verdict = { ...judgment, madeEdits: evidence.madeEdits };
@@ -719,6 +741,34 @@ export async function processReviewResult(
     const config = loadConfig(projectPath);
     const riskLevel = getRiskForAutomation(run.cardId, hostUrl);
     const maxIterations = run.maxIterations;
+    if (planRun) {
+      const revision = resolveAuthoritativeGateRevision(db, run.cardId, "plan", hostUrl);
+      try {
+        const source: unknown = row.plan_source_json ? JSON.parse(row.plan_source_json) : undefined;
+        if (!revision.ok || !revision.plan || revision.changesetRef !== run.changesetRef
+          || !isPlanSource(source, run.cardId) || !row.source_digest
+          || JSON.stringify(source) !== JSON.stringify(revision.plan.source)) {
+          throw new Error("Complete, current plan review provenance is unavailable.");
+        }
+        const evidence: PlanEvidence = { ...revision.plan, source };
+        await verifyPlanReviewSource(hostUrl, run.cardId, evidence, row.source_digest, signal);
+        throwIfAborted(signal);
+        assertOperationCurrent();
+        sourceGuard = {
+          hostUrl, changesetRef: revision.changesetRef, sourceRevision: revision.sourceRevision,
+        };
+        if (verdict.madeEdits) throw new Error("The plan reviewer used editing tools; report-only review cannot pass.");
+      } catch (error) {
+        console.warn("[review-executor] Plan review evidence rejected:", error instanceof Error ? error.message : error);
+        verdict = {
+          status: "needs-human", findings: [], madeEdits: verdict.madeEdits,
+          summary: error instanceof Error ? error.message : "Plan review evidence could not be verified.",
+        };
+      }
+    }
+    if (leaseState.failure !== undefined) return null;
+    throwIfAborted(signal);
+    assertOperationCurrent();
     const action = decideReviewAction(
       verdict,
       run.iteration,
@@ -733,6 +783,7 @@ export async function processReviewResult(
         findings: verdict.findings,
         gateStatus: "passed",
         gateOutput: verdict.summary,
+        sourceGuard,
       });
       result = committed ? { ...verdict, action } : null;
     } else if (action === "re-iterate") {

@@ -22,7 +22,7 @@ import {
 } from "./risk-store";
 import { riskAutomationPolicy } from "./risk-authority";
 import { shouldAutoAnswer, autoAnswer } from "./auto-answerer";
-import { answerInput, disposePeerChat, submitPlanFeedback } from "@/lib/ahp/session-messenger";
+import { answerInput, disposePeerChat, submitPlanFeedback, verifyPlanReviewSource } from "@/lib/ahp/session-messenger";
 import { syncCoherence } from "./coherence-engine";
 import { runCoherenceExecutor, type ReviewCardCtx } from "./coherence-reviewer";
 import { advanceReviewToShip } from "./phase-advance";
@@ -375,6 +375,9 @@ async function runTick(
   const activeCards = cards
     .filter(isCardAutomationEligible)
     .filter((card) => {
+      if (card.pendingInput?.planReview !== undefined) {
+        return resolveAuthoritativeGateRevision(getDb(), card.id, "plan", hostUrl).ok;
+      }
       if (card.phase === "define") return card.runtime === "input-needed";
       return resolveAuthoritativeGateRevision(
         getDb(),
@@ -694,7 +697,12 @@ async function completeReadyReviewsAfterDowngrade(
       hostUrl,
       card.id,
       review.id,
-      changesetRef,
+      review.phaseTransition === "plan->build"
+        ? (() => {
+          const plan = resolveAuthoritativeGateRevision(getDb(), card.id, "plan", hostUrl);
+          return plan.ok ? plan.changesetRef : undefined;
+        })()
+        : changesetRef,
       card.workingDirectory,
     );
     if (verdict?.action === "passed") {
@@ -787,8 +795,9 @@ async function processCard(
   }
   state.riskBlockers.delete(card.id);
   const riskLevel: RiskLevel = riskPolicy.level;
-  const revision = ["plan", "build", "review"].includes(card.phase)
-    ? resolveAuthoritativeGateRevision(getDb(), card.id, card.phase, hostUrl)
+  const reviewedPhase = card.pendingInput?.planReview !== undefined ? "plan" : card.phase;
+  const revision = ["plan", "build", "review"].includes(reviewedPhase)
+    ? resolveAuthoritativeGateRevision(getDb(), card.id, reviewedPhase, hostUrl)
     : null;
   if (revision && !revision.ok) {
     state.revisionBlockers.set(card.id, revision.reason);
@@ -829,6 +838,13 @@ async function processCard(
           coordinatorMode,
         );
         actions.push(...planActions);
+      } else if (card.pendingInput?.planReview !== undefined) {
+        const action: HeartbeatAction = {
+          type: "plan-review-failed", cardId: card.id,
+          reason: "The host plan approval request is unsupported or incomplete.",
+        };
+        emit(hostUrl, action);
+        actions.push(action);
       } else if (mayInteract && shouldAutoAnswer(hostUrl, card)) {
         // Regular clarifying question — auto-answer below the risk threshold.
         const result = await autoAnswer(hostUrl, card);
@@ -952,7 +968,7 @@ async function startPendingReviews(
     (skill) => shouldStartReview(card.id, skill.id, transition, changesetRef)
   );
   for (const skill of skills) {
-    const { success } = await startReviewForMode(
+    const { success, started } = await startReviewForMode(
       hostUrl,
       card.id,
       card.id,
@@ -962,7 +978,7 @@ async function startPendingReviews(
       changesetRef,
       coordinatorMode,
     );
-    if (success) {
+    if (success && started !== false) {
       const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: 1 };
       emit(hostUrl, action);
       actions.push(action);
@@ -1136,7 +1152,7 @@ async function runBuildPipeline(
           const skill = skills.find((s) => s.id === review.skillId);
           if (skill) {
             const sessionUri = card.id;
-            const { success } = await startReviewForMode(
+            const { success, started } = await startReviewForMode(
               hostUrl,
               sessionUri,
               card.id,
@@ -1146,7 +1162,7 @@ async function runBuildPipeline(
               changesetRef,
               coordinatorMode,
             );
-            if (success) {
+            if (success && started !== false) {
               const action: HeartbeatAction = {
                 type: "review-injected",
                 cardId: card.id,
@@ -1186,18 +1202,6 @@ async function runBuildPipeline(
 }
 
 /**
- * copilotcli plan-approval (exit-plan-mode) option IDs. A pending input whose
- * single-select options are drawn from this set is a plan approval, not a
- * regular clarifying question.
- */
-const PLAN_APPROVAL_ACTION_IDS = new Set([
-  "autopilot",
-  "autopilot_fleet",
-  "interactive",
-  "exit_only",
-]);
-
-/**
  * Detect a plan-approval input ("How would you like to proceed?" with
  * autopilot / interactive / approve-plan-only options). Returns the question
  * ID and the option to pick when auto-approving (an execute action, never the
@@ -1207,6 +1211,7 @@ const PLAN_APPROVAL_ACTION_IDS = new Set([
 function detectPlanApproval(
   input: PendingInput | undefined
 ): { questionId: string; approveOptionId: string } | null {
+  if (!input?.planReview) return null;
   if (!input || input.questions.length !== 1) return null;
   // Authentication and host-tool safety input must never be interpreted as a
   // plan approval, regardless of any coincidental select options.
@@ -1216,18 +1221,17 @@ function detectPlanApproval(
   // Every option must be a known plan-approval action (this avoids matching
   // generic single-select questions), and at least one must be an executable
   // (non-"exit_only") action so auto-approve can actually proceed.
-  const allApproval = q.options.every((o) => PLAN_APPROVAL_ACTION_IDS.has(o.id));
-  const hasExecute = q.options.some((o) => o.id !== "exit_only");
-  if (!allApproval || !hasExecute) return null;
+  if (q.id !== input.planReview.questionId) return null;
+  const allApproval = q.options.every((o) => input.planReview?.actionIds.includes(o.id));
+  if (!allApproval) return null;
 
   // Prefer an execute action (autopilot → autopilot_fleet → interactive) so
   // auto-approve actually proceeds; fall back to any non-"exit_only" option.
   const approve =
     q.options.find((o) => o.id === "autopilot") ??
     q.options.find((o) => o.id === "autopilot_fleet") ??
-    q.options.find((o) => o.id === "interactive") ??
-    q.options.find((o) => o.id !== "exit_only") ??
-    q.options[0];
+    q.options.find((o) => o.id === "interactive");
+  if (!approve) return null;
 
   return { questionId: q.id, approveOptionId: approve.id };
 }
@@ -1327,8 +1331,13 @@ async function runPlanApprovalPipeline(
     };
     // Only consumption confirms approval. Never retry an unconfirmed mutation:
     // the host may already have accepted it even though confirmation failed.
+    const current = resolveAuthoritativeGateRevision(getDb(), card.id, "plan", hostUrl);
+    if (!current.ok || !current.plan || current.changesetRef !== planRef) return;
     const result = await answerInput(
-      hostUrl, card.id, input.requestId, "accept", answers, { signal: getOperationSignal() });
+      hostUrl, card.id, input.requestId, "accept", answers, {
+        signal: getOperationSignal(),
+        planAnswer: { hostUrl, evidence: current.plan, action: "approve" },
+      });
 
     if (result.success) {
       const action: HeartbeatAction = { type: "plan-approved", cardId: card.id };
@@ -1352,7 +1361,7 @@ async function runPlanApprovalPipeline(
   if (!riskStillCurrent()) return actions;
   const policy = config.reviewPolicy[riskLevel];
   const planRef = normalizeChangesetRef(changesetRef);
-  if (!planRef) {
+  if (!/^plan:[0-9a-f]{64}$/.test(planRef)) {
     const action: HeartbeatAction = {
       type: "plan-review-failed",
       cardId: card.id,
@@ -1431,11 +1440,11 @@ async function runPlanApprovalPipeline(
       }
       continue;
     }
-    if (latest && fresh) continue;
+    if (latest && fresh && (latest.status !== "failed" || latest.verdictExtractedAt !== null)) continue;
     if (!config.orchestrator.autoInjectReviews) continue;
     if (!riskStillCurrent()) return actions;
 
-    const { success } = await startReviewForMode(
+    const { success, started } = await startReviewForMode(
       hostUrl,
       card.id,
       card.id,
@@ -1446,7 +1455,7 @@ async function runPlanApprovalPipeline(
       coordinatorMode,
       input.requestId,
     );
-    if (success) {
+    if (success && started !== false) {
       const action: HeartbeatAction = {
         type: "review-injected",
         cardId: card.id,
@@ -1455,7 +1464,7 @@ async function runPlanApprovalPipeline(
       };
       emit(hostUrl, action);
       actions.push(action);
-    } else {
+    } else if (!success) {
       const failed = getLatestReviewRun(card.id, skill.id, transition);
       const action: HeartbeatAction = {
         type: "plan-review-failed",
@@ -1501,7 +1510,7 @@ async function runPlanApprovalPipeline(
   }
 
   const blocking = refreshed.flatMap(({ skill, run }) => {
-    if (!run || run.status !== "failed") return [];
+    if (!run || run.status !== "failed" || run.changesetRef !== planRef) return [];
     const findings = readStoredReviewFindings(run.findingsJson);
     if (!findings || findings.length === 0) return [];
     return [{
@@ -1523,6 +1532,13 @@ async function runPlanApprovalPipeline(
     approval.questionId,
     approval.approveOptionId,
     feedback,
+    (() => {
+      const current = resolveAuthoritativeGateRevision(getDb(), card.id, "plan", hostUrl);
+      if (!current.ok || !current.plan || current.changesetRef !== planRef) {
+        throw new Error("The parent plan changed before feedback.");
+      }
+      return current.plan;
+    })(),
   );
 
   if (result.success) {
@@ -1630,6 +1646,13 @@ async function runPlanPipeline(
       canEnterPhase("build", allCards, config)
     ) {
       assertOperationCurrent("advance");
+      const current = resolveAuthoritativeGateRevision(getDb(), card.id, "plan", hostUrl);
+      if (!current.ok || !current.plan || current.changesetRef !== changesetRef) return actions;
+      await verifyPlanReviewSource(hostUrl, card.id, current.plan, undefined, getOperationSignal());
+      assertOperationCurrent("advance");
+      const latest = resolveAuthoritativeGateRevision(getDb(), card.id, "plan", hostUrl);
+      if (!latest.ok || latest.changesetRef !== changesetRef
+        || !canAdvancePhase(card.id, "plan", "build", card.workingDirectory, riskLevel, changesetRef).allowed) return actions;
       setCardPhase(card.id, "build");
       const action: HeartbeatAction = { type: "phase-advanced", cardId: card.id, from: "plan", to: "build" };
       emit(hostUrl, action);
@@ -1672,7 +1695,7 @@ async function runPlanPipeline(
           const skill = skills.find((s) => s.id === review.skillId);
           if (skill) {
             const sessionUri = card.id;
-            const { success } = await startReviewForMode(
+            const { success, started } = await startReviewForMode(
               hostUrl,
               sessionUri,
               card.id,
@@ -1682,7 +1705,7 @@ async function runPlanPipeline(
               changesetRef,
               coordinatorMode,
             );
-            if (success) {
+            if (success && started !== false) {
               const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: review.iteration + 1 };
               emit(hostUrl, action);
               actions.push(action);
@@ -1808,7 +1831,7 @@ async function runReviewPipeline(
           const skill = skills.find((s) => s.id === review.skillId);
           if (skill) {
             const sessionUri = card.id;
-            const { success } = await startReviewForMode(
+            const { success, started } = await startReviewForMode(
               hostUrl,
               sessionUri,
               card.id,
@@ -1818,7 +1841,7 @@ async function runReviewPipeline(
               changesetRef,
               coordinatorMode,
             );
-            if (success) {
+            if (success && started !== false) {
               const action: HeartbeatAction = { type: "review-injected", cardId: card.id, skillId: skill.id, iteration: review.iteration + 1 };
               emit(hostUrl, action);
               actions.push(action);

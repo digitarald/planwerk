@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { KanbanCard } from "../types.ts";
 import type { CoordinatorMode } from "./coordinator-mode.ts";
+import { hashPlanContent } from "../ahp/plan-source.ts";
 
 function deferred() {
   let resolve!: () => void;
@@ -23,6 +24,9 @@ const state = {
   assessments: [] as string[],
   phaseWrites: [] as string[],
   writes: [] as string[],
+  reviewedPhases: [] as string[],
+  requirePlanReview: false,
+  reviewRef: "",
   wipLimit: 10,
   intervalMs: 60_000,
   assess: async () => {},
@@ -54,12 +58,15 @@ const mocks: Record<string, string> = {
   }`,
   "./review-executor": `export function getActiveReviewRuns(){return []}
     export function getLatestReviewRun(){return null}
-    export function getRequiredReviewSkills(){return []}
+    export function getRequiredReviewSkills(){return ${s}.requirePlanReview ? [{id:"plan-critic",prompt:"/rubber-duck",autoFix:true}] : []}
     export function isReviewResultReady(){return false}
     export function shouldStartReview(){return false}
-    export async function startReview(){${s}.writes.push("review"); return {success:true}}
+    export async function startReview(_host,_session,_card,_skill,_transition,_risk,ref){
+      ${s}.reviewRef=ref;${s}.writes.push("review"); return {success:true,started:true}}
     export async function processReviewResult(){return null}`,
-  "./gate-engine": `export function canAdvancePhase(){return {allowed:true,pendingGates:[]}}
+  "./gate-engine": `export function canAdvancePhase(){return {
+      allowed:!${s}.requirePlanReview,
+      pendingGates:${s}.requirePlanReview ? [{gateType:"review",gateName:"plan-critic"}] : []}}
     export function setCardPhase(id,phase){${s}.phases.set(id,phase);${s}.phaseWrites.push(id)}
     export function getNextPhase(){return "review"}
     export function startGateRun(){return 1}
@@ -90,14 +97,20 @@ const mocks: Record<string, string> = {
       ${s}.writes.push("approve");return {success:true};
     }
     export async function disposePeerChat(){}
+    export async function verifyPlanReviewSource(){}
     export async function submitPlanFeedback(){${s}.writes.push("feedback");return {success:true}}`,
   "./coherence-engine": "export function syncCoherence(){return []}",
   "./coordinator-mode-store": `export function getEffectiveCoordinatorMode(){return ${s}.mode}`,
   "./coherence-reviewer": "export async function runCoherenceExecutor(){return []}",
   "./phase-advance": "export function advanceReviewToShip(){return {advanced:true,blockedBy:[]}}",
   "./review-chat-cleanup": "export async function retryPendingReviewChatCleanup(){}",
-  "./gate-revision": `export function resolveAuthoritativeGateRevision(){
-    return {ok:true,changesetRef:"source-1",sourceRevision:"source-1",hostUrl:"host"};
+  "./gate-revision": `export function resolveAuthoritativeGateRevision(_db,_card,phase){
+    ${s}.reviewedPhases.push(phase);
+    if (${s}.requirePlanReview && phase!=="plan") return {ok:false,reason:"No code evidence"};
+    return {ok:true,changesetRef:phase==="plan" ? ${JSON.stringify(hashPlanContent("# Plan"))} : "source-1",
+      sourceRevision:"source-1",hostUrl:"host",
+      plan:{content:"# Plan",changesetRef:${JSON.stringify(hashPlanContent("# Plan"))},
+        source:{sessionUri:_card,uri:"file:///host/plan.md",requestId:"request"}}};
   }`,
 };
 const hooks = registerHooks({
@@ -140,6 +153,9 @@ function reset(cards: KanbanCard[]) {
   state.assessments.length = 0;
   state.phaseWrites.length = 0;
   state.writes.length = 0;
+  state.reviewedPhases.length = 0;
+  state.requirePlanReview = false;
+  state.reviewRef = "";
   state.digest = "facts-1";
   state.wipLimit = 10;
   state.intervalMs = 60_000;
@@ -184,6 +200,40 @@ test("downgrade during assessment cannot use captured permission to answer input
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(state.writes, []);
   await stopHeartbeat();
+});
+
+test("a Build card awaiting plan approval reviews the plan without requiring code evidence or moving phase", async () => {
+  reset([{
+    ...card("parent"), phase: "build", runtime: "input-needed",
+    pendingInput: {
+      requestId: "request",
+      planReview: { questionId: "choice", actionIds: ["interactive"], planUri: "file:///host/plan.md" },
+      questions: [{ id: "choice", kind: "single-select", options: [{ id: "interactive", label: "Implement" }] }],
+    },
+  } as KanbanCard]);
+  state.requirePlanReview = true;
+  state.phases.set("parent", "build");
+  startHeartbeat(() => state.hosts, () => {});
+  await until(() => state.writes.includes("review"));
+  await stopHeartbeat();
+  assert.equal(state.reviewRef, hashPlanContent("# Plan"));
+  assert(state.reviewedPhases.every((phase) => phase === "plan"));
+  assert.deepEqual(state.phaseWrites, []);
+  assert(!state.writes.includes("answer"));
+  assert(!state.writes.includes("approve"));
+});
+
+test("an unsupported recognized plan request never becomes a generic auto-answer", async () => {
+  reset([{
+    ...card("unsupported"), phase: "build", runtime: "input-needed",
+    pendingInput: { requestId: "request", planReview: null, questions: [] },
+  } as KanbanCard]);
+  startHeartbeat(() => state.hosts, () => {});
+  await until(() => state.assessed.has("unsupported"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await stopHeartbeat();
+  assert.deepEqual(state.writes, []);
+  assert.deepEqual(state.phaseWrites, []);
 });
 
 test("retiring a host during assessment prevents stale risk/phase writes without needing live streams", async () => {

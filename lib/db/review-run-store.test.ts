@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import Database from "better-sqlite3";
+import { hashPlanContent } from "../ahp/plan-source.ts";
 
 import { ensureReviewChatCleanupSchema } from "./review-chat-cleanup-schema.ts";
 import { ensureReviewRunSchema } from "./review-run-schema.ts";
@@ -162,6 +163,55 @@ test("independent connections share one active review start claim", () => {
     second.close();
     removeDatabase(dbPath);
   }
+});
+
+test("a resolved revision does not claim or dispatch a second review", () => {
+  const dbPath = databasePath();
+  const db = openReviewDb(dbPath);
+  try {
+    const input = {
+      cardId: "card", skillId: "plan-review", phaseTransition: "plan->build",
+      maxIterations: 2, changesetRef: hashPlanContent("# Plan"), ownerId: "worker",
+      leaseMs: 1_000, now: 1_000,
+    };
+    const first = claimReviewStart(db, input);
+    db.prepare("UPDATE review_runs SET status = 'passed' WHERE id = ?").run(first.reviewRunId);
+    assert.equal(claimReviewStart(db, input).state, "resolved");
+    assert.equal((db.prepare("SELECT count(*) AS count FROM review_runs").get() as { count: number }).count, 1);
+    assert.equal(claimReviewStart(db, { ...input, changesetRef: hashPlanContent("# New plan") }).state, "claimed");
+  } finally { db.close(); removeDatabase(dbPath); }
+});
+
+test("atomic plan outcome commit refuses a changed cache revision", () => {
+  const dbPath = databasePath();
+  const db = openReviewDb(dbPath);
+  try {
+    db.exec("CREATE TABLE session_cache(session_uri TEXT PRIMARY KEY,host_url TEXT,summary_json TEXT,enrichment_json TEXT)");
+    const ref = hashPlanContent("# Plan");
+    const binding = { sourceRevision: "source-a", planVersion: "version-a" };
+    const enrichment = {
+      planContent: "# Plan", planContentHash: ref,
+      planSource: { sessionUri: "card", uri: "file:///host/plan.md" }, _planwerkSource: binding,
+    };
+    db.prepare("INSERT INTO session_cache VALUES (?,?,?,?)").run("card", "ws://fake",
+      JSON.stringify({ resource: "card", _planwerkRiskFacts: binding }), JSON.stringify(enrichment));
+    const start = claimReviewStart(db, {
+      cardId: "card", skillId: "plan-review", phaseTransition: "plan->build",
+      maxIterations: 1, changesetRef: ref, ownerId: "worker", leaseMs: 60_000,
+    });
+    const gate = attachGate(db, start.reviewRunId, ref);
+    assert(claimReviewJudgment(db, start.reviewRunId, "judge", 60_000));
+    const outcome = {
+      reviewStatus: "passed" as const, verdictSummary: "Pass", findings: [],
+      gateStatus: "passed" as const, gateOutput: "Pass",
+      sourceGuard: { hostUrl: "ws://fake", changesetRef: ref, sourceRevision: "source-a" },
+    };
+    db.prepare("UPDATE session_cache SET enrichment_json = ?").run(JSON.stringify({
+      ...enrichment, planContent: "# Changed", planContentHash: hashPlanContent("# Changed"),
+    }));
+    assert.equal(commitOwnedReviewOutcome(db, start.reviewRunId, "judge", outcome), false);
+    assert.equal((db.prepare("SELECT status FROM gate_runs WHERE id = ?").get(gate) as { status: string }).status, "running");
+  } finally { db.close(); removeDatabase(dbPath); }
 });
 
 test("pending dispatch claims renew and fence a crashed owner across connections", () => {

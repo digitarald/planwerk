@@ -1,4 +1,5 @@
 import type { BackgroundWork, SessionChatSummary } from "@microsoft/agent-host-protocol";
+import type { PlanReviewInput } from "./ahp/plan-source";
 
 export type Phase = "define" | "plan" | "build" | "review" | "ship";
 export type RuntimeStatus = "idle" | "running" | "input-needed" | "error";
@@ -150,6 +151,8 @@ export interface ToolAuthenticationDetails {
 
 export interface PendingInput {
   requestId: string;
+  /** Null identifies an unsupported host plan request; it must not be auto-answered. */
+  planReview?: PlanReviewInput | null;
   /** Top-level message for the input request (e.g. plan summary or question context) */
   message?: string;
   questions: PendingInputQuestion[];

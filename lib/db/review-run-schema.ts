@@ -15,6 +15,8 @@ const ADDITIVE_COLUMNS = [
   ["start_lease_expires_at_ms", "INTEGER"],
   ["dispatch_host_url", "TEXT"],
   ["dispatch_chat_disposable", "INTEGER"],
+  ["plan_source_json", "TEXT"],
+  ["source_digest", "TEXT"],
 ] as const;
 
 export function ensureReviewRunSchema(db: Database.Database): void {
