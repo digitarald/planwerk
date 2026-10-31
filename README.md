@@ -35,8 +35,22 @@ risk, unblocker, or no-action update without filling in a rigid template.
 Read state stays separate from unresolved action, so looking at a blocker never
 makes it disappear. Inbox, split, and board views are always one click apart.
 
-The coordinator drawer accepts plain-language commands — *"start a task for rate
-limiting,"* *"why is auth stuck?"*, *"pause all sessions."*
+The coordinator drawer accepts plain-language requests such as *"why is auth
+stuck?"* or *"coordinate the API and UI work for rate limiting."* It can discover
+known sessions, inspect cached outcomes and gate evidence, and save goals with
+acceptance criteria and dependent work. In Coordinate mode it can create real
+sessions, delegate instructions, and follow results on the existing heartbeat.
+The drawer shows each goal's scope, work, evidence, and pause/resume controls.
+
+Chat does not grant extra authority. The server checks mode, connected host,
+workspace filters, and per-session overrides before every effect. Losing scope
+or downgrading mode pauses future follow-ups without discarding the goal.
+Queued messages and idle sessions are not proof of completion; uncertain
+delivery requires human inspection. Session message reads expose only the
+latest captured outcome, not a full transcript, and do not wake cold sessions.
+Follow-through requires a completed outcome bound to the delegated chat and turn.
+Missing, truncated, or unrelated results require inspection instead of releasing
+dependent work.
 
 Planwerk manages the AI execution layer between "task defined" and "PR merged," integrating with GitHub Issues, Projects, and PRs rather than replacing them.
 

@@ -56,12 +56,22 @@ not a claim of complete shipped workflow integration.
 
 - **Authority:** Observe is the default. Verify permits checks and independent
   report-only reviews. Coordinate may interact with sessions and advance phases
-  after gates pass. Per-session overrides are explicit and audited.
+  after gates pass. Chat cannot bypass these limits. Per-session overrides are
+  explicit and audited.
 - **State:** runtime status and SDLC phase are separate. A running/idle change
-  never substitutes for a gated phase transition.
-- **Evidence:** captured facts, source freshness, and review approval are
-  separate. Unavailable or changing evidence stays unverified. Refreshing
-  evidence can restore a session and change its activity timestamp.
+  never substitutes for a gated phase transition. Goal completion is not a
+  merge or deployment.
+- **Chief of Staff:** the coordinator delegates outcomes and constraints;
+  workers choose their approach. Durable goals track acceptance criteria and
+  dependencies within the connected host and workspace scope. The heartbeat
+  follows results; people can pause, resume, cancel or steer goals.
+  Pausing, cancelling or losing connection, scope or authority stops future
+  follow-ups, not accepted worker commands. Goals survive reconnects.
+- **Evidence:** captured facts, source freshness and review approval are separate.
+  Captured outcomes are not full transcripts or self-verification.
+  Dependencies require accepted results and any required current gates. Queued,
+  uncertain, missing, truncated or unrelated evidence needs inspection.
+  Explicit refresh can restore a session and change its activity timestamp.
 - **Compatibility:** features depend on what the host/provider actually
   supports. Copilot-specific artifact lookup and the Copilot SDK-powered
   coordinator are implementation dependencies, not universal AHP features.

@@ -5,7 +5,6 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   X,
-  Send,
   GitBranch,
   FileText,
   FileEdit as FilePen,
@@ -31,7 +30,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 
-import { canSendToChat } from "@/lib/ahp/chat-facts";
+import { ConversationControls } from "./conversation-controls";
 import { requestEvidenceRefresh } from "@/lib/ahp/evidence-request";
 import { SessionEvidencePanel } from "./session-evidence-panel";
 import { SessionOwnershipRecovery } from "./session-ownership-recovery";
@@ -40,7 +39,6 @@ import { PendingInputCard } from "./pending-input-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Textarea } from "@/components/ui/textarea";
 import { useBoardStore } from "@/lib/store/board-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
 import { useOrchestratorStore } from "@/lib/store/orchestrator-store";
@@ -305,9 +303,8 @@ function formatTokenCount(value: number): string {
 }
 
 function workerTokenTotal(worker: NonNullable<KanbanCard["workers"]>[number]): number | undefined {
-  if (!worker.usage) return undefined;
-  const total = (worker.usage.inputTokens ?? 0) + (worker.usage.outputTokens ?? 0);
-  return total > 0 ? total : undefined;
+  if (worker.usage?.inputTokens === undefined || worker.usage.outputTokens === undefined) return undefined;
+  return worker.usage.inputTokens + worker.usage.outputTokens;
 }
 
 function ChatFactsSection({ card }: { card: KanbanCard }) {
@@ -436,14 +433,18 @@ function WorkerActivitySection({ card }: { card: KanbanCard }) {
                 {worker.usage && (
                   <p
                     className="mt-2 text-[11px] tabular-nums text-muted-foreground"
-                    title="Live usage reported by the worker chat"
+                    title={`Loaded-turn subtotal, not lifetime usage or context occupancy${worker.usage.observedAt ? `; observed ${worker.usage.observedAt}` : ""}`}
                   >
                     {worker.usage.inputTokens !== undefined && `${formatTokenCount(worker.usage.inputTokens)} in`}
                     {worker.usage.inputTokens !== undefined && worker.usage.outputTokens !== undefined && " · "}
                     {worker.usage.outputTokens !== undefined && `${formatTokenCount(worker.usage.outputTokens)} out`}
                     {worker.usage.cacheReadTokens !== undefined && ` · ${formatTokenCount(worker.usage.cacheReadTokens)} cached`}
+                    {" · loaded turns"}
+                    {worker.usage.partial && " · partial"}
+                    {!!worker.usage.models?.length && ` · ${worker.usage.models.join(", ")}`}
                   </p>
                 )}
+                {!worker.usage && <p className="mt-2 text-[11px] text-muted-foreground">Usage unavailable</p>}
               </div>
             </div>
           </div>
@@ -534,8 +535,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   const reconcileCard = useBoardStore((s) => s.reconcileCard);
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
   const hostUrl = useConnectionStore((s) => s.hostUrl);
-  const [message, setMessage] = useState("");
-  const [sendState, setSendState] = useState<"idle" | "sending" | "error">("idle");
+  const ownershipBlocked = card.ownershipConflict || card.automationWait?.reason === "ownership";
   const [detailsResult, setDetailsResult] = useState<{
     cardId: string;
     state: "ready" | "error";
@@ -721,55 +721,6 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
       // Best-effort; the heartbeat will re-detect if it wasn't dismissed.
     } finally {
       setDismissingPeer(null);
-    }
-  };
-
-  const ownershipBlocked = card.ownershipConflict || card.automationWait?.reason === "ownership";
-  const inputAllowed = !ownershipBlocked && canSendToChat(card.chats?.find((chat) => chat.resource === card.defaultChat))
-    && (!card.defaultChat || card.chats === undefined || card.chats.some((chat) => chat.resource === card.defaultChat));
-
-  const handleInject = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputAllowed) return;
-    const text = message.trim();
-    if (!text || sendState === "sending") return;
-    if (!hostUrl) {
-      setSendState("error");
-      setTimeout(() => setSendState("idle"), 3000);
-      return;
-    }
-
-    setSendState("sending");
-    try {
-      const res = await fetch("/api/ahp/sessions/message", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hostUrl, sessionUri: card.id, message: text }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || "Failed to send");
-      }
-      const data = (await res.json()) as { queued?: boolean };
-      addFeedItem({
-        type: "intervention",
-        message: `Message ${data.queued ? "queued for" : "sent to"} "${card.title}": "${text}"`,
-        cardId: card.id,
-        cardTitle: card.title,
-        projectName: card.project?.name,
-      });
-      setMessage("");
-      setSendState("idle");
-    } catch {
-      setSendState("error");
-      setTimeout(() => setSendState("idle"), 3000);
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleInject(e);
     }
   };
 
@@ -1599,38 +1550,11 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 </section>
               )}
 
-              {/* Message Input */}
-              <section className="mt-auto pt-2">
-                <form onSubmit={handleInject} className="relative">
-                  <Textarea
-                    value={message}
-                    onChange={(e) => setMessage(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder={ownershipBlocked ? "Resolve session ownership before sending instructions" : inputAllowed ? "Send instructions to this session..." : "This chat does not accept messages"}
-                    disabled={!inputAllowed || sendState === "sending"}
-                    className="min-h-[3rem] resize-none pr-10 text-[13px]"
-                    rows={2}
-                  />
-                  <Button
-                    type="submit"
-                    size="icon-sm"
-                    variant="ghost"
-                    disabled={!inputAllowed || !message.trim() || sendState === "sending"}
-                    className="absolute bottom-2 right-2"
-                  >
-                    {sendState === "sending" ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Send className="h-3.5 w-3.5" />
-                    )}
-                  </Button>
-                </form>
-                {sendState === "error" && (
-                  <p className="mt-1 text-[11px] text-destructive">
-                    Failed to send — check the connection and try again.
-                  </p>
-                )}
-              </section>
+              <ConversationControls key={`${hostUrl}:${card.id}`} card={card} hostUrl={hostUrl} onSent={(text, outcome) => addFeedItem({
+                type: "intervention",
+                message: `Message ${outcome === "queued" ? "queued for" : outcome === "steering-pending" ? "submitted as steering to" : "accepted by"} "${card.title}": "${text}"`,
+                cardId: card.id, cardTitle: card.title, projectName: card.project?.name,
+              })} />
             </div>
           </ScrollArea>
 

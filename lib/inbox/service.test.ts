@@ -8,6 +8,7 @@ import {
   resolveInboxSource,
 } from "../db/inbox-store.ts";
 import type { KanbanCard } from "../types.ts";
+import type { CoordinatorGoal } from "../orchestrator/coordinator-goal-types.ts";
 
 const state = { db: new Database(":memory:"), owned: true, generations: 0 };
 const key = "__inboxServiceTest";
@@ -32,7 +33,7 @@ const hooks = registerHooks({
       : nextResolve(specifier, context);
   },
 });
-const { projectCardToInbox } = await import("./service.ts");
+const { projectCardToInbox, projectCoordinatorGoalToInbox } = await import("./service.ts");
 const host = "ws://test";
 const observed = "2026-09-22T00:00:00.000Z";
 function card(pending = true): KanbanCard {
@@ -59,6 +60,25 @@ after(async () => {
   state.db.close();
   hooks.deregister();
   Reflect.deleteProperty(globalThis, key);
+});
+
+test("goal decisions deduplicate and resolve when paused or replaced by a session handoff", () => {
+  reset();
+  const goal: CoordinatorGoal = { id: "goal", hostUrl: host, workspaceScope: ["/project"],
+    objective: "Deliver a result", acceptanceCriteria: "Verified", state: "needs-human", revision: 1,
+    summary: "Choose how to continue", items: [] };
+  projectCoordinatorGoalToInbox(goal, state.db);
+  projectCoordinatorGoalToInbox(goal, state.db);
+  assert.equal(listInboxItems(state.db).total, 1);
+  projectCoordinatorGoalToInbox({ ...goal, state: "paused" }, state.db);
+  assert.equal(listInboxItems(state.db).total, 0);
+  projectCoordinatorGoalToInbox(goal, state.db);
+  projectCardToInbox(host, card(), undefined, state.db, { sourceObserved: true });
+  projectCoordinatorGoalToInbox({ ...goal, items: [{
+    id: "work", goalId: goal.id, state: "awaiting-result", actionKey: "work",
+    cardId: "session", workingDirectory: "/project", instructions: "Work", acceptanceCriteria: "Done", dependencies: [],
+  }] }, state.db);
+  assert.equal(listInboxItems(state.db).items.filter((item) => item.sourceKey.includes("coordinator-goal")).length, 0);
 });
 
 test("reconnect before question hydration preserves the same open request and generated briefing", async () => {
