@@ -284,7 +284,8 @@ sessions are not used for validation.
   persisted Build phase, complete 19,950-byte transfer, resource-byte changes,
   background-work readiness and durable dispatch/answer claims.
 - Typecheck, targeted ESLint, diff formatting and production build passed.
-- The separate gate-route suite passed 11 of 12 tests. Its unrelated CORS test
-  expects different error wording; the tested CORS route, guard and assertion
-  are unchanged from the main baseline.
+- After integrating current remote main, all 908 tests in the CI test command,
+  full lint and typecheck passed. The separate 12-test gate-route suite also
+  passed after removing its generated-file dependency and updating outdated
+  CORS/SSE assertions. The runtime CORS guard is unchanged.
 - No live production host, historical session or installed-app mutation was used.
