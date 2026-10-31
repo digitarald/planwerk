@@ -30,7 +30,7 @@ const hooks = registerHooks({
     const s = `globalThis["${key}"]`;
     let source: string | undefined;
     if (specifier === "react/jsx-runtime") source = "export const Fragment='fragment';export function jsx(type,props){return {type,props};}export const jsxs=jsx;";
-    if (specifier === "lucide-react") source = "X Send GitBranch FileText FileEdit FlaskConical Lightbulb BookOpen ClipboardCheck Scale Clock Shield ShieldAlert Loader2 CirclePause AlertTriangle ShieldCheck ShieldX MessageCircleWarning XCircle ChevronDown Split Cpu Bot RotateCcw".split(" ").map((name) => `export function ${name}(){}`).join("\n");
+    if (specifier === "lucide-react") source = "X Send GitBranch FileText FileEdit FlaskConical Lightbulb BookOpen ClipboardCheck Scale Clock Shield ShieldAlert Loader2 CirclePause AlertTriangle ShieldCheck ShieldX MessageCircleWarning XCircle ChevronDown Split Cpu Bot RotateCcw ArrowDown ArrowUp".split(" ").map((name) => `export function ${name}(){}`).join("\n");
     if (specifier === "react") source = `export function useState(value){return [typeof value==="function"?value():value,()=>{}];} export function useRef(value){return {current:value};} export function useEffect(effect){${s}.effects.push(effect);}`;
     if (specifier === "@/lib/store/board-store") source = `
       const store={setDetailCard(){},updateCard(){},reconcileCard(id,patch){${s}.patches.push(patch);},getCard(){return ${s}.card;}};
@@ -55,7 +55,7 @@ const hooks = registerHooks({
     return nextResolve(specifier, context);
   },
   load(url, context, nextLoad) {
-    if (url === componentUrl || url.endsWith("/session-evidence-panel.tsx")) return {
+    if (url === componentUrl || url.endsWith("/session-evidence-panel.tsx") || url.endsWith("/conversation-controls.tsx")) return {
       shortCircuit: true, format: "module",
       source: ts.transpileModule(readFileSync(fileURLToPath(url), "utf8"), {
         compilerOptions: { jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
