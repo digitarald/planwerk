@@ -2,7 +2,6 @@ import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import {
   sessionReducer,
   type SessionAction,
-  type UsageInfo,
   type ChatState,
 } from "@microsoft/agent-host-protocol";
 
@@ -13,7 +12,7 @@ import { enrichFromChangeset, type ChangesetEnrichment } from "./changeset-enric
 import { fetchCopilotCliArtifacts } from "./plan-artifact";
 import { extractModelFromConfig } from "./session-config";
 import { mapSessionInputNeeded } from "./map-session";
-import { asChatState, asSessionState, withSessionState } from "./snapshot";
+import { asSessionState, withSessionState } from "./snapshot";
 import { upsertSessionCache, removeSessionCache, reconcileSessionCache, getCachedSessions, CLEAR_ENRICHMENT, type CachedSession } from "@/lib/db/session-cache";
 import { getDb } from "@/lib/db/schema";
 import { claimSessionOwnership, isSessionOwnedByHost } from "@/lib/db/session-ownership";
@@ -34,6 +33,7 @@ import {
 import { withAHPClient } from "./client-operation";
 import type { PendingInput, WorkerActivity } from "@/lib/types";
 import { currentToolFromChat, observeChatFacts, shouldObserveChat, visibleBackgroundWork } from "./chat-facts";
+import { projectChatUsage } from "./chat-usage";
 import { mapWorkerChats, retainInactiveWorkers, type WorkerChatSummary } from "./worker-activity";
 import { getWorkerActivityHistory, recordWorkerActivity } from "@/lib/orchestrator/worker-activity-store";
 import { readSessionDetailsForState } from "./session-details";
@@ -60,7 +60,7 @@ export { mergeFreshEnrichment } from "./source-binding";
 export type { ConnectionErrorCode, ConnectionError } from "./connection-error";
 
 export type BridgeEvent =
-  | { type: "init"; sessions: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment>; pendingInputs: Map<string, PendingInput>; workers: Map<string, WorkerActivity[]>; connection: AhpEndpointDiagnostics & { protocolVersion: string; totalSessions: number; visibleSessions: number; filteredSessions: number } }
+  | { type: "init"; sessions: AHPSessionSummary[]; catalog?: AHPSessionSummary[]; enrichments: Map<string, ChangesetEnrichment>; pendingInputs: Map<string, PendingInput>; workers: Map<string, WorkerActivity[]>; connection: AhpEndpointDiagnostics & { protocolVersion: string; totalSessions: number; visibleSessions: number; filteredSessions: number } }
   | (AHPEvent & { enrichment?: ChangesetEnrichment | null; pendingInput?: PendingInput | null; workers?: WorkerActivity[] })
   | ConnectionError;
 
@@ -422,7 +422,6 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
           sub = await detailClient.subscribe(sessionUri);
         } catch (err) {
           warn("fetchInput: session subscribe failed", sessionUri, err instanceof Error ? err.message : err);
-          emitNoPendingInput(sessionUri);
           return;
         }
 
@@ -443,7 +442,7 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
             return;
           }
           if (!sessionState) {
-            emitNoPendingInput(sessionUri);
+            warn("fetchInput: session snapshot unavailable", sessionUri);
             return;
           }
 
@@ -468,7 +467,7 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
             clearTimeout(timer);
           }
 
-          emitNoPendingInput(sessionUri);
+          warn("fetchInput: question unavailable while session still needs input", sessionUri);
         } finally {
           await subscription.close();
           await detailClient.unsubscribe(sessionUri).catch(() => {});
@@ -476,7 +475,6 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
       }, readsController.signal);
     } catch (err) {
       warn("fetchInput: failed", sessionUri, err instanceof Error ? err.message : err);
-      emitNoPendingInput(sessionUri);
     }
   }
 
@@ -491,22 +489,6 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
         session,
         enrichment: enrichments.get(sessionUri) ?? null,
         pendingInput: mapped,
-      });
-    }
-  }
-
-  function emitNoPendingInput(sessionUri: string) {
-    if (!pendingInputs.has(sessionUri)) return;
-    debug("clearing pending input:", sessionUri);
-    pendingInputs.delete(sessionUri);
-    const session = sessions.get(sessionUri);
-    if (session) {
-      persistCurrentSessionSummary(session);
-      onEvent({
-        type: "sessionSummaryChanged",
-        session,
-        enrichment: enrichments.get(sessionUri) ?? null,
-        pendingInput: null,
       });
     }
   }
@@ -554,63 +536,6 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
     }
   }
 
-  function toWorkerUsage(usage: UsageInfo | undefined): NonNullable<WorkerActivity["usage"]> | undefined {
-    if (
-      !usage
-      || (
-        usage.inputTokens === undefined
-        && usage.outputTokens === undefined
-        && usage.cacheReadTokens === undefined
-      )
-    ) {
-      return undefined;
-    }
-    return {
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      cacheReadTokens: usage.cacheReadTokens,
-    };
-  }
-
-  function sumWorkerUsage(
-    usages: readonly (WorkerActivity["usage"])[],
-  ): NonNullable<WorkerActivity["usage"]> | undefined {
-    const present = usages.filter(
-      (usage): usage is NonNullable<WorkerActivity["usage"]> => usage !== undefined,
-    );
-    if (present.length === 0) return undefined;
-
-    const sumField = (
-      field: keyof NonNullable<WorkerActivity["usage"]>,
-    ): number | undefined => {
-      const values = present
-        .map((usage) => usage[field])
-        .filter((value): value is number => value !== undefined);
-      return values.length > 0
-        ? values.reduce((total, value) => total + value, 0)
-        : undefined;
-    };
-
-    return {
-      inputTokens: sumField("inputTokens"),
-      outputTokens: sumField("outputTokens"),
-      cacheReadTokens: sumField("cacheReadTokens"),
-    };
-  }
-
-  function completedUsageFromChat(
-    chat: ReturnType<typeof asChatState>,
-  ): NonNullable<WorkerActivity["usage"]> | undefined {
-    return sumWorkerUsage(chat?.turns.map((turn) => toWorkerUsage(turn.usage)) ?? []);
-  }
-
-  function usageFromChat(chat: ReturnType<typeof asChatState>): NonNullable<WorkerActivity["usage"]> | undefined {
-    return sumWorkerUsage([
-      completedUsageFromChat(chat),
-      toWorkerUsage(chat?.activeTurn?.usage),
-    ]);
-  }
-
   function publishChatFacts(sessionUri: string) {
     const session = sessions.get(sessionUri);
     if (!session || disposed) return;
@@ -649,9 +574,10 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
       const session = sessions.get(sessionUri);
       if (!session) return;
       liveChatStates.set(workerId, { sessionUri, state });
-      const usage = usageFromChat(state);
+      const usage = projectChatUsage(state);
       if (usage) workerUsageByChat.set(workerId, usage);
-      session.chatDetails = { ...session.chatDetails, [workerId]: details };
+      else workerUsageByChat.delete(workerId);
+      session.chatDetails = { ...session.chatDetails, [workerId]: { ...details, usage } };
       const chats = workerChatsBySession.get(sessionUri) ?? [];
       const next = chats.map((chat) => chat.resource === workerId ? {
         ...chat, status: state.status, activity: state.activity,
@@ -881,11 +807,13 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
     let coldSummaryOnlyCount = 0;
 
     const allSummaries = await listAllSessions(client);
+    const catalog: AHPSessionSummary[] = [];
 
     for (const summary of allSummaries) {
       const owned = claimSessionOwnership(getDb(), summary.resource, hostUrl);
       const mapped = mapSdkSessionSummary(summary);
       attachAHPSourceRevision(mapped, summary);
+      catalog.push(mapped);
       if (!shouldShowSession(summary.status, summary.changes?.files ?? 0)) {
         if (summary.status & AHPStatus.IsArchived) skippedArchived.set(summary.resource, mapped);
         continue;
@@ -947,6 +875,7 @@ export async function createAHPBridge({ hostUrl, onEvent: sendEvent, signal }: A
     onEvent({
       type: "init",
       sessions: Array.from(sessions.values()),
+      catalog,
       enrichments,
       pendingInputs,
       workers: workersBySession,

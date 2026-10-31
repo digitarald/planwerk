@@ -12,6 +12,7 @@ import {
 import type { AhpClient, Subscription } from "@microsoft/agent-host-protocol/client";
 import type { ChatChangesetFacts, ChatDetails, SessionCurrentTool } from "../types.ts";
 import { asChangesetState } from "./changeset-readiness.ts";
+import { projectChatUsage } from "./chat-usage.ts";
 import { shouldReadLiveSessionState } from "./session-read-policy.ts";
 import { isStaticChangesetUri } from "./changeset-review.ts";
 
@@ -29,6 +30,13 @@ export function shouldObserveChat(chat: SessionChatSummary, sessionStatus: numbe
 
 export function canSendToChat(chat: { interactivity?: string } | undefined): boolean {
   return chat?.interactivity === undefined || chat.interactivity === "full";
+}
+
+export function projectPendingMessages(chat: Pick<ChatState, "steeringMessage" | "queuedMessages">): NonNullable<ChatDetails["pendingMessages"]> {
+  return [
+    ...(chat.steeringMessage ? [{ ...chat.steeringMessage, kind: "steering" as const }] : []),
+    ...(chat.queuedMessages ?? []).map((entry) => ({ ...entry, kind: "queued" as const })),
+  ].map((entry) => ({ id: entry.id, kind: entry.kind, text: entry.message.text ?? "" }));
 }
 
 /** Check both the fresh session catalogue and subscribed chat before dispatch. */
@@ -109,7 +117,11 @@ export function observeChatFacts(
   let subscription: Subscription | undefined;
   const entries = new Map<string, { close(): void; facts: ChatChangesetFacts }>();
   const publish = () => {
-    if (!closed && chat) onState(chat, { changesets: [...entries.values()].map((entry) => entry.facts) });
+    if (!closed && chat) onState(chat, {
+      changesets: [...entries.values()].map((entry) => entry.facts),
+      usage: projectChatUsage(chat),
+      pendingMessages: projectPendingMessages(chat),
+    });
   };
   const owners = channelOwners.get(client) ?? new Map<string, number>();
   channelOwners.set(client, owners);

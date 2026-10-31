@@ -6,6 +6,16 @@ import {
   projectSessionDetails,
 } from "./session-details-core.ts";
 
+test("hidden default chats cannot disclose transcript or error content", () => {
+  assert.deepEqual(projectSessionDetails({ defaultChat: "hidden" }, {
+    resource: "hidden", interactivity: "hidden",
+    turns: [{ id: "turn", state: "complete", responseParts: [{ kind: "markdown", content: "Private" }] }],
+  }), {});
+  assert.deepEqual(projectSessionDetails({ defaultChat: "hidden", chats: [{ resource: "hidden", interactivity: "hidden" }] }, {
+    resource: "hidden", turns: [{ id: "turn", state: "complete", responseParts: [{ kind: "markdown", content: "Private" }] }],
+  }), {});
+});
+
 test("projects final agent markdown for zero-file completion sessions", () => {
   const details = projectSessionDetails(
     { defaultChat: "ahp-chat://default/session" },
@@ -21,6 +31,23 @@ test("projects final agent markdown for zero-file completion sessions", () => {
 
   assert.equal(details.lastAgentMessage, "Research complete.");
   assert.equal(details.runtimeError, undefined);
+  assert.deepEqual(details.outcomeEvidence, {
+    chatUri: "ahp-chat://default/session", turnId: "turn-1", state: "complete",
+    text: "Research complete.", truncated: false,
+  });
+});
+
+test("a previous response cannot masquerade as the latest delegated turn; long outcomes disclose truncation", () => {
+  const previous = { id: "previous", state: "complete", responseParts: [{ kind: "markdown", content: "Old result" }] };
+  const latest = { id: "latest", state: "complete", responseParts: [] };
+  const details = projectSessionDetails({ defaultChat: "chat" }, { turns: [previous, latest] });
+  assert.equal(details.lastAgentMessage, "Old result");
+  assert.equal(details.outcomeEvidence, undefined);
+  const long = projectSessionDetails({ defaultChat: "chat" }, {
+    turns: [{ ...latest, responseParts: [{ kind: "markdown", content: "x".repeat(9000) }] }],
+  });
+  assert.equal(long.outcomeEvidence?.text.length, 8000);
+  assert.equal(long.outcomeEvidence?.truncated, true);
 });
 
 test("projects the latest errored turn and its resume identity", () => {

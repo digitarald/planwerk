@@ -35,6 +35,7 @@ export interface InboxAlternativeAction {
 export interface InboxFreshness {
   observedAt: string;
   sourceModifiedAt?: string;
+  sourceObservedAt?: string;
 }
 
 export interface InboxProvenance {
@@ -45,6 +46,9 @@ export interface InboxProvenance {
   cardId?: string;
   relatedCardIds?: string[];
   sourceRevision?: string;
+  sessionTitle?: string;
+  projectName?: string;
+  workspacePath?: string;
 }
 
 export interface InboxBriefing {
@@ -123,6 +127,7 @@ export interface InboxItemDraft {
   relatedCardIds?: string[];
   title: string;
   briefing: InboxBriefing;
+  recoverPendingInput?: boolean;
 }
 
 export type InboxProjectionOperation =
@@ -160,7 +165,9 @@ export interface InboxApiItem {
   priorityScore: number;
   priorityReasons: string[];
   title: string;
+  sessionTitle?: string;
   projectName?: string;
+  workspacePath?: string;
   briefing: {
     message: string;
     recommendation: string;
@@ -177,6 +184,7 @@ export interface InboxApiItem {
     freshness: {
       sourceRevision?: string;
       generatedAt: number;
+      sourceObservedAt?: number;
       stale: boolean;
     };
     provenance: string;

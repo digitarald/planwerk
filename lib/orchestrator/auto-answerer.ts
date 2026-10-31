@@ -69,6 +69,40 @@ export function shouldAutoAnswer(
   return canAutoAnswer(policy.level);
 }
 
+export async function submitAuthorizedAnswer(
+  hostUrl: string, card: KanbanCard, answer: string, expectedRiskDigest?: string,
+): Promise<AutoAnswerResult> {
+  assertOperationCurrent("interact");
+  if (!shouldAutoAnswer(hostUrl, card) || !card.pendingInput) return { answered: false, reason: "This input requires a human under the current risk and input policy." };
+  const input = card.pendingInput;
+  const authorization = authorizePendingElicitation(input);
+  const initialRisk = getAuthoritativeCardRisk(card.id, hostUrl);
+  if (initialRisk.status !== "current") return { answered: false, reason: "Current risk assessment required." };
+  if (expectedRiskDigest !== undefined && initialRisk.assessment.riskDigest !== expectedRiskDigest) {
+    return { answered: false, reason: "Risk facts changed while generating the answer." };
+  }
+  const question = input.questions[0];
+  const built = question && buildAnswer(question, answer);
+  if (!built) return { answered: false, reason: "Could not map answer to question format." };
+  const dispatch = await withAHPClient(hostUrl, async (client) => {
+    const liveState = await readActiveSessionState(client, card.id);
+    const live = authorizePendingElicitation(mapSessionInputNeeded(liveState?.inputNeeded));
+    const facts = getAuthoritativeRiskSnapshot(hostUrl, card.id);
+    const risk = getAuthoritativeCardRisk(card.id, hostUrl);
+    if (!live.allowed || live.digest !== authorization.digest || facts?.elicitationDigest !== live.digest ||
+        risk.status !== "current" || risk.currentDigest !== facts?.digest ||
+        risk.assessment.riskDigest !== initialRisk.assessment.riskDigest) {
+      return { success: false, stale: true };
+    }
+    assertOperationCurrent("interact");
+    return answerInputWithClient(client, card.id, input.requestId, "accept",
+      { [question.id]: { state: "submitted", value: built.value } },
+      { signal: getOperationSignal() });
+  }, getOperationSignal());
+  return dispatch.success ? { answered: true, answer: built.display }
+    : { answered: false, reason: dispatch.stale ? "Risk or elicitation authorization became stale." : "Failed to confirm the answer was applied." };
+}
+
 /**
  * Auto-answer a pending input question using the Copilot SDK.
  */
@@ -172,71 +206,7 @@ export async function autoAnswer(
         return { answered: false, reason: "LLM declined to answer" };
       }
 
-      // Map the free-form answer onto the question's typed answer shape.
-      const built = buildAnswer(question, answer);
-      if (!built) {
-        return { answered: false, reason: "Could not map answer to question format" };
-      }
-
-      // Submit the answer via AHP, keyed by question ID, under the request ID.
-      const answers = {
-        [question.id]: { state: "submitted", value: built.value },
-      };
-      assertOperationCurrent("interact");
-      const dispatch = await withAHPClient(hostUrl, async (ahpClient) => {
-        const liveState = await readActiveSessionState(ahpClient, card.id);
-        const liveInput = mapSessionInputNeeded(liveState?.inputNeeded);
-        const liveAuthorization = authorizePendingElicitation(liveInput);
-        if (
-          !liveAuthorization.allowed
-          || liveAuthorization.digest !== inputAuthorization.digest
-        ) {
-          return {
-            success: false,
-            authorizationReason:
-              liveAuthorization.reason
-              ?? "Pending elicitation changed while preparing the answer",
-          };
-        }
-
-        // Revalidate both the exact elicitation and the risk assessment after
-        // observing the live AHP request, immediately before dispatch.
-        const currentFacts = getAuthoritativeRiskSnapshot(hostUrl, card.id);
-        const currentRisk = getAuthoritativeCardRisk(card.id, hostUrl);
-        if (
-          currentFacts?.elicitationDigest !== liveAuthorization.digest
-          || currentRisk.status !== "current"
-          || currentRisk.currentDigest !== currentFacts.digest
-          || currentRisk.assessment.riskDigest !== initialRisk.assessment.riskDigest
-        ) {
-          return {
-            success: false,
-            authorizationReason: "Risk or elicitation authorization became stale while preparing the answer",
-          };
-        }
-
-        assertOperationCurrent("interact");
-        return answerInputWithClient(
-          ahpClient,
-          card.id,
-          input.requestId,
-          "accept",
-          answers,
-          { signal: getOperationSignal() },
-        );
-      });
-
-      if (dispatch.success) {
-        return { answered: true, answer: built.display };
-      }
-      return {
-        answered: false,
-        reason: "authorizationReason" in dispatch
-          ? dispatch.authorizationReason
-          : dispatch.stale
-          ? "Input request no longer present (stale)"
-          : "Failed to submit answer to AHP",
-      };
+      return await submitAuthorizedAnswer(hostUrl, card, answer, initialRisk.assessment.riskDigest ?? undefined);
     } finally {
       signal?.removeEventListener("abort", abort);
       const cleanup = await disposeOneShotSession(

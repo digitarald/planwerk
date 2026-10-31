@@ -271,8 +271,17 @@ export function createCtoPermissionPolicy(options: {
   options.signal?.addEventListener("abort", abortPolicy, { once: true });
 
   const onPermissionRequest: PermissionHandler = async (request, invocation) => {
+    const prompt = invocation.promptRequest;
+    let managedApprovalRequired = Boolean(request.managedApprovalRequired);
+    if (prompt && (prompt.kind === "commands" || prompt.kind === "read" ||
+        prompt.kind === "write" || prompt.kind === "url" || prompt.kind === "workflow")) {
+      managedApprovalRequired = prompt.managedApprovalRequired ?? managedApprovalRequired;
+    }
     if (request.kind !== "custom-tool") {
       if (request.managedApprovalRequired) {
+        if (!managedApprovalRequired) {
+          return { kind: "approve-once", approvedInteractively: true };
+        }
         const binding = {
           toolName: request.kind,
           args: { toolCallId: request.toolCallId ?? "unknown" },
@@ -353,9 +362,11 @@ export function createCtoPermissionPolicy(options: {
           "No current persisted server-side risk assessment exists for this action.",
       };
     }
-    if (!request.managedApprovalRequired &&
+    if (!managedApprovalRequired &&
         !requiresHumanApproval(request.toolName, binding)) {
-      return { kind: "approve-once" };
+      return request.managedApprovalRequired
+        ? { kind: "approve-once", approvedInteractively: true }
+        : { kind: "approve-once" };
     }
 
     const toolCallId = request.toolCallId ?? "unknown";

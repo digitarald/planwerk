@@ -139,6 +139,9 @@ export function FeedItem({
   toolName,
   approval,
   decisionPending,
+  context,
+  usage,
+  submissionStatus,
   duplicateCount = 0,
   duplicateContexts = [],
 }: FeedItemProps) {
@@ -190,6 +193,7 @@ export function FeedItem({
               {toolName}
             </span>
           )}
+          {type === "user" && submissionStatus === "blocked" && <span>Not submitted</span>}
           {duplicateCount > 0 && (
             <span
               className="ml-auto shrink-0 rounded bg-muted px-1 py-px text-[9px] font-medium tabular-nums text-muted-foreground"
@@ -215,6 +219,31 @@ export function FeedItem({
         >
           {message || (isStreaming ? "Thinking..." : "")}
         </p>
+        {context && (
+          <p className="mt-1 text-[10px] tabular-nums text-muted-foreground" title={`Context observed ${new Date(context.updatedAt).toLocaleString()}`}>
+            {context.compacting ? "Compacting context" : "Context"}
+            {context.currentTokens !== undefined && ` ${context.currentTokens.toLocaleString()}`}
+            {context.tokenLimit !== undefined && ` / ${context.tokenLimit.toLocaleString()} tokens`}
+            {!isStreaming && " (last observed)"}
+          </p>
+        )}
+        {usage && (
+          <details className="mt-1 text-[10px] text-muted-foreground">
+            <summary className="cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              Usage {usage.scope === "observed-stream" ? "(this stream only)" : "(session checkpoint)"}
+            </summary>
+            <div className="mt-1 space-y-1 tabular-nums" title={`Observed ${new Date(usage.updatedAt).toLocaleString()}`}>
+              {usage.models.map((model, index) => (
+                <p key={index} className="break-words">
+                  {model.provider} / {model.model}: {model.inputTokens?.toLocaleString() ?? "unknown"} in,
+                  {" "}{model.outputTokens?.toLocaleString() ?? "unknown"} out
+                  {model.partial && " (partial)"}
+                </p>
+              ))}
+              {usage.totalNanoAiu !== undefined && <p>{usage.totalNanoAiu.toLocaleString()} nano-AI units at checkpoint (not dollars)</p>}
+            </div>
+          </details>
+        )}
 
         {showInlineInput && card && <InlinePendingInput card={card} />}
         {approval && (

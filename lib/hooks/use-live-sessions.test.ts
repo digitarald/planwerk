@@ -11,6 +11,7 @@ const state = {
   changes: [] as Array<{ kind: string; id?: string }>,
   liveConnections: 0,
   initStarts: [] as number[],
+  goalRefreshes: [] as Array<{ hostUrl: string; workspaceScope: string[] }>,
   hideDone: true,
 };
 const key = "__planwerkLiveSessionsTest";
@@ -48,6 +49,10 @@ const hooks = registerHooks({
       export function useConnectionStore(selector){return selector({status:"connected",hostUrl:${s}.host,
       setConnected(){${s}.liveConnections++;},setError(){${s}.changes.push({kind:"error"});}});}`;
     if (specifier === "@/lib/store/inbox-store") source = "export const useInboxStore={getState(){return {reconcileItem(){},removeItem(){}};}};";
+    if (specifier === "@/lib/store/coordinator-goal-store") source = `
+      export const useCoordinatorGoalStore={getState(){return {
+        async refresh(hostUrl,workspaceScope){${s}.goalRefreshes.push({hostUrl,workspaceScope});}
+      };}};`;
     if (specifier === "@/lib/store/orchestrator-store") source = "export function useOrchestratorStore(selector){return selector({addFeedItem(){},setMonitoringStatus(){}});}";
     if (specifier === "@/lib/diagnostics/ui-performance-client") source = `
       export function uiElapsed(name,start){if(name==="sse.init") ${s}.initStarts.push(start);}
@@ -112,6 +117,28 @@ test("reconnect init timing starts at the stream drop, including reconnect wait"
   stream.emit({ type: "init", epoch: "reconnected", sequence: 1, cards: [] });
   assert.deepEqual(state.initStarts, [100, 1000]);
   assert.equal(stream.closed, false);
+});
+
+test("goal changes refresh the current scope and ignore retired streams", () => {
+  for (const cleanup of state.effects.splice(0)) cleanup();
+  state.goalRefreshes.length = 0;
+  state.host = "ws://goals-a";
+  useLiveSessions();
+  const retired = FakeEventSource.instances.at(-1)!;
+  retired.emit({ type: "init", epoch: "goals-a", sequence: 1, cards: [] });
+  retired.emit({ type: "coordinatorGoalsChanged", epoch: "goals-a", sequence: 2 });
+  assert.deepEqual(state.goalRefreshes, [{ hostUrl: "ws://goals-a", workspaceScope: [] }]);
+  state.effects.pop()!();
+  state.host = "ws://goals-b";
+  useLiveSessions();
+  retired.emit({ type: "coordinatorGoalsChanged", epoch: "goals-a", sequence: 3 });
+  const current = FakeEventSource.instances.at(-1)!;
+  current.emit({ type: "init", epoch: "goals-b", sequence: 1, cards: [] });
+  current.emit({ type: "coordinatorGoalsChanged", epoch: "goals-b", sequence: 2 });
+  assert.deepEqual(state.goalRefreshes, [
+    { hostUrl: "ws://goals-a", workspaceScope: [] },
+    { hostUrl: "ws://goals-b", workspaceScope: [] },
+  ]);
 });
 
 test("archive snapshots merge with active cards and removals cannot delete the other view", () => {
