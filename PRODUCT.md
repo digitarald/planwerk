@@ -32,8 +32,24 @@ didn't — Planwerk makes sure a human still owns what ships.
 
 Planwerk is a management surface, not another place to write code. It combines
 cross-session oversight with independent quality gates and explicitly granted
-coordinator authority. The operator can direct concurrent work without treating
-an agent's own confidence as verification.
+coordinator authority. The coordinator acts as a chief of staff: it turns goals
+into delegated work, follows results, and brings decisions back to the operator.
+Worker sessions do the implementation; independent reviewers verify it.
+
+The operator directs outcomes without treating an agent's own confidence as
+verification. A completed goal means its acceptance criteria were met, not that
+code was merged or deployed.
+
+## Core workflow
+
+1. Set a goal and acceptance criteria in coordinator chat, within the selected
+   host and workspace scope.
+2. Save the work and its dependencies. Coordinate mode permits delegation to
+   existing sessions or newly created workers.
+3. Follow captured results on the existing heartbeat. Dependent work waits for
+   accepted results and any required verification.
+4. Review decisions in the inbox and progress in the goal drawer. Pause, resume,
+   cancel, or steer the goal without managing every worker conversation.
 
 ## Operating Context
 
@@ -56,19 +72,24 @@ not a claim of complete shipped workflow integration.
 
 - **Authority:** Observe is the default. Verify permits checks and independent
   report-only reviews. Coordinate may interact with sessions and advance phases
-  after gates pass. Per-session overrides are explicit and audited.
+  after gates pass. These limits apply to coordinator chat as well as background
+  work; a message cannot grant extra authority. Per-session overrides are
+  explicit and audited.
 - **State:** runtime status and SDLC phase are separate. A running/idle change
   never substitutes for a gated phase transition.
 - **Chief of Staff:** the coordinator can inspect scoped sessions, save goals
   and dependencies, and delegate real sessions in Coordinate mode. Existing
   heartbeat ticks follow accepted results; code dependencies also require
   current gates. People can pause, resume, cancel, or steer through chat.
-  Mode or scope loss stops future effects, not work the host already accepted.
-  Goals persist across reconnects; uncertain or queued delivery needs human
-  inspection before follow-through.
+  Pausing or cancelling a goal, losing the connection or scope, or downgrading
+  authority stops future effects, not work the host already accepted. Goals
+  persist across reconnects; uncertain or queued delivery needs human inspection
+  before follow-through.
 - **Evidence:** captured facts, source freshness, and review approval are
   separate. Unavailable or changing evidence stays unverified. Refreshing
-  evidence can restore a session and change its activity timestamp.
+  evidence can restore a session and change its activity timestamp. Coordinator
+  reads expose captured outcomes, not full transcripts. Missing, truncated, or
+  unrelated outcomes cannot release dependent work.
 - **Compatibility:** features depend on what the host/provider actually
   supports. Copilot-specific artifact lookup and the Copilot SDK-powered
   coordinator are implementation dependencies, not universal AHP features.
