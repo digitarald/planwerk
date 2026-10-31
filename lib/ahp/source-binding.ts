@@ -173,6 +173,7 @@ export function mergeFreshEnrichment(
     planContent,
     planContentHash: planContent ? hashPlanContent(planContent) : undefined,
     lastAgentMessage: sessionDetails?.lastAgentMessage,
+    outcomeEvidence: sessionDetails?.outcomeEvidence,
     runtimeError: sessionDetails?.runtimeError,
   };
 }

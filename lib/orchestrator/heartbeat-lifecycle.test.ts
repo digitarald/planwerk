@@ -43,6 +43,7 @@ const s = `globalThis["${globalKey}"]`;
 const root = path.resolve(import.meta.dirname, "../..");
 const mocks: Record<string, string> = {
   "server-only": "export {}",
+  "./coordinator-goal-reconciler": "export async function reconcileCoordinatorGoals(){}",
   "@/lib/db/schema": `export function getDb() { return ${s}.db; }`,
   "./skill-config": `export function loadConfig() {
     return {

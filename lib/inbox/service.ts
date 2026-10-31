@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import type { CoordinatorGoal } from "../orchestrator/coordinator-goal-types";
 
 import { getDb } from "../db/schema.ts";
 import {
@@ -402,6 +403,37 @@ export function refreshOpenInboxSynthesis(
     );
     scheduled += 1;
   }
+}
+
+export function projectCoordinatorGoalToInbox(goal: CoordinatorGoal, db: Database.Database = getDb()): void {
+  const sourceKey = `host:${encodeURIComponent(goal.hostUrl)}:coordinator-goal:${goal.id}`;
+  if (goal.state !== "needs-human" && goal.state !== "completed") {
+    const mutation = resolveInboxSource(db, sourceKey);
+    if (mutation) publishProjectionMutation(mutation);
+    return;
+  }
+  const relatedCardIds = goal.items.flatMap((item) => item.cardId ? [item.cardId] : []);
+  // Session-specific questions already have a source-bound handoff.
+  if (goal.state === "needs-human" && relatedCardIds.some((cardId) =>
+    getInboxSessionItems(db, cardId).some((item) => item.workflowState === "open" && item.kind === "pending-input"))) {
+    const mutation = resolveInboxSource(db, sourceKey);
+    if (mutation) publishProjectionMutation(mutation);
+    return;
+  }
+  const summary = goal.summary ?? (goal.state === "completed" ? "Goal acceptance criteria verified." : "This goal needs a decision.");
+  publishMutation(upsertInboxItem(db, {
+    sourceKey, sourceRevision: `${goal.state}:${goal.evidenceDigest ?? goal.revision}`,
+    kind: "coordinator-action", title: goal.objective, relatedCardIds,
+    briefing: {
+      message: summary, recommendation: goal.state === "completed" ? "Review the goal's result evidence." : "Inspect the goal and decide how to continue.",
+      reason: summary, outcome: goal.state === "completed" ? "Goal completed; no merge or deployment is implied." : "Future follow-ups are paused.",
+      caveats: ["Accepted worker commands are not cancelled by pausing the goal."],
+      confidence: "medium", alternativeActions: [],
+      freshness: { observedAt: new Date().toISOString() },
+      provenance: { sourceType: "orchestrator", sourceKey, eventType: `goal-${goal.state}`,
+        hostUrl: goal.hostUrl, relatedCardIds, workspacePath: goal.workspaceScope.length === 1 ? goal.workspaceScope[0] : undefined },
+    },
+  }));
 }
 
 function publishMutation(mutation: InboxMutation): void {

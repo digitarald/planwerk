@@ -100,6 +100,8 @@ export interface StateAccess<TState> {
   getState(): TState | undefined;
   /** Refuse evidence captured after the authoritative stream ended or failed. */
   assertCurrent(): void;
+  /** Observe authoritative host actions only, after reduction. */
+  onAction(listener: (action: StateAction) => void): () => void;
   waitFor(
     predicate: (state: TState | undefined) => boolean,
     timeoutMs: number,
@@ -144,10 +146,11 @@ async function withChannelState<TState, TResult>(
 ): Promise<TResult> {
   throwIfAborted(signal);
   const { result, subscription } = await client.subscribe(uri);
-  let state = narrow(result.snapshot);
+  let state = result.snapshot?.resource === uri ? narrow(result.snapshot) : undefined;
   let ended = false;
   let streamError: unknown;
   const listeners = new Set<() => void>();
+  const actionListeners = new Set<(action: StateAction) => void>();
   const notify = () => { for (const listener of listeners) listener(); };
   const stopped = Symbol("stopped");
   let stopDrain!: () => void;
@@ -164,6 +167,7 @@ async function withChannelState<TState, TResult>(
         const event = next.value;
         if (event.type === "action" && state) {
           state = reduce(state, event.params.action);
+          for (const listener of actionListeners) listener(event.params.action);
           notify();
         }
       }
@@ -176,6 +180,10 @@ async function withChannelState<TState, TResult>(
   })();
   const access: StateAccess<TState> = {
     getState: () => state,
+    onAction(listener) {
+      actionListeners.add(listener);
+      return () => { actionListeners.delete(listener); };
+    },
     assertCurrent() {
       throwIfAborted(signal);
       if (streamError) throw streamError;

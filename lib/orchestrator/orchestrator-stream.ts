@@ -1,9 +1,13 @@
 import type { SessionEvent } from "@github/copilot-sdk";
+import { createSdkUsageTracker, type SdkUsageSummary } from "./sdk-usage.ts";
 
 import type { OrchestratorToolResultEvent } from "./orchestrator-tools";
 
 export type OrchestratorStreamEvent =
   | { type: "text"; content: string; delta?: string }
+  | { type: "warning"; id: string; message: string; warningType: string; originatingMessageId?: string }
+  | { type: "context"; currentTokens?: number; tokenLimit?: number; compacting: boolean; updatedAt: string; error?: string }
+  | { type: "usage"; usage: SdkUsageSummary }
   | {
       type: "tool";
       status: "started" | "completed";
@@ -29,7 +33,12 @@ export function createSdkEventMapper(
 ) {
   const messageOrder: string[] = [];
   const messages = new Map<string, string>();
-  let error: OrchestratorStreamEvent | null = null;
+  let error: Extract<OrchestratorStreamEvent, { type: "error" }> | null = null;
+  const seen = new Set<string>();
+  let currentTokens: number | undefined;
+  let tokenLimit: number | undefined;
+  let compacting = false;
+  const trackUsage = createSdkUsageTracker();
   const renderContent = () =>
     messageOrder
       .map((messageId) => messages.get(messageId) ?? "")
@@ -43,9 +52,29 @@ export function createSdkEventMapper(
 
   return {
     map(event: SessionEvent): OrchestratorStreamEvent | null {
+      if (event.id) {
+        if (seen.has(event.id)) return null;
+        seen.add(event.id);
+      }
+      const usage = trackUsage(event);
+      if (usage) return { type: "usage", usage };
+      if (event.agentId) return null;
       switch (event.type) {
+        case "session.warning":
+          return { type: "warning", id: event.id, ...event.data };
+        case "session.usage_info":
+          currentTokens = event.data.currentTokens;
+          tokenLimit = event.data.tokenLimit;
+          return { type: "context", currentTokens, tokenLimit, compacting, updatedAt: event.timestamp };
+        case "session.compaction_start":
+          compacting = true;
+          return { type: "context", currentTokens, tokenLimit, compacting, updatedAt: event.timestamp };
+        case "session.compaction_complete":
+          compacting = false;
+          if (event.data.success) currentTokens = event.data.postCompactionTokens ?? currentTokens;
+          return { type: "context", currentTokens, tokenLimit, compacting, updatedAt: event.timestamp,
+            error: event.data.success ? undefined : event.data.error ?? `Compaction ${event.data.outcome ?? "did not complete"}` };
         case "assistant.message_delta":
-          if (event.agentId) return null;
           ensureMessage(event.data.messageId);
           messages.set(
             event.data.messageId,
@@ -58,7 +87,6 @@ export function createSdkEventMapper(
             delta: event.data.deltaContent,
           };
         case "assistant.message":
-          if (event.agentId) return null;
           ensureMessage(event.data.messageId);
           if (messages.get(event.data.messageId) === event.data.content) {
             return null;
@@ -66,7 +94,6 @@ export function createSdkEventMapper(
           messages.set(event.data.messageId, event.data.content);
           return { type: "text", content: renderContent() };
         case "tool.execution_start":
-          if (event.agentId) return null;
           return {
             type: "tool",
             status: "started",
@@ -75,7 +102,6 @@ export function createSdkEventMapper(
             result: { message: `Started ${event.data.toolName}` },
           };
         case "tool.execution_complete": {
-          if (event.agentId) return null;
           const recorded = toolResults.get(event.data.toolCallId);
           return {
             type: "tool",
@@ -93,7 +119,6 @@ export function createSdkEventMapper(
           };
         }
         case "session.error":
-          if (event.agentId) return null;
           error = {
             type: "error",
             status: "error",
