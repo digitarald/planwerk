@@ -38,6 +38,7 @@ import { SessionOwnershipRecovery } from "./session-ownership-recovery";
 import { PendingInputCard } from "./pending-input-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogClose, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useBoardStore } from "@/lib/store/board-store";
 import { useConnectionStore } from "@/lib/store/connection-store";
@@ -75,11 +76,12 @@ const artifactIcons: Record<ArtifactType, typeof FileText> = {
   decision: Scale,
 };
 
-/** Single source of truth for the modal's compact section-header typography.
- *  Every panel label shares it so the rhythm can't drift; variants (icon row,
- *  amber "Awaiting Input", the collapsible Changed Files button) layer on top. */
 const SECTION_LABEL_CLASS =
-  "text-xs font-semibold leading-4 text-foreground/65";
+  "text-sm font-semibold leading-5 text-foreground";
+const DETAIL_PROSE_CLASS =
+  "prose prose-sm dark:prose-invert w-full max-w-[72ch] break-words text-base leading-7 sm:text-sm sm:leading-6 prose-headings:font-semibold prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-pre:max-w-full prose-pre:bg-muted prose-code:text-[0.9em]";
+const DISCLOSURE_CLASS =
+  "min-h-9 cursor-pointer content-center rounded-sm text-sm font-medium text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
 
 function SectionLabel({
   className,
@@ -313,10 +315,10 @@ function ChatFactsSection({ card }: { card: KanbanCard }) {
   if (chats.length === 0 && background.length === 0) return null;
   return (
     <section className="space-y-3">
-      {chats.length > 0 && <div>
-        <SectionLabel>Chats</SectionLabel>
-        <div className="space-y-2">
-          {chats.map((chat) => <div key={chat.resource} className="rounded-lg border border-border/70 p-3 text-xs">
+      {chats.length > 0 && <details>
+        <summary className={DISCLOSURE_CLASS}>Chats ({chats.length})</summary>
+        <div className="mt-3 divide-y divide-border/60">
+          {chats.map((chat) => <div key={chat.resource} className="py-3 text-xs">
             <div className="flex justify-between gap-2">
               <span className="font-medium">{chat.title}</span>
               <span className="text-muted-foreground">
@@ -331,15 +333,9 @@ function ChatFactsSection({ card }: { card: KanbanCard }) {
               {chat.changes.additions !== undefined && `+${chat.changes.additions} `}
               {chat.changes.deletions !== undefined && `−${chat.changes.deletions}`}
             </p>}
-            {card.chatDetails?.[chat.resource]?.changesets.map((changeset) => <div key={changeset.resource} className="mt-2">
-              <p className="text-muted-foreground">{changeset.label} · {changeset.status}{changeset.files && ` · ${changeset.files.length} files`}</p>
-              {changeset.files?.map((file) => <p key={file.id} className="mt-1 truncate text-muted-foreground" title={file.path}>
-                {file.path.split("/").pop()} <span className="tabular-nums">+{file.added} −{file.removed}</span>
-              </p>)}
-            </div>)}
           </div>)}
         </div>
-      </div>}
+      </details>}
       {background.length > 0 && <div>
         <SectionLabel>Background work</SectionLabel>
         {background.map(({ chat, work }) => <div key={`${chat}:${work.id}`} className="flex items-center gap-2 py-1 text-xs">
@@ -531,7 +527,6 @@ interface CardDetailModalProps {
 
 export function CardDetailModal({ card }: CardDetailModalProps) {
   const setDetailCard = useBoardStore((s) => s.setDetailCard);
-  const updateCard = useBoardStore((s) => s.updateCard);
   const reconcileCard = useBoardStore((s) => s.reconcileCard);
   const addFeedItem = useOrchestratorStore((s) => s.addFeedItem);
   const hostUrl = useConnectionStore((s) => s.hostUrl);
@@ -560,7 +555,15 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   const [statusHistory, setStatusHistory] = useState<StatusEntry[]>(
     card.statusHistory ?? []
   );
-  const scrimRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const reviewRequest = useRef<AbortController | null>(null);
+  const [reviewError, setReviewError] = useState("");
+  const [reviewRetry, setReviewRetry] = useState<{ fileIds: string[]; reviewed: boolean } | null>(null);
+
+  useEffect(() => () => {
+    reviewRequest.current?.abort();
+    reviewRequest.current = null;
+  }, [card.id, hostUrl]);
 
   useEffect(() => {
     return () => {
@@ -699,15 +702,6 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
     planContentHash: card.planContentHash,
   };
 
-  // Close on Escape
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setDetailCard(null);
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [setDetailCard]);
-
   const handleAcceptDivergence = async (peerCardId: string) => {
     if (dismissingPeer) return;
     setDismissingPeer(peerCardId);
@@ -789,6 +783,9 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
 
   const artifacts = card.artifacts ?? [];
   const fileChanges = card.fileChanges ?? [];
+  const chatsWithChanges = card.chats?.filter(
+    (chat) => chat.interactivity !== "hidden" && card.chatDetails?.[chat.resource]?.changesets.length,
+  ) ?? [];
   const planArtifact = artifacts.find(
     (a) => a.type === "plan" && a.contentRef
   );
@@ -823,8 +820,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
     detailsState === "ready"
       ? sessionDetails.runtimeError
       : sessionDetails.runtimeError ?? card.runtimeError;
-  const [filesExpanded, setFilesExpanded] = useState(fileChanges.length <= 12);
-  const [reviewingFileIds, setReviewingFileIds] = useState<Set<string>>(new Set());
+  const [reviewing, setReviewing] = useState(false);
   const changesetReview = card.changesetReview;
   const reviewById = new Map(changesetReview?.files.map((file) => [file.id, file]) ?? []);
   const supportsFileReview = !ownershipBlocked &&
@@ -844,94 +840,74 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
   };
 
   const updateReviewState = async (fileIds: string[], reviewed: boolean) => {
+    if (reviewRequest.current) return;
     if (
       !hostUrl ||
+      ownershipBlocked ||
       !changesetReview ||
       !changesetReview.capabilities.review ||
       fileIds.length === 0 ||
       fileIds.some((fileId) => !reviewById.has(fileId))
     ) {
+      setReviewError("Review progress is unavailable or the files changed. Refresh evidence before trying again.");
       return;
     }
 
-    const previousReview = changesetReview;
-    const previousFiles = fileChanges;
-    const optimisticReview: ChangesetReview = {
-      ...changesetReview,
-      files: changesetReview.files.map((file) =>
-        fileIds.includes(file.id) ? { ...file, reviewed } : file,
-      ),
-    };
-
-    setReviewingFileIds((current) => new Set([...current, ...fileIds]));
-    updateCard(card.id, {
-      changesetReview: optimisticReview,
-      fileChanges: withReviewState(optimisticReview, fileChanges),
-    });
+    const controller = new AbortController();
+    reviewRequest.current = controller;
+    setReviewError("");
+    setReviewRetry({ fileIds, reviewed });
+    setReviewing(true);
 
     try {
       const response = await fetch("/api/ahp/sessions/review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ hostUrl, sessionUri: card.id, files: fileIds, reviewed }),
+        signal: controller.signal,
       });
       const data = (await response.json().catch(() => null)) as
-        | { ok?: boolean; review?: ChangesetReview }
+        | { ok?: boolean; review?: ChangesetReview; error?: string }
         | null;
 
-      // Always prefer the host's re-read, including a stale/racing response.
+      if (controller.signal.aborted) return;
       if (data?.review) {
+        const currentFiles = useBoardStore.getState().getCard(card.id)?.fileChanges ?? [];
         reconcileCard(card.id, {
           changesetReview: data.review,
-          fileChanges: withReviewState(data.review, fileChanges),
-        });
-      } else if (!response.ok || !data?.ok) {
-        reconcileCard(card.id, {
-          changesetReview: previousReview,
-          fileChanges: previousFiles,
+          fileChanges: withReviewState(data.review, currentFiles),
         });
       }
-    } catch {
-      reconcileCard(card.id, {
-        changesetReview: previousReview,
-        fileChanges: previousFiles,
-      });
+      if (!response.ok || !data?.ok || !data.review) {
+        throw new Error(data?.error || "The host did not confirm the review update. Refresh evidence to check its current state.");
+      }
+      setReviewRetry(null);
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setReviewError(error instanceof Error ? error.message : "The review update was not confirmed. Refresh evidence before retrying.");
+      }
     } finally {
-      setReviewingFileIds((current) => {
-        const next = new Set(current);
-        for (const fileId of fileIds) next.delete(fileId);
-        return next;
-      });
+      if (!reviewRequest.current || reviewRequest.current === controller) {
+        reviewRequest.current = null;
+        setReviewing(false);
+      }
     }
   };
 
   return (
-    <div className="absolute inset-0 z-modal-backdrop flex items-start justify-center">
-      {/* Scrim */}
-      <div
-        ref={scrimRef}
-        className="absolute inset-0 bg-black/10 backdrop-blur-[2px] animate-in fade-in duration-150"
-        onClick={() => setDetailCard(null)}
-      />
-
-      {/* Modal */}
-      <div className="absolute inset-4 z-modal grid grid-rows-[auto_1fr] overflow-hidden rounded-2xl border border-border bg-popover shadow-elevation-lg animate-in fade-in slide-in-from-bottom-2 duration-200">
+    <Dialog open onOpenChange={(open) => { if (!open) setDetailCard(null); }}>
+      <DialogContent
+        showCloseButton={false}
+        initialFocus={titleRef}
+        className="inset-2 grid w-auto max-w-none translate-x-0 translate-y-0 grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-xl p-0 shadow-elevation-lg sm:inset-4 sm:max-w-none"
+      >
         {/* Header */}
-        <div className="flex items-start gap-3 border-b border-border/60 px-6 py-4">
-          <div
-            className={cn(
-              "mt-2 h-2.5 w-2.5 shrink-0 rounded-full",
-              card.runtime === "running" && "bg-emerald-500 animate-pulse",
-              card.runtime === "idle" && "bg-muted-foreground/40",
-              card.runtime === "input-needed" && "bg-amber-500 animate-pulse",
-              card.runtime === "error" && "bg-red-500"
-            )}
-          />
+        <div className="flex max-h-[35dvh] items-start gap-3 overflow-y-auto border-b border-border/60 p-4 sm:px-6">
           <div className="min-w-0 flex-1">
-            <h2 className="text-base font-semibold leading-tight tracking-tight">
+            <DialogTitle ref={titleRef} tabIndex={-1} className="break-words text-lg font-semibold leading-tight tracking-tight outline-none">
               {card.title}
-            </h2>
-            <div className="mt-2 flex flex-wrap items-center gap-3">
+            </DialogTitle>
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
               <RuntimeBadge status={card.runtime} />
               <RiskBadge level={card.risk} />
               {card.riskFactors && card.riskFactors.length > 0 && (
@@ -988,13 +964,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 </span>
               )}
             </div>
-            <div className="mt-2.5 flex flex-wrap items-center gap-3">
-              <SessionCoordinatorModeControl
-                cardId={card.id}
-                cardTitle={card.title}
-              />
-            </div>
-            <div className="mt-3">
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
               <GatePipeline
                 cardId={card.id}
                 currentPhase={card.phase}
@@ -1003,33 +973,25 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 runs={gateRuns}
                 cardDiff={cardDiff}
               />
+              <SessionCoordinatorModeControl
+                cardId={card.id}
+                cardTitle={card.title}
+              />
             </div>
           </div>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => setDetailCard(null)}
-            className="shrink-0"
-          >
+          <DialogClose render={<Button variant="ghost" size="icon" className="shrink-0" />}>
             <X className="h-4 w-4" />
             <span className="sr-only">Close</span>
-          </Button>
+          </DialogClose>
         </div>
 
-        {/* Body: split pane */}
+        <ScrollArea className="min-h-0 min-w-0">
         <div className={cn(
-          "grid min-h-0 grid-cols-1",
-          handoffArtifacts.length > 0 && "md:grid-cols-[1.1fr_1px_0.9fr]"
+          "grid grid-cols-1",
+          handoffArtifacts.length > 0 && "lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]"
         )}>
           {/* Left pane */}
-          <ScrollArea className="min-h-0">
-            <div className="flex flex-col gap-5 p-6">
-              <SessionEvidencePanel
-                card={card} connected={Boolean(hostUrl)}
-                refreshState={evidenceState} refreshError={evidenceError}
-                onRefresh={refreshEvidence}
-                ownershipRecovery={card.ownershipConflict ? <SessionOwnershipRecovery key={evidenceKey} sessionUri={card.id} /> : undefined}
-              />
+          <div className="flex min-w-0 flex-col gap-6 p-4 sm:p-6">
               {effectiveRuntimeError && (
                 <section
                   aria-live="polite"
@@ -1148,25 +1110,77 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                   </section>
                 )}
 
-              {/* Current Activity — always visible */}
+              {card.pendingInput && (
+                <section aria-label="Awaiting input">
+                  <SectionLabel className="text-pw-warning-foreground">
+                    Awaiting input
+                  </SectionLabel>
+                  {effectiveLastAgentMessage && card.pendingInput.kind !== "toolAuthentication" && (
+                    <details className="mb-4" open={effectiveLastAgentMessage.length <= 500 || undefined}>
+                      <summary className={DISCLOSURE_CLASS}>Read agent response</summary>
+                      <article className={cn(DETAIL_PROSE_CLASS, "mt-3")}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                          {effectiveLastAgentMessage}
+                        </ReactMarkdown>
+                      </article>
+                    </details>
+                  )}
+                  <div className="@container/col [&_button]:min-h-11 [&_button]:text-sm [&_input]:text-base [&_p]:text-sm [&_p]:leading-6 [&_textarea]:text-base">
+                    <PendingInputCard cardId={card.id} input={card.pendingInput} />
+                  </div>
+                </section>
+              )}
+
+              {effectiveLastAgentMessage && !card.pendingInput && (
+                <section aria-label="Last response">
+                  <SectionLabel>Last response</SectionLabel>
+                  <article className={DETAIL_PROSE_CLASS}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                      {effectiveLastAgentMessage}
+                    </ReactMarkdown>
+                  </article>
+                </section>
+              )}
+
+              {!effectiveLastAgentMessage && !card.pendingInput && card.runtime !== "error" && (
+                <section aria-live="polite">
+                  <SectionLabel>Last response</SectionLabel>
+                  {detailsState === "loading" ? (
+                    <p className="text-sm text-muted-foreground">Reading the latest response…</p>
+                  ) : detailsState === "error" ? (
+                    <p className="text-sm text-destructive">{detailsError}</p>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      {detailsState === "ready"
+                        ? "The agent host did not expose a final response for this session."
+                        : "No captured response is available."}
+                    </p>
+                  )}
+                </section>
+              )}
+
               {showCurrentActivity && (
                 <section>
                   <SectionLabel>
                     Current Activity
                   </SectionLabel>
-                  <p className="text-[13px] leading-relaxed text-foreground/80">
+                  <p className="max-w-[72ch] text-sm leading-6 text-foreground">
                     {card.activity}
                   </p>
                 </section>
               )}
 
-              {/* Status history */}
+              <SessionEvidencePanel
+                card={card} connected={Boolean(hostUrl)}
+                refreshState={evidenceState} refreshError={evidenceError}
+                onRefresh={refreshEvidence}
+                ownershipRecovery={card.ownershipConflict ? <SessionOwnershipRecovery key={evidenceKey} sessionUri={card.id} /> : undefined}
+              />
+
               {visibleStatusHistory.length > 0 && (
-                <section>
-                  <SectionLabel>
-                    Status history
-                  </SectionLabel>
-                  <div className="relative space-y-0.5 pl-1">
+                <details>
+                  <summary className={DISCLOSURE_CLASS}>Status history ({visibleStatusHistory.length})</summary>
+                  <div className="relative mt-3 space-y-0.5 pl-1">
                     {[...visibleStatusHistory].reverse().map((entry, idx) => {
                       const isCurrent = idx === 0;
                       return (
@@ -1204,143 +1218,115 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                       );
                     })}
                   </div>
-                </section>
+                </details>
               )}
               <ChatFactsSection card={card} />
               <WorkerActivitySection key={card.id} card={card} />
 
               {/* Changed Files */}
-              {fileChanges.length > 0 && (
-                <section>
-                  <div className="mb-2 flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setFilesExpanded(!filesExpanded)}
-                      className={cn("flex min-w-0 flex-1 items-center gap-1 text-left hover:text-foreground transition-colors", SECTION_LABEL_CLASS)}
-                    >
-                      <ChevronDown className={cn("h-3 w-3 shrink-0 transition-transform", !filesExpanded && "-rotate-90")} />
-                      Changed Files
-                      <span className="ml-1 font-normal normal-case tabular-nums">({fileChanges.length})</span>
-                      {supportsFileReview && (
-                        <span className="ml-1 font-normal normal-case tabular-nums text-muted-foreground">
-                          · {reviewedFileCount}/{changesetReview.files.length} reviewed
-                        </span>
+              {(fileChanges.length > 0 || chatsWithChanges.length > 0) && (
+                <section aria-label="Changes">
+                  <details>
+                    <summary className={DISCLOSURE_CLASS}>Changes</summary>
+                    <div className="space-y-4 pt-3">
+                      {fileChanges.length > 0 && (
+                        <div>
+                          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                            <h4 className="text-xs font-medium text-muted-foreground">
+                              Session changes ({fileChanges.length})
+                              {supportsFileReview && ` · ${reviewedFileCount}/${changesetReview.files.length} reviewed`}
+                            </h4>
+                            {supportsFileReview && remainingReviewFileIds.length > 0 && (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={!hostUrl || reviewing}
+                                title={!hostUrl ? "Connect to the agent host to update review progress" : undefined}
+                                onClick={() => void updateReviewState(remainingReviewFileIds, true)}
+                              >
+                                Mark {remainingReviewFileIds.length} remaining
+                              </Button>
+                            )}
+                          </div>
+                          <div className="space-y-px rounded-lg border border-border/60 bg-muted/20 py-1">
+                            {[...fileChanges]
+                              .sort((a, b) => (b.added + b.removed) - (a.added + a.removed))
+                              .map((file) => {
+                                const display = shortenPath(file.path, card.project?.path ?? card.workingDirectory);
+                                const review = file.id ? reviewById.get(file.id) : undefined;
+                                const hasStats = file.added > 0 || file.removed > 0;
+                                return (
+                                  <div
+                                    key={file.id ?? file.path}
+                                    title={file.path}
+                                    className="group flex items-center gap-2 px-2.5 py-1 hover:bg-muted/50"
+                                  >
+                                    {supportsFileReview && review && (
+                                      <input
+                                        type="checkbox"
+                                        checked={review.reviewed}
+                                        disabled={!hostUrl || reviewing}
+                                        onChange={(event) => void updateReviewState([review.id], event.target.checked)}
+                                        aria-label={`Mark ${display.name} as reviewed`}
+                                        className="h-5 w-5 shrink-0 accent-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                                      />
+                                    )}
+                                    <FilePen className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+                                    <span className="min-w-0 flex-1 truncate text-[12px] font-mono">
+                                      <span className="text-foreground">{display.name}</span>
+                                      {display.dir && (
+                                        <span className="ml-1.5 text-muted-foreground">{display.dir}</span>
+                                      )}
+                                    </span>
+                                    {hasStats && (
+                                      <span className="shrink-0 text-[11px] tabular-nums">
+                                        {file.added > 0 && <span className="text-emerald-600">+{file.added}</span>}
+                                        {file.added > 0 && file.removed > 0 && <span className="text-muted-foreground/40"> </span>}
+                                        {file.removed > 0 && <span className="text-red-600">-{file.removed}</span>}
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                          </div>
+                        </div>
                       )}
-                    </button>
-                    {supportsFileReview && remainingReviewFileIds.length > 0 && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-6 shrink-0 px-2 text-[10px]"
-                        disabled={!hostUrl || reviewingFileIds.size > 0}
-                        title={!hostUrl ? "Connect to the agent host to update review progress" : undefined}
-                        onClick={() => void updateReviewState(remainingReviewFileIds, true)}
-                      >
-                        Mark {remainingReviewFileIds.length} remaining
-                      </Button>
-                    )}
-                  </div>
-                  {filesExpanded && (
-                    <div className="space-y-px rounded-lg border border-border/60 bg-muted/20 py-1">
-                      {[...fileChanges]
-                        .sort((a, b) => (b.added + b.removed) - (a.added + a.removed))
-                        .map((file) => {
-                          const display = shortenPath(file.path, card.project?.path ?? card.workingDirectory);
-                          const hasStats = file.added > 0 || file.removed > 0;
-                          return (
-                            <div
-                              key={file.id ?? file.path}
-                              title={file.path}
-                              className="group flex items-center gap-2 px-2.5 py-1 hover:bg-muted/50"
-                            >
-                              {supportsFileReview && file.id && reviewById.has(file.id) && (
-                                <input
-                                  type="checkbox"
-                                  checked={reviewById.get(file.id)?.reviewed === true}
-                                  disabled={!hostUrl || reviewingFileIds.size > 0}
-                                  onChange={(event) => void updateReviewState([file.id!], event.target.checked)}
-                                  aria-label={`Mark ${display.name} as reviewed`}
-                                  className="h-3.5 w-3.5 shrink-0 accent-primary"
-                                />
-                              )}
-                              <FilePen className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-                              <span className="min-w-0 flex-1 truncate text-[12px] font-mono">
-                                <span className="text-foreground">{display.name}</span>
-                                {display.dir && (
-                                  <span className="ml-1.5 text-muted-foreground/50">{display.dir}</span>
-                                )}
-                              </span>
-                              {hasStats && (
-                                <span className="shrink-0 text-[11px] tabular-nums">
-                                  {file.added > 0 && <span className="text-emerald-600">+{file.added}</span>}
-                                  {file.added > 0 && file.removed > 0 && <span className="text-muted-foreground/40"> </span>}
-                                  {file.removed > 0 && <span className="text-red-600">-{file.removed}</span>}
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })}
+                      {chatsWithChanges.map((chat) => (
+                        <div key={chat.resource}>
+                          <h4 className="mb-2 text-xs font-medium">{chat.title}</h4>
+                          {card.chatDetails?.[chat.resource]?.changesets.map((changeset) => (
+                            <details key={changeset.resource} className="border-t border-border/60 py-2">
+                              <summary className={DISCLOSURE_CLASS}>
+                                {changeset.label} · {changeset.status}{changeset.files && ` · ${changeset.files.length} files`}
+                              </summary>
+                              <div className="mt-2 space-y-1">
+                                {changeset.files?.map((file) => (
+                                  <p key={file.id} className="flex min-w-0 justify-between gap-3 text-xs" title={file.path}>
+                                    <span className="truncate">{file.path}</span>
+                                    <span className="shrink-0 tabular-nums text-muted-foreground">+{file.added} −{file.removed}</span>
+                                  </p>
+                                ))}
+                              </div>
+                            </details>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                  {reviewError && (
+                    <div className="mt-3 space-y-2">
+                      <p role="alert" className="text-sm text-destructive">{reviewError}</p>
+                      {reviewRetry && (
+                        <Button variant="outline" size="sm" disabled={!hostUrl || !supportsFileReview || reviewing}
+                          onClick={() => void updateReviewState(reviewRetry.fileIds, reviewRetry.reviewed)}>
+                          Retry review update
+                        </Button>
+                      )}
                     </div>
                   )}
                 </section>
               )}
-
-              {/* Last Agent Message (only when not awaiting input — input section shows it inline) */}
-              {effectiveLastAgentMessage && !card.pendingInput && (
-                <section>
-                  <SectionLabel>
-                    Last Response
-                  </SectionLabel>
-                  <div className="rounded-xl border border-border/60 bg-muted/30 p-4">
-                    <article className="prose prose-sm dark:prose-invert max-w-none prose-p:text-[13px] prose-p:leading-relaxed prose-code:text-xs prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-muted prose-pre:border prose-pre:border-border">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={markdownComponents}
-                      >
-                        {effectiveLastAgentMessage}
-                      </ReactMarkdown>
-                    </article>
-                  </div>
-                </section>
-              )}
-
-              {!effectiveLastAgentMessage &&
-                !card.pendingInput &&
-                card.runtime !== "error" &&
-                detailsState === "loading" && (
-                  <section aria-live="polite">
-                    <SectionLabel>Last response</SectionLabel>
-                    <div className="space-y-2 rounded-lg border border-border/70 bg-muted/15 p-4">
-                      <div className="h-3 w-4/5 animate-pulse rounded bg-muted" />
-                      <div className="h-3 w-3/5 animate-pulse rounded bg-muted" />
-                    </div>
-                  </section>
-                )}
-
-              {!effectiveLastAgentMessage &&
-                !card.pendingInput &&
-                card.runtime !== "error" &&
-                detailsState === "ready" && (
-                  <section>
-                    <SectionLabel>Last response</SectionLabel>
-                    <p className="text-[13px] leading-relaxed text-muted-foreground">
-                      The agent host did not expose a final response for this session.
-                    </p>
-                  </section>
-                )}
-
-              {!effectiveLastAgentMessage &&
-                !card.pendingInput &&
-                card.runtime !== "error" &&
-                detailsState === "error" && (
-                  <section>
-                    <SectionLabel>Last response unavailable</SectionLabel>
-                    <p className="text-[13px] leading-relaxed text-destructive">
-                      {detailsError}
-                    </p>
-                  </section>
-                )}
 
               {/* Coherence — board-level conflicts with other in-flight sessions */}
               {card.coherence && card.coherence.conflictsWith.length > 0 && (
@@ -1492,34 +1478,6 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 </section>
               )}
 
-              {/* Pending Input */}
-              {card.pendingInput && (
-                <section>
-                  <SectionLabel className="mb-2.5 text-amber-600 dark:text-amber-400">
-                    Awaiting Input
-                  </SectionLabel>
-                  {/* Show last agent message as context when available */}
-                  {effectiveLastAgentMessage && card.pendingInput?.kind !== "toolAuthentication" && (
-                    <div className="mb-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5">
-                      <p className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">
-                        Agent
-                      </p>
-                      <article className="prose prose-sm dark:prose-invert max-w-none prose-p:text-[12px] prose-p:leading-relaxed prose-p:my-1 prose-code:text-[11px] prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={markdownComponents}
-                        >
-                          {effectiveLastAgentMessage.length > 500
-                            ? effectiveLastAgentMessage.slice(0, 500) + "…"
-                            : effectiveLastAgentMessage}
-                        </ReactMarkdown>
-                      </article>
-                    </div>
-                  )}
-                  <PendingInputCard cardId={card.id} input={card.pendingInput} />
-                </section>
-              )}
-
               {/* Supporting artifacts */}
               {artifacts.filter((a) => a.type !== "plan" && a.type !== "review").length > 0 && (
                 <section>
@@ -1550,21 +1508,10 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                 </section>
               )}
 
-              <ConversationControls key={`${hostUrl}:${card.id}`} card={card} hostUrl={hostUrl} onSent={(text, outcome) => addFeedItem({
-                type: "intervention",
-                message: `Message ${outcome === "queued" ? "queued for" : outcome === "steering-pending" ? "submitted as steering to" : "accepted by"} "${card.title}": "${text}"`,
-                cardId: card.id, cardTitle: card.title, projectName: card.project?.name,
-              })} />
-            </div>
-          </ScrollArea>
+          </div>
 
-          {/* Divider + intent/review handoff pane */}
           {handoffArtifacts.length > 0 && (
-            <>
-              <div className="hidden bg-border/60 md:block" />
-              <ScrollArea className="hidden min-h-0 md:block">
-                <div className="p-6">
-                  <div className="space-y-8">
+              <aside aria-label="Plan and review" className="min-w-0 space-y-8 border-t border-border/60 p-4 sm:p-6 lg:border-t-0 lg:border-l">
                     {handoffArtifacts.map((artifact) => {
                       const Icon = artifactIcons[artifact.type];
                       const isPlan = artifact.type === "plan";
@@ -1578,7 +1525,7 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                               {isPlan ? "Original intent" : artifact.title}
                             </h3>
                           </div>
-                          <article className="prose prose-sm dark:prose-invert max-w-none prose-headings:font-semibold prose-h1:text-base prose-h2:text-sm prose-h2:mt-5 prose-h2:mb-2 prose-h3:text-xs prose-p:text-[13px] prose-p:leading-relaxed prose-li:text-[13px] prose-table:text-xs prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-[12px] prose-strong:font-semibold">
+                          <article className={DETAIL_PROSE_CLASS}>
                             <ReactMarkdown
                               remarkPlugins={[remarkGfm]}
                               components={markdownComponents}
@@ -1589,13 +1536,18 @@ export function CardDetailModal({ card }: CardDetailModalProps) {
                         </section>
                       );
                     })}
-                  </div>
-                </div>
-              </ScrollArea>
-            </>
+              </aside>
           )}
         </div>
-      </div>
-    </div>
+        </ScrollArea>
+        <div className="max-h-[35dvh] overflow-y-auto border-t border-border/60 px-4 py-3 sm:px-6">
+          <ConversationControls key={`${hostUrl}:${card.id}`} card={card} hostUrl={hostUrl} onSent={(text, outcome) => addFeedItem({
+            type: "intervention",
+            message: `Message ${outcome === "queued" ? "queued for" : outcome === "steering-pending" ? "submitted as steering to" : "accepted by"} "${card.title}": "${text}"`,
+            cardId: card.id, cardTitle: card.title, projectName: card.project?.name,
+          })} />
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

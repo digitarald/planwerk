@@ -50,7 +50,7 @@ function PendingMessages({ pending, busy, writable, uncertain, edit, onEdit, onT
     {pending.map((item) => <div key={`${item.kind}:${item.id}`} className="border-t border-border/60 py-3">
       <p className="break-all text-xs text-muted-foreground">{item.kind === "steering" ? "Steering pending" : "Queued"} · {item.id}</p>
       {edit?.id === item.id && edit.kind === item.kind ? <>
-        <Textarea aria-label="Edit pending message" value={edit.draft} onChange={(event) => onText(event.target.value)} className="mt-2 text-[13px]" />
+        <Textarea aria-label="Edit pending message" value={edit.draft} onChange={(event) => onText(event.target.value)} className="mt-2 text-base sm:text-sm" />
         <Button variant="outline" size="sm" disabled={busy || !writable || uncertain || !edit.draft.trim()} onClick={() => void onMutate({ operation: "edit", kind: edit.kind, id: edit.id, expectedText: edit.text, message: edit.draft })}>Save pending message</Button>
         <Button variant="ghost" size="sm" onClick={onDiscard}>Discard edit</Button>
       </> : <p className="mt-1 whitespace-pre-wrap text-[13px] leading-5">{item.text}</p>}
@@ -171,22 +171,18 @@ export function ConversationControls({ card, hostUrl, onSent }: {
   }
 
   return (
-    <section className="space-y-3 pt-2" aria-label="Conversation controls">
+    <section className="space-y-3" aria-label="Conversation controls">
       {(usage || expanded) && <UsageSummary usage={usage} label={chatUri === card.defaultChat ? "Lead chat" : "Conversation"} />}
-      <div className="flex flex-wrap items-center gap-2">
-        <Button variant="outline" size="sm" disabled={busy || !hostUrl || card.ownershipConflict} onClick={() => void read()}>
-          {busy ? <Loader2 className="size-3.5 animate-spin" /> : null}
-          {expanded ? "Reload conversation" : "Inspect conversation"}
-        </Button>
-        {expanded && (catalog.length > 1 || (!entry && catalog.length > 0)) && <label className="text-xs">
+      {expanded && <div className="flex flex-wrap items-center gap-2">
+        {(catalog.length > 1 || (!entry && catalog.length > 0)) && <label className="text-xs">
           <span className="sr-only">Conversation</span>
           <select className="max-w-56 rounded-md border border-border bg-background p-1.5 text-xs" value={chatUri} disabled={busy} onChange={(event) => void read(event.target.value)}>
             {catalog.map((chat) => <option key={chat.resource} value={chat.resource}>{chat.title || chat.resource}{chat.interactivity === "read-only" ? " (read-only)" : ""}</option>)}
             {!entry && <option value={chatUri} disabled>Conversation unavailable in catalog</option>}
           </select>
         </label>}
-        {expanded && details?.capabilities.ordinary && writable && <Button variant="ghost" size="sm" disabled={busy || uncertain} onClick={() => void create()}>New conversation</Button>}
-      </div>
+        {details?.capabilities.ordinary && writable && <Button variant="ghost" size="sm" disabled={busy || uncertain} onClick={() => void create()}>New conversation</Button>}
+      </div>}
       {expanded && !visible && <p role="status" className="text-xs text-muted-foreground">Waiting for a visible conversation in the host catalog. Reload or choose another conversation.</p>}
       {expanded && details && visible && <div className="space-y-3">
         <p className="break-all text-xs text-muted-foreground">Chat: {details.chatUri}</p>
@@ -209,7 +205,7 @@ export function ConversationControls({ card, hostUrl, onSent }: {
           </div>
           {selection?.turnId === turn.turnId && <div className="mt-2 space-y-2">
             <Textarea aria-label="Selected-text snapshot" placeholder="Paste the excerpt to discuss…" value={selection.text} maxLength={8_000}
-              onChange={(event) => setSelection({ turnId: turn.turnId, text: event.target.value })} className="text-[13px]" />
+              onChange={(event) => setSelection({ turnId: turn.turnId, text: event.target.value })} className="text-base sm:text-sm" />
             <p className="text-xs text-muted-foreground">Saved as an exact snapshot; later changes to the source do not change it.</p>
             <Button variant="outline" size="sm" disabled={busy || uncertain || !writable || !selection.text.trim()} onClick={() => void create("sideChat", turn.turnId, selection.text)}>Discuss snapshot</Button>
             <Button variant="ghost" size="sm" onClick={() => setSelection(undefined)}>Cancel</Button>
@@ -228,10 +224,14 @@ export function ConversationControls({ card, hostUrl, onSent }: {
             event.preventDefault(); void mutate({ operation: "send", message });
           } }}
           disabled={!writable || busy || uncertain} placeholder={writable ? "Send instructions to this conversation…" : "This conversation is unavailable or read-only"}
-          rows={2} className="min-h-[3rem] resize-none text-[13px]" />
-        <div className="flex flex-wrap gap-2">
+          rows={2} className="min-h-[3rem] resize-none text-base sm:text-sm" />
+        <div className="flex flex-wrap items-center gap-2">
           <Button type="submit" variant="outline" size="sm" disabled={!writable || busy || uncertain || !message.trim()}><Send className="size-3.5" />{running ? "Queue message" : "Send message"}</Button>
           {running && writable && <Button type="button" variant="ghost" size="sm" disabled={busy || uncertain || !message.trim()} onClick={() => void mutate({ operation: "steer", message })}>Steer now</Button>}
+          <Button type="button" variant="ghost" size="sm" className="ml-auto" disabled={busy || !hostUrl || card.ownershipConflict} onClick={() => void read()}>
+            {busy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+            {expanded ? "Reload conversation" : "Inspect conversation"}
+          </Button>
         </div>
       </form>
       {notice && <p role="status" className="break-words text-xs leading-5 text-muted-foreground">{notice}</p>}
