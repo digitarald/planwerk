@@ -21,17 +21,17 @@ const root = path.resolve(import.meta.dirname, "../..");
 const componentUrl = pathToFileURL(path.join(root, "components/board/card-detail-modal.tsx")).href;
 const noopComponents = new Set([
   "./pending-input-card", "@/components/ui/badge", "@/components/ui/button",
-  "@/components/ui/scroll-area", "@/components/ui/textarea",
+  "@/components/ui/dialog", "@/components/ui/scroll-area", "@/components/ui/textarea",
   "@/components/gates/gate-pipeline", "@/components/orchestrator/coordinator-mode-control",
 ]);
-const componentNames = ["PendingInputCard", "Badge", "Button", "ScrollArea", "Textarea", "GatePipeline", "SessionCoordinatorModeControl"];
+const componentNames = ["PendingInputCard", "Badge", "Button", "Dialog", "DialogClose", "DialogContent", "DialogTitle", "ScrollArea", "Textarea", "GatePipeline", "SessionCoordinatorModeControl"];
 const hooks = registerHooks({
   resolve(specifier, context, nextResolve) {
     const s = `globalThis["${key}"]`;
     let source: string | undefined;
     if (specifier === "react/jsx-runtime") source = "export const Fragment='fragment';export function jsx(type,props){return {type,props};}export const jsxs=jsx;";
     if (specifier === "lucide-react") source = "X Send GitBranch FileText FileEdit FlaskConical Lightbulb BookOpen ClipboardCheck Scale Clock Shield ShieldAlert Loader2 CirclePause AlertTriangle ShieldCheck ShieldX MessageCircleWarning XCircle ChevronDown Split Cpu Bot RotateCcw ArrowDown ArrowUp".split(" ").map((name) => `export function ${name}(){}`).join("\n");
-    if (specifier === "react") source = `export function useState(value){return [typeof value==="function"?value():value,()=>{}];} export function useRef(value){return {current:value};} export function useEffect(effect){${s}.effects.push(effect);}`;
+    if (specifier === "react") source = `export function useState(value){return [typeof value==="function"?value():value,()=>{}];} export function useRef(value){return {current:value};} export function useEffect(effect){${s}.effects.push(effect);} export function useId(){return "detail-refresh-test";}`;
     if (specifier === "@/lib/store/board-store") source = `
       const store={setDetailCard(){},updateCard(){},reconcileCard(id,patch){${s}.patches.push(patch);},getCard(){return ${s}.card;}};
       export const useBoardStore=selector=>selector(store);useBoardStore.getState=()=>store;`;
