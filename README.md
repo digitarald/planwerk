@@ -35,6 +35,14 @@ risk, unblocker, or no-action update without filling in a rigid template.
 Read state stays separate from unresolved action, so looking at a blocker never
 makes it disappear. Inbox, split, and board views are always one click apart.
 
+Session details lead with the decision, error, or latest response. Complete
+response context remains available beside pending actions; file changes,
+conversation facts, and activity history use disclosures instead of competing
+with the handoff. Plan and independent review remain available in narrow windows,
+and conversation controls stay outside the evidence scroll.
+The composer keeps send, steer, and conversation inspection together in one
+action row, leaving more room for the handoff itself.
+
 The coordinator drawer accepts plain-language requests such as *"why is auth
 stuck?"* or *"coordinate the API and UI work for rate limiting."* It can discover
 known sessions, inspect cached outcomes and gate evidence, and save goals with

@@ -52,14 +52,6 @@ interface GatePipelineProps {
   cardDiff?: CardDiff;
 }
 
-const PHASE_LABELS: Record<Phase, string> = {
-  define: "DEF",
-  plan: "PLN",
-  build: "BLD",
-  review: "REV",
-  ship: "SHP",
-};
-
 const PHASE_NAMES: Record<Phase, string> = {
   define: "Define",
   plan: "Plan",
@@ -77,11 +69,11 @@ const statusIcons: Record<GateDisplayStatus, typeof Check | null> = {
 };
 
 const statusColors: Record<GateDisplayStatus, string> = {
-  passed: "bg-emerald-500 text-white",
-  running: "bg-primary text-white",
-  failed: "bg-red-500 text-white",
+  passed: "bg-pw-success/15 text-foreground",
+  running: "bg-primary text-primary-foreground",
+  failed: "bg-destructive/10 text-destructive",
   pending: "bg-muted border border-border text-muted-foreground",
-  "not-required": "bg-muted/30 text-muted-foreground/40",
+  "not-required": "bg-muted/30 text-muted-foreground",
 };
 
 function relativeTime(iso?: string): string {
@@ -149,7 +141,7 @@ export function GatePipeline({
 
   return (
     <TooltipProvider>
-      <div className="flex items-center gap-0.5" data-card-id={cardId}>
+      <div className="flex flex-wrap items-center gap-y-1" data-card-id={cardId}>
         {steps.map(({ phase, status }, idx) => {
           const Icon = statusIcons[status];
           const phaseRuns = runsByPhase.get(phase);
@@ -160,8 +152,9 @@ export function GatePipeline({
               <Tooltip>
                 <TooltipTrigger
                   aria-label={`${PHASE_NAMES[phase]} gate: ${status}${stale ? " (stale)" : ""}`}
+                  aria-current={phase === currentPhase ? "step" : undefined}
                   className={cn(
-                    "relative flex h-5 cursor-default items-center justify-center rounded px-1.5 text-[9px] font-bold transition-all outline-none",
+                    "relative flex min-h-8 cursor-default items-center justify-center gap-1 rounded px-2 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                     statusColors[status],
                     status === "running" && "ring-1 ring-primary/30",
                     stale && "ring-1 ring-amber-400",
@@ -170,11 +163,8 @@ export function GatePipeline({
                   onMouseEnter={() => setHoveredPhase(phase)}
                   onMouseLeave={() => setHoveredPhase(null)}
                 >
-                  {Icon ? (
-                    <Icon className={cn("h-2.5 w-2.5", status === "running" && "animate-spin")} />
-                  ) : (
-                    <span>{PHASE_LABELS[phase]}</span>
-                  )}
+                  {Icon && <Icon aria-hidden="true" className={cn("h-3 w-3", status === "running" && "animate-spin")} />}
+                  <span>{PHASE_NAMES[phase]}</span>
                   {stale && (
                     <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-amber-400 ring-1 ring-background" />
                   )}
