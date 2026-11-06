@@ -8,8 +8,11 @@ export function DesktopNavigation() {
   useEffect(() => {
     const navigate = () => {
       const destination = window.location.hash;
-      if (destination !== "#inbox" && destination !== "#board") return;
-      useUIStore.getState().setWorkspaceMode(destination === "#inbox" ? "inbox" : "board");
+      if (destination !== "#inbox" && destination !== "#board"
+        && destination !== "#split" && destination !== "#flightdeck") return;
+      const mode = destination === "#inbox" ? "inbox" : destination === "#board" ? "board"
+        : destination === "#split" ? "split" : "flightdeck";
+      useUIStore.getState().setWorkspaceMode(mode);
       if (destination === "#inbox") useInboxStore.getState().setFilter("unread");
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
     };

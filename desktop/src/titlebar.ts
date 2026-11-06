@@ -20,6 +20,17 @@ window.__PLANWERK_DESKTOP__ = true;
 })();
 `;
 
+export function titlebarZoom(percent: number): string {
+  return `(() => {
+  const apply = () => {
+    document.documentElement.style.setProperty("--desktop-traffic-inset", "${88 * 100 / percent}px");
+    document.documentElement.style.setProperty("--desktop-header-min-height", "${44 * 100 / percent}px");
+  };
+  if (document.documentElement) apply();
+  else document.addEventListener("DOMContentLoaded", apply, { once: true });
+})();`;
+}
+
 export function titlebarAction(detail: unknown): "start" | "stop" | null {
   if (!detail || typeof detail !== "object" || !("type" in detail)
     || detail.type !== "titlebar" || !("action" in detail)) return null;
