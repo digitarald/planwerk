@@ -1,6 +1,7 @@
 # Planwerk for macOS
 
-Electrobun 2.0.2 provides the native window, application menus, and menu-bar
+The Electrobun 2.0.4 npm bootstrap pins the 2.0.2 native runtime through
+`hutch.config.ts`. It provides the native window, application menus, and menu-bar
 item. The window uses the system WebKit renderer, not bundled Chromium.
 The desktop main process runs on Bun. The existing Next.js server, SQLite
 database, and Copilot SDK still run on bundled Node.js.
@@ -61,9 +62,11 @@ endpoint and Copilot authentication remain prerequisites for managing sessions.
 
 ## Menu and lifecycle
 
-- The macOS traffic lights share the existing 44px header. There is no separate
+- The macOS traffic lights share the existing header. There is no separate
   title row. Drag the non-interactive header areas to move the window; buttons
-  and workspace filters remain clickable. The browser layout is unchanged.
+  and workspace filters remain clickable. Desktop-only insets reserve 88 native
+  points for the traffic lights and at least 44 native points of header height
+  at every content zoom. The browser layout is unchanged.
 - The menu-bar number counts **unread, open inbox items** for the connected
   host, across all workspaces. A separate menu row gives the unresolved count.
 - Zero unread items shows the icon alone. Counts above 99 display `99+`;
@@ -83,11 +86,12 @@ endpoint and Copilot authentication remain prerequisites for managing sessions.
 - The native process refreshes the count every three seconds through a
   read-only, authenticated local endpoint. It does not invoke inbox synthesis.
 - Open Inbox selects the unread inbox view. Open Board selects the board.
-  Both preserve workspace filters because those filters also define automation
-  scope. A global menu count can therefore exceed the filtered view's count.
-- Closing the window with the red button quits Planwerk through the same
-  shutdown sequence as Quit Planwerk or Command-Q. Minimize or Hide Planwerk
-  keeps monitoring active without closing the app; neither grants additional authority.
+  The native View menu also offers Split and Flightdeck. All four preserve
+  workspace filters because those filters also define automation scope.
+  A global menu count can therefore exceed the filtered view's count.
+- The red close button and File > Close Window (Command-W) hide the retained
+  window. The backend, connection and menu-bar monitoring keep running.
+  Minimize and Hide Planwerk also keep the app alive. None grants additional authority.
 - Reopening the app or choosing a menu destination restores the same window.
   A second launch activates the first instance rather than starting another
   server.
@@ -98,6 +102,7 @@ endpoint and Copilot authentication remain prerequisites for managing sessions.
   If the replacement also fails, a native error directs you to Restart Local
   Server; automatic recovery does not loop. Restart resets the recovery limit.
   This checks JavaScript/bridge liveness, not GPU compositing or visual correctness.
+  Hidden windows are not replaced. Recreated windows retain content zoom too.
 - Quit stops Planwerk's server and its owned child-process group. It does not
   stop VS Code or sessions owned by VS Code. Restart Local Server requires
   confirmation because it interrupts in-flight coordinator work.
@@ -109,6 +114,31 @@ endpoint and Copilot authentication remain prerequisites for managing sessions.
   shutdown completion and elapsed time before requesting native exit, and a
   process-exit record when the runtime emits its exit event.
 
+### Keyboard shortcuts
+
+Shortcuts belong to this application and work while a text field is focused.
+View destinations use the existing allowlisted hash navigation without reloading
+the document. Content zoom uses WebKit page zoom, not CSS scaling.
+
+| Shortcut | Action |
+| --- | --- |
+| Command-1 | Feed, filtered to unread |
+| Command-2 | Board |
+| Command-3 | Split |
+| Command-4 | Flightdeck |
+| Command-plus or Command-equals (including shifted equals) | Zoom in by 10 percentage points |
+| Command-minus | Zoom out by 10 percentage points |
+| Command-0 | Actual size, 100% |
+| Command-W | Hide the retained window |
+| Control-Command-F | Toggle native fullscreen |
+| Command-Q | Quit after shutting down owned resources |
+| Command-K | Existing command palette, unchanged |
+
+Content zoom ranges from 50% to 200%. The View menu disables zoom commands at
+their bounds and Actual Size at 100%. Its single native Plus key equivalent
+accepts both equals variants; no global shortcut or page-to-native zoom RPC is
+registered. Window > Zoom changes the window size, not content zoom.
+
 ## Data and diagnostics
 
 Release data lives in `~/Library/Application Support/Planwerk`. Development
@@ -116,6 +146,23 @@ builds use `~/Library/Application Support/Planwerk Dev`. Both are outside the
 app bundle, so rebuilding does not discard the database or SDK state.
 The web app continues to use the checkout's `.planwerk` directory.
 Desktop builds do not silently copy or merge the web database.
+
+`preferences.json` in the same per-channel data directory remembers content zoom
+and the last normal window frame, separately from SQLite. Zoom is reapplied after
+backend reloads and renderer recovery. Move/resize saves are debounced, atomically
+replace the file, and flush on hide or quit. Invalid or unreadable preferences
+produce diagnostics and a native error before falling back to defaults. Save
+failures are also reported and retained for a later retry.
+
+Normal geometry excludes fullscreen, maximized and minimized frames.
+Restoration chooses the available work area with the greatest overlap, falls back
+to the primary display after a display is removed, and clamps size and position
+to that work area. Negative coordinates on secondary displays are valid.
+Unusable display information produces a warning and a centered default window.
+The pinned macOS runtime's display work areas, constructor and move/resize
+events use primary-display top-left coordinates. Its `getFrame()` Y instead uses
+the current display's height. Persistence therefore uses event coordinates,
+avoiding that mismatch on unequal-height displays.
 
 The menu's **Show Logs** command opens the data directory. Diagnostics are local;
 there is no upload or external collector:
@@ -251,11 +298,15 @@ running as the same OS user.
 ## Validation
 
 ```bash
-npm run native:test
+node --test desktop/src/preferences.test.ts desktop/src/main.test.ts desktop/src/titlebar.test.ts desktop/src/navigation.test.ts
 npm --prefix desktop run typecheck
 npm run typecheck
-npm run native:build
+npx eslint desktop/src/main.ts desktop/src/main.test.ts desktop/src/preferences.ts desktop/src/preferences.test.ts desktop/src/titlebar.ts desktop/src/titlebar.test.ts desktop/src/navigation.test.ts components/desktop-navigation.tsx components/title-bar.tsx
+npm run native:build -- --dev
 ```
+
+Use `npm run native:test` for the broader desktop suite. Shell-only changes can
+use `npm --prefix desktop run build:dev` after a backend has been staged.
 
 Tests cover empty and large counts, malformed responses, external-link policy,
 duplicate launch, socket-file preservation, backend readiness, authenticated
@@ -263,14 +314,36 @@ status, port collisions, owned-process shutdown, persistent data paths, log
 rotation/redaction, cross-layer launch IDs, browser error capture/rate limits,
 offline diagnostic export, startup/runtime metric shapes, and release packaging
 (runnable bundles, installer rejection, artifact paths, and packaging failures).
+Focused native VM tests also cover zoom bounds/restoration, all four destinations,
+close-to-hide/reopen, hidden renderer checks, fullscreen/normal geometry,
+listener cleanup and explicit-quit failures. Preferences tests cover atomic
+replacement, debounce, error reporting and display restoration.
 
 On a real Mac, also verify the native window, menu, WebKit AHP connection,
-close-to-hide, reopen, and Quit. Check both appearances and an unreachable
+close-to-hide, reopen, and Quit. With input focused, test every shortcut and draft
+retention while zooming. Inspect 50%, 100% and 200% for traffic-light clearance,
+header dragging, interactive controls, dialogs and scrolling. Test red-close and
+Command-W, then reopen through the Dock, a second launch and menu navigation;
+verify the same window and backend remain. Quit explicitly and relaunch to check
+zoom and normal geometry, including after fullscreen/window Zoom and display
+removal. Check both appearances and an unreachable
 agent host before distributing a release. A browser-only test does not verify
 these native behaviors. Trigger a console warning, a rejected promise, and a
 resource-load error in WebKit and verify `webview.log`; export with the server
 stopped and confirm unavailable logs are marked. Source-level bridge tests do not
 replace this packaged-WebKit check.
+
+This change was built and launched locally as an unsigned Apple Silicon
+development app. Native automation verified Command-equals, Command-plus and
+shifted equals in 10-point steps, the 200% bound, input draft retention while
+zooming, and Command-1/3/4 navigation. Light-mode header clearance was inspected
+at 100% and 200%; zoom and geometry reached the preferences file. The app later
+completed owned-resource shutdown in about three seconds, with no remaining
+development listener. The initiating quit shortcut was not confirmed.
+Automation then refused safe input dispatch, leaving native menu clicks,
+Command-2/minus/0/W/Q, 50% layout, fullscreen, close/reopen, relaunch restoration,
+dragging/scrolling and dark-mode checks unverified. Multi-display cases are
+covered by tests and SDK source inspection, not a hardware display-removal test.
 
 ## Publishing a native preview
 

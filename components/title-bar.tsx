@@ -60,7 +60,7 @@ export function TitleBar() {
   return (
     <header data-desktop-titlebar={desktop || undefined} className={cn(
       "relative z-sticky flex h-11 shrink-0 items-center border-b border-border/60 bg-background px-3 shadow-elevation-xs sm:px-4",
-      desktop && "select-none !pl-[88px]",
+      desktop && "select-none !pl-[var(--desktop-traffic-inset,88px)] min-h-[var(--desktop-header-min-height,44px)]",
     )}>
       <div className="flex shrink-0 items-center gap-2.5">
         <Image src="/logo-light-64.png" alt="Planwerk" width={24} height={24} className="dark:hidden" />
