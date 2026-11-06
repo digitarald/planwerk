@@ -34,6 +34,23 @@ const context = {
   now: "2026-09-22T00:10:00.000Z",
 };
 
+test("heartbeat notices capture session identity and event observation time", () => {
+  const session = card({ project: { name: "Project", path: "/project" } });
+  for (const action of [
+    { type: "gate-completed", cardId: session.id, gateType: "lint", status: "failed" },
+    { type: "plan-review-failed", cardId: session.id, reason: "Plan evidence missing" },
+  ] as const) {
+    const [operation] = projectHeartbeatAction(action, session, context);
+    assert.equal(operation.type, "upsert");
+    if (operation.type !== "upsert") continue;
+    assert.equal(operation.item.briefing.provenance.sourceType, "orchestrator");
+    assert.equal(operation.item.briefing.provenance.sessionTitle, session.title);
+    assert.equal(operation.item.briefing.provenance.projectName, "Project");
+    assert.equal(operation.item.briefing.provenance.workspacePath, "/project");
+    assert.equal(operation.item.briefing.freshness.sourceObservedAt, context.now);
+  }
+});
+
 test("pending-input projection replaces stale requests and later resolves", () => {
   const pending = card({
     runtime: "input-needed",
@@ -332,21 +349,15 @@ test("archived no-code sessions still produce completion", () => {
   ));
 });
 
-test("removed sessions clear ephemeral briefings without creating completion", () => {
+test("removed sessions retire gate and review handoffs without clearing conflict authority or creating history", () => {
   const operations = projectRemovedSession("card-1");
-  assert.deepEqual(operations, [
-    { type: "resolve-kind", kind: "pending-input", cardId: "card-1" },
-    {
-      type: "resolve-source",
-      sourceKey: "session:card-1:runtime-error",
-    },
-    {
-      type: "resolve-source",
-      sourceKey: "card:card-1:ready:review",
-    },
-    {
-      type: "resolve-source",
-      sourceKey: "card:card-1:ready:ship",
-    },
-  ]);
+  assert.ok(operations.every((operation) => operation.type === "resolve-kind"
+    && operation.cardId === "card-1"));
+  const resolvedKinds = operations.flatMap((operation) =>
+    operation.type === "resolve-kind" ? [operation.kind] : []);
+  assert.ok(resolvedKinds.includes("gate-failure"));
+  assert.ok(resolvedKinds.includes("review-escalation"));
+  assert.ok(resolvedKinds.includes("pending-input"));
+  assert.ok(!resolvedKinds.includes("conflict"));
+  assert.ok(!resolvedKinds.includes("completion"));
 });

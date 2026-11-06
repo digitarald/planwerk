@@ -328,15 +328,13 @@ export function hasInboxHumanResolution(db: Database.Database, itemId: string): 
   `).get(itemId));
 }
 
-export function getInboxSessionItems(
+export function getSessionLinkedInboxItems(
   db: Database.Database,
-  hostUrl: string,
-  cardId?: string,
+  { hostUrl, cardId }: { hostUrl: string; cardId?: string },
 ): InboxItem[] {
   const rows = db.prepare(`
     SELECT * FROM inbox_items
     WHERE json_extract(briefing_json, '$.provenance.hostUrl') = ?
-      AND json_extract(briefing_json, '$.provenance.sourceType') = 'ahp-session'
       AND card_id IS NOT NULL
       ${cardId === undefined ? "" : "AND card_id = ?"}
   `).all(...(cardId === undefined ? [hostUrl] : [hostUrl, cardId])) as InboxItemRow[];
@@ -357,7 +355,10 @@ export function observeInboxSource(
     },
     freshness: {
       ...item.briefing.freshness,
-      sourceObservedAt: sourceObservedAt ?? item.briefing.freshness.sourceObservedAt,
+      // Session observations cannot revalidate an old gate or review result.
+      sourceObservedAt: item.briefing.provenance.sourceType === "orchestrator"
+        ? item.briefing.freshness.sourceObservedAt ?? item.briefing.freshness.observedAt
+        : sourceObservedAt ?? item.briefing.freshness.sourceObservedAt,
     },
   };
   if (JSON.stringify(briefing) === JSON.stringify(item.briefing)) {

@@ -11,6 +11,15 @@ export const INBOX_ITEM_KINDS = [
 ] as const;
 
 export type InboxItemKind = (typeof INBOX_ITEM_KINDS)[number];
+export const SESSION_HANDOFF_KINDS: readonly InboxItemKind[] = [
+  "pending-input",
+  "runtime-error",
+  "review-ready",
+  "ship-ready",
+  "gate-failure",
+  "review-escalation",
+];
+
 export type InboxPriorityBand = "urgent" | "high" | "normal" | "low";
 export type InboxWorkflowState = "open" | "resolved" | "dismissed";
 export type InboxReadState = "unread" | "read";

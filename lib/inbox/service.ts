@@ -6,7 +6,7 @@ import {
   applyInboxAction,
   getInboxItem,
   getInboxItemBySourceKey,
-  getInboxSessionItems,
+  getSessionLinkedInboxItems,
   hasInboxHumanResolution,
   listInboxItems,
   observeInboxSource,
@@ -419,7 +419,8 @@ export function projectCoordinatorGoalToInbox(goal: CoordinatorGoal, db: Databas
   const relatedCardIds = goal.items.flatMap((item) => item.cardId ? [item.cardId] : []);
   // Session-specific questions already have a source-bound handoff.
   if (goal.state === "needs-human" && relatedCardIds.some((cardId) =>
-    getInboxSessionItems(db, cardId).some((item) => item.workflowState === "open" && item.kind === "pending-input"))) {
+    getSessionLinkedInboxItems(db, { hostUrl: goal.hostUrl, cardId })
+      .some((item) => item.workflowState === "open" && item.kind === "pending-input"))) {
     const mutation = resolveInboxSource(db, sourceKey);
     if (mutation) publishProjectionMutation(mutation);
     return;
@@ -519,7 +520,7 @@ export function projectCardToInbox(
   observation: { pendingInputCleared?: boolean; sourceObserved?: boolean } = {},
 ): void {
   if (!isSessionOwnedByHost(db, card.id, hostUrl)) return;
-  const currentItems = getInboxSessionItems(db, hostUrl, card.id);
+  const currentItems = getSessionLinkedInboxItems(db, { hostUrl, cardId: card.id });
   const now = new Date().toISOString();
   for (const item of currentItems) {
     publishMutation(observeInboxSource(db, item, {

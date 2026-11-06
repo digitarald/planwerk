@@ -2,11 +2,12 @@ import type Database from "better-sqlite3";
 
 import { AHPStatus, type AHPSessionSummary } from "../ahp/types.ts";
 import {
-  getInboxSessionItems,
+  getSessionLinkedInboxItems,
   observeInboxSource,
   resolveInboxSource,
   type InboxMutation,
 } from "../db/inbox-store.ts";
+import { SESSION_HANDOFF_KINDS } from "./types.ts";
 
 export interface InboxCatalogEntry {
   session: AHPSessionSummary;
@@ -29,14 +30,14 @@ export function reconcileInboxCatalog(
   const sources = new Map(catalog.map((entry) => [entry.session.resource, entry]));
   return db.transaction(() => {
     const mutations: InboxMutation[] = [];
-    for (const item of getInboxSessionItems(db, hostUrl, options.cardId)) {
+    for (const item of getSessionLinkedInboxItems(db, { hostUrl, cardId: options.cardId })) {
       if (!item.cardId || options.ownsSession?.(item.cardId) === false) continue;
       const source = sources.get(item.cardId);
       const status = source?.session.status ?? 0;
       const needsInput = (status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
       const archived = (status & AHPStatus.IsArchived) !== 0;
       const obsolete = !source || !source.enabled
-        || (archived && ["pending-input", "runtime-error", "review-ready", "ship-ready"].includes(item.kind))
+        || (archived && SESSION_HANDOFF_KINDS.includes(item.kind))
         || (item.kind === "pending-input" && !needsInput)
         || (item.kind === "runtime-error" && !(status & AHPStatus.Error));
       if (source) {

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { AHPStatus, type AHPSessionSummary } from "../ahp/types.ts";
 import type { HeartbeatAction } from "../orchestrator/heartbeat.ts";
 import type { KanbanCard, PendingInput } from "../types.ts";
+import { SESSION_HANDOFF_KINDS } from "./types.ts";
 import type {
   InboxBriefing,
   InboxItemDraft,
@@ -150,6 +151,30 @@ function draft(
     relatedCardIds,
     title,
     briefing: itemBriefing,
+  };
+}
+
+function withSessionContext(
+  item: InboxItemDraft,
+  card: Pick<KanbanCard, "title" | "project"> | undefined,
+  context: ProjectionContext,
+): InboxItemDraft {
+  return {
+    ...item,
+    briefing: {
+      ...item.briefing,
+      freshness: {
+        ...item.briefing.freshness,
+        sourceObservedAt: context.sourceObserved === false
+          ? undefined : item.briefing.freshness.observedAt,
+      },
+      provenance: {
+        ...item.briefing.provenance,
+        sessionTitle: card?.title,
+        projectName: card?.project?.name,
+        workspacePath: card?.project?.path,
+      },
+    },
   };
 }
 
@@ -495,24 +520,9 @@ export function projectCardSnapshot(
     if (operation.type !== "upsert") return operation;
     return {
       ...operation,
-      item: {
-        ...operation.item,
-        recoverPendingInput: Boolean(card.pendingInput),
-        briefing: {
-          ...operation.item.briefing,
-          freshness: {
-            ...operation.item.briefing.freshness,
-            sourceObservedAt: context.sourceObserved === false
-              ? undefined : observedAt(context),
-          },
-          provenance: {
-            ...operation.item.briefing.provenance,
-            sessionTitle: card.title,
-            projectName: card.project?.name,
-            workspacePath: card.project?.path,
-          },
-        },
-      },
+      item: withSessionContext({
+        ...operation.item, recoverPendingInput: Boolean(card.pendingInput),
+      }, card, context),
     };
   });
 }
@@ -575,21 +585,9 @@ export function projectArchivedSession(
 export function projectRemovedSession(
   cardId: string,
 ): InboxProjectionOperation[] {
-  return [
-    { type: "resolve-kind", kind: "pending-input", cardId },
-    {
-      type: "resolve-source",
-      sourceKey: `session:${cardId}:runtime-error`,
-    },
-    {
-      type: "resolve-source",
-      sourceKey: `card:${cardId}:ready:review`,
-    },
-    {
-      type: "resolve-source",
-      sourceKey: `card:${cardId}:ready:ship`,
-    },
-  ];
+  return SESSION_HANDOFF_KINDS.map((kind) => ({
+    type: "resolve-kind", kind, cardId,
+  }));
 }
 
 function actionRevision(action: HeartbeatAction): string {
@@ -614,7 +612,7 @@ function orchestratorDraft(
 ): InboxItemDraft {
   const revision = actionRevision(action);
   const cardId = "cardId" in action ? action.cardId : undefined;
-  return draft(
+  return withSessionContext(draft(
     kind,
     sourceKey,
     revision,
@@ -646,7 +644,7 @@ function orchestratorDraft(
     }),
     cardId,
     input.relatedCardIds,
-  );
+  ), input.card, context);
 }
 
 export function projectHeartbeatAction(

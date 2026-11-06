@@ -231,17 +231,17 @@ export function InboxFeedItem({
   const project = isWipLimit
     ? "Board"
     : projectName ?? item.projectName;
-  const sessionTitle = item.sessionTitle ?? card?.title ?? "Session unavailable";
+  const sessionTitle = item.sessionTitle ?? card?.title ?? (item.cardId ? "Session" : "Coordinator");
   const freshness = inboxSourceFreshness(item.briefing.freshness.sourceObservedAt, connected, now);
-  const freshnessLabel = !card && !isWipLimit
-    ? "Session unavailable"
-    : item.briefing.trigger === "pending-input-unavailable"
+  const freshnessLabel = freshness === "disconnected"
+    ? "Disconnected"
+    : item.cardId && !card && !isWipLimit
+      ? "Not on this board"
+      : item.briefing.trigger === "pending-input-unavailable"
       ? "Question unavailable"
-      : freshness === "disconnected"
-        ? "Disconnected"
-        : freshness === "unverified"
-          ? "Source unverified"
-          : freshness === "stale" ? "Source may be out of date" : null;
+      : freshness === "unverified"
+        ? "Source not checked"
+        : freshness === "stale" ? "Source may be out of date" : null;
   const actionUnavailable = (action: InboxSuggestedAction) =>
     routeInboxClientAction(item.briefing.trigger, action.kind, Boolean(card)).type === "unavailable";
   const note = confidenceNote(item);

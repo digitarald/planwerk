@@ -21,12 +21,12 @@ const hooks = registerHooks({
       "@/lib/orchestrator/gate-engine": `
         export function getPersistedCardPhase(){return globalThis["${key}"].phase;}
         export function setCardPhase(id,phase){globalThis["${key}"].writes.push(phase);}
-        export function getNextPhase(phase){return globalThis["${key}"].projectGates ? {plan:'build',build:'review'}[phase] : undefined;}
+        export function getNextPhase(phase){return globalThis["${key}"].projectGates ? {define:'plan',plan:'build',build:'review'}[phase] : undefined;}
         export function canAdvancePhase(){return {allowed:false,pendingGates:[{gateType:'review',gateName:'plan-review'}]};}
         export function deriveGateStatus(...args){globalThis["${key}"].gateReads.push(args);return "pending";}`,
       "@/lib/orchestrator/risk-store": "export function getAuthoritativeCardRisk(){return {status:'current',assessment:{factors:[]}};}",
       "@/lib/orchestrator/risk-authority": "export function riskAutomationPolicy(){return {current:true,level:'medium'};}",
-      "@/lib/orchestrator/automation-eligibility": "export function isCardAutomationEligible(){return false;}",
+      "@/lib/orchestrator/automation-eligibility": `export { isCardAutomationEligible } from "${new URL("../orchestrator/automation-eligibility.ts", import.meta.url).href}";`,
       "@/lib/orchestrator/review-executor": "export function getReviewRunsForCard(){return [];}",
       "@/lib/orchestrator/coherence-engine": "export function buildCoherenceSummary(){}",
       "@/lib/orchestrator/status-history-store": "export function getCardStatusHistory(){return [];} export function recordCardStatus(){}",
@@ -100,6 +100,24 @@ test("a pending plan on a Build card projects the plan gate without moving phase
   const cleared = enrichSessionToCard(summary, undefined, { pendingInput: null });
   assert.equal(cleared.pendingInput, undefined);
   assert.equal(state.gateReads[0][1], "build");
+  state.card = undefined;
+  state.projectGates = false;
+});
+
+test("cold Define cards do not advertise gate blockers; Build cards explain intentional evidence waits", () => {
+  state.projectGates = true;
+  state.writes.length = 0;
+  state.card = { runtime: "idle", evidence: { state: "unavailable" } };
+  state.phase = "define";
+  const define = enrichSessionToCard(summary);
+  assert.equal(define.gateBlocker, undefined);
+  assert.equal(define.automationWait, undefined);
+  state.phase = "build";
+  const build = enrichSessionToCard(summary);
+  assert.equal(build.gateStatus, "pending");
+  assert.equal(build.automationWait?.reason, "evidence");
+  assert.match(build.automationWait?.nextStep ?? "", /Refresh evidence/);
+  assert.deepEqual(state.writes, []);
   state.card = undefined;
   state.projectGates = false;
 });

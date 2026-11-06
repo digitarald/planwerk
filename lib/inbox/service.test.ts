@@ -10,6 +10,9 @@ import {
 import type { KanbanCard } from "../types.ts";
 import type { CoordinatorGoal } from "../orchestrator/coordinator-goal-types.ts";
 import { serializeInboxItem } from "./contract.ts";
+import { inboxEvents } from "./events.ts";
+import { projectHeartbeatAction } from "./projector.ts";
+import type { InboxStreamEvent } from "./types.ts";
 
 const state = { db: new Database(":memory:"), owned: true, generations: 0, staleDecision: false };
 const key = "__inboxServiceTest";
@@ -35,7 +38,10 @@ const hooks = registerHooks({
       : nextResolve(specifier, context);
   },
 });
-const { projectCardToInbox, projectCoordinatorGoalToInbox } = await import("./service.ts");
+const {
+  applyInboxProjection, projectCardToInbox, projectCoordinatorGoalToInbox,
+  projectHeartbeatToInbox, projectArchivedSessionToInbox, projectRemovedSessionToInbox,
+} = await import("./service.ts");
 const host = "ws://test";
 const observed = "2026-09-22T00:00:00.000Z";
 function card(pending = true): KanbanCard {
@@ -154,6 +160,49 @@ test("cached reprojection cannot revalidate source facts and quarantined session
   const current = getInboxItemBySourceKey(state.db, original.sourceKey)!;
   assert.equal(current.workflowState, "open");
   assert.equal(current.briefing.freshness.sourceObservedAt, undefined);
+});
+
+test("live card observations repair heartbeat identity without revalidating its result", () => {
+  reset();
+  const [mutation] = applyInboxProjection(host, projectHeartbeatAction({
+    type: "gate-completed", cardId: "session", gateType: "lint", status: "failed",
+  }, undefined, { hostUrl: host, now: observed }), state.db);
+  projectCardToInbox(host, { ...card(false), runtime: "idle" }, undefined, state.db, { sourceObserved: true });
+  const current = getInboxItemBySourceKey(state.db, mutation.item.sourceKey)!;
+  assert.equal(current.briefing.provenance.sessionTitle, "Deployment");
+  assert.equal(current.briefing.freshness.sourceObservedAt, observed);
+});
+
+test("archive and removal events retire heartbeat blockers immediately and notify connected clients", async () => {
+  for (const archived of [true, false]) {
+    reset();
+    const events: InboxStreamEvent[] = [];
+    const unsubscribe = inboxEvents.subscribe((event) => events.push(event));
+    try {
+      projectHeartbeatToInbox(host, {
+        type: "gate-completed", cardId: "session", gateType: "lint", status: "failed",
+      }, card());
+      projectHeartbeatToInbox(host, {
+        type: "plan-review-failed", cardId: "session", reason: "Plan evidence missing",
+      }, card());
+      const notices = listInboxItems(state.db).items;
+      assert.equal(notices.length, 2);
+      if (archived) {
+        projectArchivedSessionToInbox(host, {
+          resource: "session", title: "Deployment", status: 97, provider: "test",
+          createdAt: observed, modifiedAt: observed,
+        });
+      } else {
+        projectRemovedSessionToInbox(host, "session");
+      }
+      await settle();
+      for (const item of notices) {
+        assert.equal(getInboxItemBySourceKey(state.db, item.sourceKey)?.workflowState, "resolved");
+        assert.ok(events.some((event) => event.type === "inboxRemoved"
+          && event.itemId === item.id && event.hostUrl === host));
+      }
+    } finally { unsubscribe(); }
+  }
 });
 
 test("a stale inbox decision cannot commit generated presentation or replace deterministic actions", async () => {
