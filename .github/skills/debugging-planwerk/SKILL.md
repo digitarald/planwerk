@@ -103,6 +103,17 @@ expire after one hour, while pending input, approvals, errors, failed gates, and
 conflicts remain source-resolved. `inbox_item_actions` distinguishes explicit human
 resolution from automatic projection cleanup; the Done view should contain only the
 former.
+Session-linked inbox reconciliation is keyed by host and `card_id`, not
+`provenance.sourceType`: that field identifies the event producer, so gate failures
+and review escalations are `orchestrator` notices that still belong to sessions.
+`SESSION_HANDOFF_KINDS` shares retirement policy between live archive events and
+catalog reconnects. Archived sessions retire those handoffs without approving a
+gate, clearing coherence authority, or erasing human action history.
+Catalog/board observations repair identity for both producers, but cannot
+revalidate an orchestrator result: its `sourceObservedAt` stays at the actual event
+observation (legacy rows use their saved `observedAt`), not the latest catalog read.
+An off-board session is not necessarily deleted. Inspect the complete passive
+catalog before interpreting missing board membership or collecting cold evidence.
 Completion is valid only while the source session remains idle or archived. A later
 running, input-needed, or error snapshot source-resolves the item and emits
 `inboxRemoved`, even when another client steered the session. Final chat enrichment may

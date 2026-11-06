@@ -10,6 +10,7 @@ import type {
   InboxListResponse,
 } from "./types.ts";
 import { inboxSourceFreshness } from "./freshness.ts";
+import { SESSION_HANDOFF_KINDS } from "./types.ts";
 
 const BAND_NUMBER = {
   urgent: 1,
@@ -19,12 +20,7 @@ const BAND_NUMBER = {
 } as const;
 
 const ACTIONABLE_KINDS = new Set<InboxItemKind>([
-  "pending-input",
-  "runtime-error",
-  "review-ready",
-  "ship-ready",
-  "gate-failure",
-  "review-escalation",
+  ...SESSION_HANDOFF_KINDS,
   "conflict",
 ]);
 
