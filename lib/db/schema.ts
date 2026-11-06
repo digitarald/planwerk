@@ -11,6 +11,7 @@ import { ensureCoordinatorDeliveriesSchema } from "./coordinator-deliveries";
 import { ensureSdkObservabilitySchema } from "./sdk-observability-schema";
 import { ensureReviewChatCleanupSchema } from "./review-chat-cleanup-schema";
 import { ensureCardRiskSchema } from "./card-risk-schema";
+import { ensureDecisionSchema } from "./decision-store";
 import { ensureReviewRunSchema } from "./review-run-schema";
 import { ensureInboxSchema } from "./inbox-schema";
 import { ensurePlanAnswerSchema } from "./plan-answer-store";
@@ -198,6 +199,7 @@ export function getDb(): Database.Database {
     recoverExpiredWork(db);
 
     ensureCardRiskSchema(db);
+    ensureDecisionSchema(db);
     ensureInboxSchema(db);
     ensurePlanAnswerSchema(db);
 

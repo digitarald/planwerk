@@ -13,6 +13,8 @@ import { sourceBindingsMatch, sourceEvidenceRevision } from "../ahp/source-bindi
 import type { RiskInput } from "./risk-assessor.ts";
 import { readConfigFile } from "./config-file.ts";
 import { RISK_POLICY_VERSION } from "./risk-classifier.ts";
+import { decisionPolicyKey, decisionProfile } from "../decisions/config.ts";
+import { RISK_DECISION_VERSION } from "../decisions/risk-policy.ts";
 
 export interface NormalizedPendingInput {
   requestId: string;
@@ -399,6 +401,8 @@ function digestRow(
   return createHash("sha256")
     .update(stableJson({
       riskPolicyVersion: RISK_POLICY_VERSION,
+      ...(decisionProfile("risk").mode !== "legacy"
+        ? { decisionPolicy: decisionPolicyKey("risk", RISK_DECISION_VERSION) } : {}),
       hostUrl: row.host_url,
       input: facts.input,
       phase: row.phase,

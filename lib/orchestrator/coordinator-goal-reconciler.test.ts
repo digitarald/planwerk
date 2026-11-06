@@ -31,6 +31,7 @@ const modules: Record<string, string> = {
   "./gate-engine": "export const canAdvancePhase=()=>({allowed:s.verified});export const getGateRunsForCard=()=>[]",
   "./gate-revision": "export const resolveAuthoritativeGateRevision=()=>({ok:true,changesetRef:'source:1'})",
   "./risk-store": "export const getRiskForAutomation=()=> 'high'",
+  "../decisions/config.ts": "export const decisionStillCurrent=()=>true",
   "../db/schema": "export const getDb=()=>s.db",
   "../inbox/service": "export function projectCoordinatorGoalToInbox(){}",
 };

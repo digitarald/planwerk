@@ -56,7 +56,8 @@ export function persistAuthoritativeRisk(
   snapshot: RiskFactsSnapshot,
   level: RiskLevel,
   factors: string[],
-  assessedBy: "copilot" = "copilot",
+  assessedBy: "copilot" | "rule" | "decision-model" = "copilot",
+  decision?: { key: string; policy: string },
 ): boolean {
   return setCardRiskIfFactsCurrent(
     getDb(),
@@ -64,5 +65,6 @@ export function persistAuthoritativeRisk(
     level,
     factors,
     assessedBy,
+    decision,
   );
 }

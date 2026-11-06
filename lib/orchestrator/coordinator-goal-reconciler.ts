@@ -18,6 +18,7 @@ import { projectCoordinatorGoalToInbox } from "../inbox/service";
 import { getRiskForAutomation } from "./risk-store";
 import { getCoordinatorDelivery } from "../db/coordinator-deliveries";
 import { getCoordinatorHost } from "./coordinator-hosts";
+import { decisionStillCurrent } from "../decisions/config.ts";
 
 function verifiedResult(hostUrl: string, card: KanbanCard): boolean {
   if (card.changesetVerified && card.filesChanged === 0 && card.lastAgentMessage) return true;
@@ -63,6 +64,7 @@ export async function reconcileCoordinatorGoals(hostUrl: string, signal: AbortSi
     const cards = currentCoordinatorCards(scope);
     const evidence = initial.items.map((item) => {
       const card = cards.find((entry) => entry.id === item.cardId);
+      const gateRuns = card ? getGateRunsForCard(card.id) : [];
       return {
         itemId: item.id, state: item.state, acceptanceCriteria: item.acceptanceCriteria,
         cardId: item.cardId, runtime: card?.runtime, digest: card && coordinatorOutcomeDigest(card),
@@ -71,9 +73,10 @@ export async function reconcileCoordinatorGoals(hostUrl: string, signal: AbortSi
         uncorrelated: item.state === "awaiting-result" && card?.runtime === "idle" && Boolean(card.lastAgentMessage) &&
           coordinatorOutcomeDigest(card) !== item.baseline && !hasNewGoalResult(item, card),
         gatesVerified: card ? verifiedResult(hostUrl, card) : false,
-        gateReports: card ? getGateRunsForCard(card.id).slice(0, 10).map((run) => ({
+        gateReportsTruncated: gateRuns.length > 10 || gateRuns.some((run) => (run.output?.length ?? 0) > 2_000),
+        gateReports: gateRuns.slice(0, 10).map((run) => ({
           gate: run.gateName, status: run.status, changesetRef: run.changesetRef, output: run.output?.slice(0, 2_000),
-        })) : [],
+        })),
       };
     });
     const digest = createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
@@ -117,13 +120,17 @@ export async function reconcileCoordinatorGoals(hostUrl: string, signal: AbortSi
           goal = store.update(goal.id, goal.revision, { state: "needs-human", summary: "Result evidence exceeds the bounded review window. Inspect it before accepting the outcome." }, owner);
           continue;
         }
-        const judgment = await judgeCoordinatorGoal(judgmentEvidence, deadline);
+        const judgment = await judgeCoordinatorGoal(judgmentEvidence, deadline, { hostUrl, owner: `goal:${goal.id}` });
         if (!isCurrent()) continue;
         const freshCards = currentCoordinatorCards(scope);
         if (!acceptedResultsCurrent(goal, freshCards) || candidates.some((entry) => {
           const current = freshCards.find((card) => card.id === entry.cardId);
           return !current || current.runtime !== "idle" || current.pendingInput || coordinatorOutcomeDigest(current) !== entry.digest;
         })) continue;
+        if (judgment.decisionBindings?.some((binding) => !decisionStillCurrent("goal", binding.version, binding))) {
+          goal = store.update(goal.id, goal.revision, { state: "needs-human", summary: "Goal decision policy changed before acceptance; inspect the result again." }, owner);
+          continue;
+        }
         for (const entry of candidates) {
           if (!judgment.acceptedItemIds.includes(entry.itemId)) continue;
           const item = goal.items.find((item) => item.id === entry.itemId)!;

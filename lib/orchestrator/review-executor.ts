@@ -66,6 +66,7 @@ import {
 import { resolveAuthoritativeGateRevision } from "./gate-revision";
 import { appendPlanReviewEvidence } from "./review-prompt";
 import { isPlanSource, type PlanEvidence } from "../ahp/plan-source";
+import { decisionStillCurrent } from "../decisions/config.ts";
 
 const REVIEW_JUDGMENT_LEASE_MS = 60_000;
 
@@ -716,7 +717,9 @@ export async function processReviewResult(
         } else {
           const evidence = extractReviewEvidence(turn);
           const judgment = await awaitAbortable(
-            () => judgeReviewResponse(evidence.response, planRun ? run.changesetRef ?? undefined : undefined),
+            () => judgeReviewResponse(evidence.response, planRun ? run.changesetRef ?? undefined : undefined, {
+              hostUrl, owner: `review:${reviewRunId}`, signal,
+            }),
             signal,
           );
           verdict = { ...judgment, madeEdits: evidence.madeEdits };
@@ -769,6 +772,18 @@ export async function processReviewResult(
     if (leaseState.failure !== undefined) return null;
     throwIfAborted(signal);
     assertOperationCurrent();
+    if (verdict.decisionBinding) {
+      let policyCurrent = false;
+      try {
+        policyCurrent = decisionStillCurrent("review", verdict.decisionBinding.version, verdict.decisionBinding);
+      } catch { /* Invalid policy cannot authorize a verdict. */ }
+      if (!policyCurrent) {
+        verdict = {
+          status: "needs-human", madeEdits: verdict.madeEdits, findings: [],
+          summary: "Review decision policy changed before acceptance; human review required.",
+        };
+      }
+    }
     const action = decideReviewAction(
       verdict,
       run.iteration,

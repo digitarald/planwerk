@@ -6,13 +6,15 @@ import {
   getRiskFactsSnapshot,
 } from "./risk-facts.ts";
 import { requiresConservativeHighRisk } from "./risk-classifier.ts";
+import { decisionPolicyKey, decisionProfile } from "../decisions/config.ts";
+import { RISK_DECISION_VERSION } from "../decisions/risk-policy.ts";
 
 export interface StoredRisk {
   cardId: string;
   level: RiskLevel;
   factors: string[];
   assessedAt: string;
-  assessedBy: "copilot" | "human";
+  assessedBy: "copilot" | "human" | "rule" | "decision-model";
   riskDigest: string | null;
 }
 
@@ -23,6 +25,8 @@ interface RiskRow {
   assessed_at: string;
   assessed_by: string;
   risk_digest: string | null;
+  decision_key?: string | null;
+  decision_policy?: string | null;
 }
 
 export type AuthoritativeRisk =
@@ -58,7 +62,7 @@ function mapRow(row: RiskRow): StoredRisk {
     level: row.risk_level as RiskLevel,
     factors: JSON.parse(row.risk_factors),
     assessedAt: row.assessed_at,
-    assessedBy: row.assessed_by as "copilot" | "human",
+    assessedBy: row.assessed_by as StoredRisk["assessedBy"],
     riskDigest: row.risk_digest,
   };
 }
@@ -91,6 +95,14 @@ export function readAuthoritativeRisk(
   }
   if (assessment.riskDigest !== currentDigest) {
     return { status: "stale", assessment, currentDigest };
+  }
+  if (decisionProfile("risk").mode === "active" && assessment.assessedBy === "copilot") {
+    return { status: "policy-unsafe", assessment, currentDigest };
+  }
+  if (assessment.assessedBy === "decision-model" &&
+      (!row.decision_key || decisionProfile("risk").mode !== "active" ||
+       row.decision_policy !== decisionPolicyKey("risk", RISK_DECISION_VERSION))) {
+    return { status: "policy-unsafe", assessment, currentDigest };
   }
   if (
     assessment.level !== "high"

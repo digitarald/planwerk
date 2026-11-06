@@ -1,6 +1,8 @@
 import "server-only";
 
 import type { CopilotClient } from "@github/copilot-sdk";
+import { decide, decisionChoice, decisionProfile, scheduleShadow } from "../decisions/service.ts";
+import { RISK_DECISION_VERSION, riskBasis, riskQuestions } from "../decisions/risk-policy.ts";
 
 import type { RiskLevel } from "@/lib/types";
 import {
@@ -39,6 +41,9 @@ export interface RiskInput {
 export interface RiskAssessment {
   level: RiskLevel;
   factors: string[];
+  assessedBy?: "copilot" | "rule" | "decision-model";
+  decisionKey?: string;
+  decisionPolicy?: string;
 }
 
 const SYSTEM_PROMPT = `You are a risk triage agent for a software development lifecycle system.
@@ -124,11 +129,28 @@ function buildPrompt(input: RiskInput): string {
   return lines.filter(Boolean).join("\n\n");
 }
 
-export async function assessRisk(input: RiskInput): Promise<RiskAssessment> {
+export async function assessRisk(
+  input: RiskInput,
+  options: { hostUrl?: string; owner?: string; signal?: AbortSignal } = {},
+): Promise<RiskAssessment> {
   // The model may add scrutiny, but it may never downgrade an incomplete or
   // deterministically sensitive source snapshot.
   const conservative = requiresConservativeHighRisk(input);
-  if (conservative) return conservative;
+  if (conservative) return { ...conservative, assessedBy: "rule" };
+  const profile = decisionProfile("risk");
+  if (profile.mode === "shadow") scheduleShadow("risk", RISK_DECISION_VERSION, input, riskQuestions, options);
+  if (profile.mode === "active") {
+    const outcome = await decide("risk", RISK_DECISION_VERSION, input, riskQuestions, options);
+    const level = decisionChoice(outcome, "risk", ["low", "medium", "high"]);
+    const basis = decisionChoice(outcome, "basis", ["bounded", "contained", "authority", "irreversible", "sensitive"]);
+    if (decisionChoice(outcome, "evidence", ["sufficient"]) !== "sufficient" ||
+        (level === "low" && basis !== "bounded") ||
+        (level === "medium" && !["bounded", "contained"].includes(basis))) {
+      throw new Error("Risk decisions contradict their consequence evidence; human review required.");
+    }
+    return { level, factors: [riskBasis[basis]], assessedBy: "decision-model",
+      decisionKey: outcome.key, decisionPolicy: outcome.policyKey };
+  }
 
   let client: CopilotClient | undefined;
   let runtimeLease: CopilotRuntimeLease<CopilotClient> | undefined;
