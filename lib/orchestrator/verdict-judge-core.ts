@@ -4,6 +4,7 @@ export interface JudgeVerdict {
   status: "passed" | "failed" | "needs-human";
   summary: string;
   findings: string[];
+  decisionBinding?: { policyKey: string; version: string };
 }
 
 export interface ReviewVerdict extends JudgeVerdict {

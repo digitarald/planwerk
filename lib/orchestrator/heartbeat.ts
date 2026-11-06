@@ -790,7 +790,7 @@ async function processCard(
         type: "risk-assessment-required",
         cardId: card.id,
         reason: riskAssessmentError
-          ? `Automatic risk assessment failed: ${riskAssessmentError}. Automation will retry.`
+          ? `Risk assessment requires attention: ${riskAssessmentError}. Automation is paused; transient failures may retry.`
           : `${riskPolicy.reason} Automation will retry when authoritative facts are available.`,
       };
       emit(hostUrl, action);

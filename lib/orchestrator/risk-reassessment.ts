@@ -12,12 +12,13 @@ const lane = new AssessmentLane<RiskAssessment>();
 export async function reassessAndPersistRisk(
   cardId: string,
   snapshot: RiskFactsSnapshot,
-  assess: (input: RiskFactsSnapshot["input"]) => Promise<RiskAssessment>,
+  assess: (input: RiskFactsSnapshot["input"], options?: { hostUrl?: string; owner?: string }) => Promise<RiskAssessment>,
   persist: (
     snapshot: RiskFactsSnapshot,
     level: RiskLevel,
     factors: string[],
-    assessedBy: "copilot",
+    assessedBy: "copilot" | "rule" | "decision-model",
+    decision?: { key: string; policy: string },
   ) => boolean,
 ): Promise<RiskAssessment> {
   if (snapshot.cardId !== cardId) {
@@ -26,12 +27,14 @@ export async function reassessAndPersistRisk(
   const conservative = requiresConservativeHighRisk(snapshot.input);
   // Share only model work. Each caller retains its own admission context and
   // must independently authorize/CAS the result after its await.
-  const assessment = conservative ?? await lane.run(
+  const assessment: RiskAssessment = conservative ? { ...conservative, assessedBy: "rule" } : await lane.run(
     JSON.stringify([snapshot.hostUrl, cardId]), snapshot.digest,
-    () => assess(snapshot.input),
+    () => assess(snapshot.input, { hostUrl: snapshot.hostUrl, owner: cardId }),
   );
   try {
-    if (!persist(snapshot, assessment.level, assessment.factors, "copilot")) {
+    if (!persist(snapshot, assessment.level, assessment.factors, assessment.assessedBy ?? "copilot",
+      assessment.decisionKey && assessment.decisionPolicy
+        ? { key: assessment.decisionKey, policy: assessment.decisionPolicy } : undefined)) {
       throw new Error("authoritative facts changed during assessment");
     }
   } catch (error) {

@@ -59,6 +59,27 @@ Node, SQLite, and the platform-specific Copilot SDK runtime are bundled; an
 installed Node or Bun is not required to run it. VS Code with a compatible AHP
 endpoint and Copilot authentication remain prerequisites for managing sessions.
 
+### Optional decision-model configuration
+
+The bundled Node server uses native `fetch` for Foundry decision inference.
+It needs no Python installation or personal `decide` skill directory.
+All decision families remain in legacy mode until explicitly configured.
+See the root [decision-model setup](../README.md#decision-models-and-copilot-sdk-integration)
+for the server-only environment variables, workload validation, and external
+data-transfer boundary.
+
+The backend inherits the desktop process environment. A development launch
+from a configured terminal receives those variables. Finder and Dock launches
+do not inherit exports from an unrelated terminal; configure the environment
+of the actual launch process. Environment files and credentials are excluded
+from packaged payloads. There is no bundled key, automatic Azure provisioning,
+or new credential UI.
+
+With `PLANWERK_DECISION_CONFIG_SOURCE=decide` in that launch environment, the
+backend can reuse the skill's saved deployment and existing macOS Keychain
+item directly. No credential is copied into the app bundle. The checkout's
+ignored `.env.local` configures web development only, not a Finder-launched app.
+
 ## Menu and lifecycle
 
 - The macOS traffic lights share the existing 44px header. There is no separate

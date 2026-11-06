@@ -172,6 +172,43 @@ Intentional architectural choice:
 
 Think of it as a desktop app using Next.js for its UI layer.
 
+#### Bounded decision models
+
+The coordinator's state machine remains ordinary application code. The
+server-only `lib/decisions` client can replace six one-shot SDK judgments:
+risk, benign input selection, review verdicts, goal acceptance, coherence,
+and inbox attention/action selection. It calls Foundry's typed Decision API
+directly through native `fetch`; it does not start an agent session or Python
+process. Independent reviewers, worker sessions, conversational CTO chat,
+and useful inbox prose keep their existing execution paths.
+
+Each family has explicit legacy, shadow, and active routing. Legacy is the
+default. Shadow records results but never controls automation. Active requires
+a workload-validated acceptance profile. It consumes an accepted judgment
+without asking the SDK to relabel it; ambiguity, contradictions, unsupported
+evidence, and invalid responses require inspection. Provider failures cannot
+become successful negative answers.
+
+Selected-label probability and optional provider confidence are retained
+separately. Evidence completeness and authority remain independent checks.
+Sensitive-path risk floors, exact plan/code provenance, report-only plan
+reviews, input allowlists, coordinator modes, gate ownership, and delivery
+receipts apply regardless of model confidence. Domain stores retain their
+existing final current-source and lease checks.
+
+`decision_records` stores scoped evidence hashes, policy/configuration
+fingerprints, distributions, usage, latency, and accepted/abstained/deferred
+outcomes, not raw source prompts. The bounded assessment lane deduplicates
+unchanged work; each caller retains its own cancellation and commit authority.
+Changed questions, criteria, evidence, profiles, or deployment configuration
+invalidate reuse. Risk records additionally retain their decision and policy
+keys, and active risk authority cannot accept a legacy SDK assessment.
+
+The offline evaluation script reports coverage, accepted accuracy, critical
+errors, calibration samples, and end-to-end latency/cost against supplied
+baselines. Production activation is an explicit operator decision after
+held-out validation, not a consequence of passing synthetic unit tests.
+
 #### AHP client practices
 
 - Keep one root catalog observer per logical host, shared by board subscribers.

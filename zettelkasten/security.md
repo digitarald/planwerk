@@ -85,6 +85,34 @@ Confirmed AHP mutation results are independent from connection teardown:
 shutdown failures are logged for health/reconciliation but never turn a
 confirmed session/chat/turn identity into a retryable mutation failure.
 
+## Decision-model inference
+
+Decision-model inference is opt-in per family and uses a separate Foundry
+deployment and credential. Enabling shadow or active mode sends the bounded
+task, review, or overlap evidence for that family to that external resource.
+Only use deployments approved for the evidence's privacy and residency
+requirements. No live inference is required by the test suite or offline
+evaluation script.
+
+Endpoint, deployment, acceptance profiles, and API key or Entra token come
+from the trusted server process environment, never project YAML or browser
+input. Explicitly opting into `PLANWERK_DECISION_CONFIG_SOURCE=decide` also
+allows the server to read the skill's user-level settings and endpoint-bound
+macOS Keychain item. Keychain access is read-only, time-bounded, and does not
+copy the credential into a file or place it in process arguments. It is not
+enabled by default, and locked or missing items fail explicitly.
+The client allows only HTTPS Foundry resource hosts, refuses redirects,
+and bounds request/response sizes and deadlines. Credentials and source
+prompts are not written to decision logs or SQLite decision records.
+
+Model probabilities are evidence, not permissions. Active judgments cannot
+bypass mode checks, gate independence, source/lease binding, benign-input
+allowlists, or plan-review provenance. Uncertainty is not sent to an SDK
+arbitrator. Missing setup, invalid output, and insufficient evidence cannot
+silently become a low-risk classification, gate pass, or completed goal.
+Policy changes fence in-flight results and invalidate accepted risk authority.
+Legacy behavior can be selected explicitly; it is not automatic failover.
+
 ## Limitations
 
 - Same-origin checks prevent browser CSRF; they do not authenticate a native

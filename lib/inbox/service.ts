@@ -44,6 +44,7 @@ import {
   type InboxSynthesisEvidence,
 } from "./briefing-synthesis-core.ts";
 import { generateInboxBriefing } from "./briefing-generator.ts";
+import { decisionStillCurrent } from "../decisions/config.ts";
 import type {
   InboxActionType,
   InboxItem,
@@ -272,6 +273,9 @@ function scheduleSynthesis(
           evidence.sourceRevision,
           requestId,
           (current) => {
+            if (generated.decision && !decisionStillCurrent("inbox", generated.decision.version, generated.decision)) {
+              throw new Error("Inbox decision policy changed before presentation commit.");
+            }
             const draft = applySynthesizedBriefing(
               current,
               generated.briefing,

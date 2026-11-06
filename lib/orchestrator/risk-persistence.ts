@@ -11,7 +11,7 @@ export function setCardRiskInDb(
   cardId: string,
   level: RiskLevel,
   factors: string[],
-  assessedBy: "copilot" | "human",
+  assessedBy: "copilot" | "human" | "rule" | "decision-model",
   riskDigest: string,
 ): void {
   db.prepare(
@@ -43,7 +43,8 @@ export function setCardRiskIfFactsCurrent(
   snapshot: RiskFactsSnapshot,
   level: RiskLevel,
   factors: string[],
-  assessedBy: "copilot" = "copilot",
+  assessedBy: "copilot" | "rule" | "decision-model" = "copilot",
+  decision?: { key: string; policy: string },
 ): boolean {
   const persist = db.transaction(() => {
     if (!riskFactsStillMatch(db, snapshot)) return false;
@@ -55,6 +56,10 @@ export function setCardRiskIfFactsCurrent(
       assessedBy,
       snapshot.digest,
     );
+    if (decision) {
+      db.prepare("UPDATE card_risk SET decision_key = ?, decision_policy = ? WHERE card_id = ?")
+        .run(decision.key, decision.policy, snapshot.cardId);
+    }
     return true;
   });
   return persist.immediate();

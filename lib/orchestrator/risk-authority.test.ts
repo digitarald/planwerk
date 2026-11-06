@@ -9,6 +9,10 @@ import {
 } from "./risk-authority.ts";
 import { getRiskFactsSnapshot } from "./risk-facts.ts";
 import { setCardRiskInDb } from "./risk-persistence.ts";
+import { setCardRiskIfFactsCurrent } from "./risk-persistence.ts";
+import { ensureDecisionSchema } from "../db/decision-store.ts";
+import { decisionPolicyKey } from "../decisions/config.ts";
+import { RISK_DECISION_VERSION } from "../decisions/risk-policy.ts";
 
 function createRiskDb() {
   const db = new Database(":memory:");
@@ -76,6 +80,7 @@ test("fresh matching low risk preserves low-risk automation policy", () => {
     current: true,
     level: "low",
   });
+
   assert.ok(risk.assessment.riskDigest);
 
   db.prepare(`
@@ -88,6 +93,35 @@ test("fresh matching low risk preserves low-risk automation policy", () => {
     "cache rewrites with unchanged risk facts must not create blocker loops",
   );
   db.close();
+});
+
+test("active risk policy invalidates legacy acceptance and retains model provenance atomically", () => {
+  const saved = process.env.PLANWERK_DECISION_POLICIES;
+  const db = createRiskDb();
+  ensureDecisionSchema(db);
+  try {
+    seedFreshLow(db);
+    process.env.PLANWERK_DECISION_POLICIES = JSON.stringify({ risk: { mode: "active",
+      acceptance: { minimumProbability: 0.99, minimumMargin: 0.9, validationId: "synthetic-only" } } });
+    assert.equal(readAuthoritativeRisk(db, "card-1").status, "stale");
+    seedFreshLow(db);
+    assert.equal(readAuthoritativeRisk(db, "card-1").status, "policy-unsafe");
+    const snapshot = getRiskFactsSnapshot(db, "vscode-local://desktop", "card-1")!;
+    const policy = decisionPolicyKey("risk", RISK_DECISION_VERSION);
+    assert.equal(setCardRiskIfFactsCurrent(db, snapshot, "low", ["Bounded recovery"], "decision-model",
+      { key: "decision-record", policy }), true);
+    const risk = readAuthoritativeRisk(db, "card-1");
+    assert.equal(risk.status, "current");
+    assert.equal("assessment" in risk && risk.assessment.assessedBy, "decision-model");
+    process.env.PLANWERK_DECISION_POLICIES = JSON.stringify({ risk: { mode: "shadow" } });
+    assert.equal(readAuthoritativeRisk(db, "card-1").status, "stale");
+    assert.equal(setCardRiskIfFactsCurrent(db, snapshot, "low", [], "decision-model",
+      { key: "late-result", policy }), false, "policy changes must fence a late persistence attempt");
+  } finally {
+    if (saved === undefined) delete process.env.PLANWERK_DECISION_POLICIES;
+    else process.env.PLANWERK_DECISION_POLICIES = saved;
+    db.close();
+  }
 });
 
 test("facts changing after low risk blocks auto-answer and plan approval and selects high-risk gates and reviewers", () => {

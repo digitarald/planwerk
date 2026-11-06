@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { MessageOptions, ResponseSchema } from "@github/copilot-sdk";
 import type { KanbanCard } from "../types.ts";
+import type { DecisionOutcome } from "../decisions/core.ts";
 
 const state: {
   result: unknown;
@@ -18,7 +19,12 @@ const state: {
   riskDigest: string;
   afterModel?: () => void;
   availableTools?: string[];
-} = { result: undefined, calls: [], messages: [], systemPrompts: [], timeouts: [], riskDigest: "facts-1" };
+  decisionMode: "legacy" | "shadow" | "active";
+  decision?: DecisionOutcome;
+  decisionCurrent: boolean;
+  pendingInput?: KanbanCard["pendingInput"];
+} = { result: undefined, calls: [], messages: [], systemPrompts: [], timeouts: [], riskDigest: "facts-1",
+  decisionMode: "legacy", decisionCurrent: true };
 
 const session = {
   sessionId: "structured-test",
@@ -73,6 +79,18 @@ const hooks = registerHooks({
     if (specifier === "./model" || specifier === "../orchestrator/model.ts") {
       source = 'export async function selectOrchestratorModel() { return {model:"test-model"}; }';
     }
+    if (specifier === "../decisions/service.ts") {
+      source = `export {decisionChoice} from ${JSON.stringify(pathToFileURL(path.join(root, "lib/decisions/core.ts")).href)};
+        export function decisionProfile(){return {mode:globalThis["${globalKey}"].state.decisionMode};}
+        export function decisionPolicyKey(){return "policy-1";}
+        export function decisionStillCurrent(){return globalThis["${globalKey}"].state.decisionCurrent;}
+        export function scheduleShadow(){globalThis["${globalKey}"].state.calls.push("shadow");}
+        export async function decide(){
+          const s=globalThis["${globalKey}"].state;s.calls.push("decision");s.afterModel?.();
+          if(!s.decision)throw Error("Decision service unavailable");
+          return s.decision;
+        }`;
+    }
     if (specifier === "./risk-store") {
       source = `export function getRiskForAutomation() { return "medium"; }
         export function getAuthoritativeRiskSnapshot() {
@@ -94,18 +112,13 @@ const hooks = registerHooks({
     if (specifier === "./skill-config") {
       source = "export function canAutoAnswer() { return true; }";
     }
-    const unusedAhpFunctions: Record<string, string> = {
-      "@/lib/ahp/client-operation": "withAHPClient",
-      "@/lib/ahp/map-session": "mapSessionInputNeeded",
-      "@/lib/ahp/session-messenger": "answerInputWithClient",
-      "@/lib/ahp/snapshot": "readActiveSessionState",
-      "@/lib/ahp/answer-value": "buildAnswer",
+    const ahpFunctions: Record<string, string> = {
+      "@/lib/ahp/client-operation": "export async function withAHPClient(_host,run){return run({});}",
+      "@/lib/ahp/map-session": `export function mapSessionInputNeeded(){return globalThis["${globalKey}"].state.pendingInput;}`,
+      "@/lib/ahp/session-messenger": `export async function answerInputWithClient(){globalThis["${globalKey}"].state.calls.push("answer");return {success:true};}`,
+      "@/lib/ahp/snapshot": "export async function readActiveSessionState(){return {};}",
     };
-    if (unusedAhpFunctions[specifier]) {
-      source = `export function ${unusedAhpFunctions[specifier]}() {
-        throw new Error("Unexpected AHP operation in SDK caller test");
-      }`;
-    }
+    if (ahpFunctions[specifier]) source = ahpFunctions[specifier];
     if (specifier === "./coherence-engine") {
       source = `export function claimForReviewOwner() { return true; }
         export function completeReview() { return true; }
@@ -162,6 +175,10 @@ function reset(result: unknown, error?: Error) {
   state.timeouts.length = 0;
   state.riskDigest = "facts-1";
   state.afterModel = undefined;
+  state.decisionMode = "legacy";
+  state.decision = undefined;
+  state.decisionCurrent = true;
+  state.pendingInput = undefined;
 }
 
 const riskInput = {
@@ -357,4 +374,63 @@ test("goal judgment uses a separate tools-free structured call and cleans up inv
   reset({ ...decision, acceptedItemIds: "work" });
   await assert.rejects(() => judgeCoordinatorGoal({}, new AbortController().signal));
   assert.deepEqual(state.calls, ["abort", "delete", "release"]);
+});
+
+function acceptedChoices(choices: Record<string, string>): DecisionOutcome {
+  return { kind: "accepted", key: "decision-1", policyKey: "policy-1", latencyMs: 1,
+    response: { model: "synthetic", usage: { input_tokens: 1, output_tokens: 1 },
+      answers: Object.fromEntries(Object.entries(choices).map(([name, choice]) =>
+        [name, { type: "choice", choice, probabilities: { [choice]: 1 } }])) } };
+}
+
+test("active risk consumes a bounded decision without an SDK opinion and never falls back on uncertainty", async () => {
+  reset(undefined);
+  state.decisionMode = "active";
+  state.decision = acceptedChoices({ risk: "low", evidence: "sufficient", basis: "bounded" });
+  const assessment = await assessRisk(riskInput);
+  assert.equal(assessment.level, "low");
+  assert.equal(assessment.assessedBy, "decision-model");
+  assert.equal(assessment.decisionKey, "decision-1");
+  assert.deepEqual(state.calls, ["decision"]);
+  assert.equal(state.messages.length, 0);
+
+  state.decision = { kind: "needs-human", reason: "Low probability", key: "uncertain", policyKey: "policy-1", latencyMs: 1 };
+  await assert.rejects(assessRisk(riskInput), /Low probability/);
+  state.decision = acceptedChoices({ risk: "low", evidence: "sufficient", basis: "irreversible" });
+  await assert.rejects(assessRisk(riskInput), /contradict/);
+  state.decision = undefined;
+  await assert.rejects(assessRisk(riskInput), /unavailable/);
+  assert.equal(state.messages.length, 0);
+});
+
+test("active input chooses stable IDs, abstains without SDK fallback, and fences policy changes", async () => {
+  const card: KanbanCard = {
+    id: "card-1", title: "Choose formatting", phase: "build", runtime: "input-needed",
+    gateStatus: "pending", attention: "none", risk: "low", activity: "",
+    additions: 1, deletions: 0, filesChanged: 1, planSteps: { total: 0, done: 0 }, modifiedAt: 0,
+    pendingInput: { requestId: "input-1", questions: [{ id: "q-1", kind: "single-select", title: "Style", message: "Choose formatting",
+      options: [{ id: "compact", label: "Compact" }, { id: "expanded", label: "Expanded" }] }] },
+  };
+  reset(undefined);
+  state.decisionMode = "active";
+  state.pendingInput = card.pendingInput;
+  state.decision = acceptedChoices({ answer: "expanded" });
+  assert.deepEqual(await autoAnswer("ws://localhost", card), { answered: true, answer: "Expanded" });
+  assert.deepEqual(state.calls, ["decision", "answer"]);
+  state.decision = { kind: "needs-human", reason: "Unclear intent", key: "uncertain", policyKey: "policy-1", latencyMs: 1 };
+  assert.equal((await autoAnswer("ws://localhost", card)).answered, false);
+  state.decision = acceptedChoices({ answer: "expanded" });
+  state.afterModel = () => { state.decisionCurrent = false; };
+  const stale = await autoAnswer("ws://localhost", card);
+  assert.equal(stale.answered, false);
+  assert.match(stale.reason!, /policy changed/);
+  assert.equal(state.calls.filter((call) => call === "answer").length, 1);
+  assert.equal(state.messages.length, 0);
+});
+
+test("shadow risk records evaluation while preserving the explicit legacy result", async () => {
+  reset({ level: "medium", factors: ["Contained impact"] });
+  state.decisionMode = "shadow";
+  assert.equal((await assessRisk(riskInput)).level, "medium");
+  assert.deepEqual(state.calls, ["shadow", "delete", "release"]);
 });

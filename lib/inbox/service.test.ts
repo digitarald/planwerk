@@ -9,8 +9,9 @@ import {
 } from "../db/inbox-store.ts";
 import type { KanbanCard } from "../types.ts";
 import type { CoordinatorGoal } from "../orchestrator/coordinator-goal-types.ts";
+import { serializeInboxItem } from "./contract.ts";
 
-const state = { db: new Database(":memory:"), owned: true, generations: 0 };
+const state = { db: new Database(":memory:"), owned: true, generations: 0, staleDecision: false };
 const key = "__inboxServiceTest";
 Object.defineProperty(globalThis, key, { value: state, configurable: true });
 const hooks = registerHooks({
@@ -22,7 +23,8 @@ const hooks = registerHooks({
         : specifier === "./briefing-generator.ts"
           ? `export async function generateInboxBriefing() {
               globalThis["${key}"].generations++;
-              return {model:"test", briefing:{
+              return {model:"test", ...(globalThis["${key}"].staleDecision
+                ? {decision:{policyKey:"obsolete",version:"inbox-test"}} : {}), briefing:{
                 headline:"Generated choice", message:"Choose a target.", attention:"now",
                 primaryAction:{intent:"reply",label:"Reply"}, secondaryActions:[]
               }};
@@ -54,6 +56,7 @@ function reset() {
   ensureInboxSchema(state.db);
   state.owned = true;
   state.generations = 0;
+  state.staleDecision = false;
 }
 after(async () => {
   await settle();
@@ -151,4 +154,15 @@ test("cached reprojection cannot revalidate source facts and quarantined session
   const current = getInboxItemBySourceKey(state.db, original.sourceKey)!;
   assert.equal(current.workflowState, "open");
   assert.equal(current.briefing.freshness.sourceObservedAt, undefined);
+});
+
+test("a stale inbox decision cannot commit generated presentation or replace deterministic actions", async () => {
+  reset();
+  state.staleDecision = true;
+  projectCardToInbox(host, card(), undefined, state.db, { sourceObserved: true });
+  await settle();
+  const current = listInboxItems(state.db).items[0];
+  assert.notEqual(current.title, "Generated choice");
+  assert.equal(current.briefing.synthesis?.status, "failed");
+  assert.equal(serializeInboxItem(current).briefing.defaultAction.kind, "reply");
 });

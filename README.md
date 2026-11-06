@@ -132,9 +132,84 @@ but does not authenticate other native processes running as the same OS user.
 See [`zettelkasten/security.md`](zettelkasten/security.md) for the trust model
 and limitations.
 
-## Copilot SDK integration
+## Decision models and Copilot SDK integration
 
-Risk triage, coherence reviews, gate verdicts, and inbox briefings use the SDK's
+Planwerk separates bounded judgments from generative work. Rules authorize
+actions, decision models judge evidence, and agents explore, review, converse,
+and write. Microsoft-Decision-1 can handle risk, benign closed-choice answers,
+review verdicts, goal acceptance, coherence, and inbox attention/action
+selection through a server-only TypeScript client for Foundry. Python and the
+user-installed `decide` skill are not runtime dependencies.
+
+Each decision family defaults to `legacy`, preserving existing behavior.
+`shadow` records evaluation without changing that behavior. `active` consumes
+accepted decisions and escalates uncertainty instead of asking the SDK for a
+second opinion. Independent reviewers, CTO chat, and authored inbox notes
+remain generative. A decision never grants authority or advances a phase.
+
+Configure the server environment to evaluate a family:
+
+```bash
+export PLANWERK_DECISION_ENDPOINT="https://YOUR-RESOURCE.services.ai.azure.com"
+export PLANWERK_DECISION_DEPLOYMENT="YOUR-DEPLOYMENT"
+export PLANWERK_DECISION_POLICIES='{"risk":{"mode":"shadow"}}'
+```
+
+Provide `PLANWERK_DECISION_API_KEY` or `PLANWERK_DECISION_TOKEN` through the
+trusted server environment, never workspace YAML, browser configuration, or
+Git. The token is an externally managed Entra bearer token; Planwerk does not
+refresh it. Enabling inference sends the relevant task/review evidence to the
+configured Foundry resource. Use only a deployment approved for that data.
+See the [Foundry API documentation](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/use-foundry-models-microsoft-decision).
+
+If the `decide` skill is already configured, opt in locally instead:
+
+```bash
+PLANWERK_DECISION_CONFIG_SOURCE=decide
+```
+
+Put this non-secret setting in the ignored `.env.local`, or the server's
+launch environment. Planwerk reads the saved endpoint/deployment from
+`$XDG_CONFIG_HOME/decide/config.json` (default `~/.config/decide/config.json`)
+and, on macOS, the existing endpoint-bound Keychain item. No key is copied
+into the checkout and Python is not invoked. Explicit Planwerk environment
+settings win; otherwise the skill's `DECIDE_*`/Azure credential precedence
+applies. Missing or locked credentials fail explicitly. This setting configures
+the provider only; it does not enable shadow or active automation.
+
+`PLANWERK_DECISION_POLICIES` accepts the families `risk`, `answer`, `review`,
+`goal`, `coherence`, and `inbox`. Each entry has a `mode`. Before selecting
+`active`, supply an `acceptance` object with workload-validated
+`minimumProbability`, `minimumMargin`, and a nonempty `validationId`;
+`minimumConfidence` is optional and applies to choices/scores. An active
+family without an acceptance profile cannot perform inference or authorize
+work. Do not copy thresholds from an unrelated task.
+
+Selected-label probability and optional provider confidence are distinct.
+Neither overrules incomplete evidence, deterministic safety floors, stale
+revisions, sensitive-input restrictions, coordinator mode, or gates.
+Distributions and usage are recorded locally without copying full prompts.
+Unchanged decisions and abstentions are reused; transient failures are
+deferred with bounded retry advice, not immediately retried internally.
+After fixing authentication or replacing the underlying deployment model,
+change `PLANWERK_DECISION_CONFIGURATION_REVISION` to invalidate old records
+and revalidate the acceptance policy.
+
+Replay labeled records without network access:
+
+```bash
+node scripts/evaluate-decisions.ts /path/to/labeled-records.json
+```
+
+The input is an array of cases containing `family`, `question`, `expected`,
+`critical`, `outcome`, `latencyMs`, and optional full API `response`,
+`baselineLatencyMs`, and `baselineCostUsd`. Reports include coverage,
+accepted-case accuracy, critical errors, latency, estimated inference cost,
+and probability/confidence samples. Use representative held-out human labels
+and matched SDK baselines. Synthetic tests validate the software contract,
+not the model's calibration; a replay never enables a policy automatically.
+
+In legacy mode, risk triage, coherence reviews, gate verdicts, and inbox briefings use the SDK's
 typed structured-output API. Zod schemas constrain the response format and
 validate the returned object; semantic checks still reject contradictory
 verdicts and disallowed inbox actions. Invalid or missing responses retain each
@@ -210,9 +285,10 @@ risk_assessment:
 ```
 
 Guidance is domain context, not a fixed risk override. Incomplete verified file
-evidence and sensitive file paths still impose a high-risk floor. If the model
-is unavailable or returns invalid output, conservative keyword- and size-based classification
-remains the fallback. Changes to guidance or the shared rubric invalidate prior
+evidence and sensitive file paths still impose a high-risk floor. In legacy mode, an unavailable or invalid model response retains conservative
+keyword- and size-based classification. Active decision mode instead requires
+human inspection or explicit transient-failure deferral; it cannot turn a
+failed judgment into an accepted risk classification. Changes to guidance or the shared rubric invalidate prior
 assessments; reassessment runs for eligible cards without waking cold sessions
 merely to collect evidence.
 
