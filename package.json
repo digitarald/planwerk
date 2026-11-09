@@ -47,7 +47,7 @@
     "zustand": "^5.0.16"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.3",
+    "@tailwindcss/postcss": "^4.3.5",
     "@tailwindcss/typography": "^0.5.20",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.19.1",
