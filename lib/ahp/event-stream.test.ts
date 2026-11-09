@@ -9,6 +9,7 @@ import type { AHPBridgeOptions, BridgeEvent } from "./client-bridge.ts";
 import type { HeartbeatHostSnapshot } from "../orchestrator/heartbeat.ts";
 import type { NextRequest } from "next/server";
 import { inboxEvents } from "../inbox/events.ts";
+import type { InboxObservation } from "../inbox/observation.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
@@ -26,7 +27,9 @@ const state: {
   bridges: number;
   archiveCompletions: number;
   reconciliations: Array<{ host: string; catalog: Array<{ enabled: boolean; session: { resource: string } }>; cardId?: string }>;
-} = { heartbeat: false, failProjection: false, triages: 0, riskStatus: "current", sessions: new Map(), projections: [], bridges: 0, archiveCompletions: 0, reconciliations: [] };
+  inboxObservations: Array<{ observation?: InboxObservation; pendingInputCleared?: boolean }>;
+  inboxSnapshots: number;
+} = { heartbeat: false, failProjection: false, triages: 0, riskStatus: "current", sessions: new Map(), projections: [], bridges: 0, archiveCompletions: 0, reconciliations: [], inboxObservations: [], inboxSnapshots: 0 };
 const key = "__planwerkEventStreamTest";
 Object.defineProperty(globalThis, key, { value: state, configurable: true });
 const root = path.resolve(import.meta.dirname, "../..");
@@ -43,7 +46,7 @@ const mocks: Record<string, string> = {
   "@/lib/orchestrator/risk-store": `export function getAuthoritativeCardRisk() { return {status:globalThis["${key}"].riskStatus}; } export function getAuthoritativeRiskSnapshot(host,id) { return {digest:"facts:"+id,hostUrl:host,cardId:id}; }`,
   "@/lib/orchestrator/heartbeat": `export function requestHeartbeatTick() {} export function invalidateHostWork() {} export function startHeartbeat(getHosts) { const s=globalThis["${key}"]; s.getHosts=getHosts; s.heartbeat=true; } export async function stopHeartbeat() { globalThis["${key}"].heartbeat=false; } export function isHeartbeatRunning() { return globalThis["${key}"].heartbeat; }`,
   "@/lib/http/local-mutation": `export function validateLocalEventStreamRequest() {}`,
-  "@/lib/inbox/service": `export function projectArchivedSessionToInbox() { globalThis["${key}"].archiveCompletions++; } export function projectCardToInbox() {} export function projectHeartbeatToInbox() {} export function projectRemovedSessionToInbox() {} export function reconcileInboxCatalogToInbox(host,catalog,cardId) {globalThis["${key}"].reconciliations.push({host,catalog,cardId});}`,
+  "@/lib/inbox/service": `export function projectArchivedSessionToInbox() { globalThis["${key}"].archiveCompletions++; } export function projectCardToInbox(_host,_card,_previous,_db,context = {}) {globalThis["${key}"].inboxObservations.push(context);} export function projectHeartbeatToInbox() {} export function projectRemovedSessionToInbox() {} export function reconcileInboxCatalogToInbox(host,catalog,cardId) {globalThis["${key}"].reconciliations.push({host,catalog,cardId});} export function projectLiveSnapshotToInbox(host,catalog) {globalThis["${key}"].inboxSnapshots++;if(catalog)reconcileInboxCatalogToInbox(host,catalog);}`,
   "@/lib/desktop/status": `export function registerDesktopHosts() {}`,
 };
 const hooks = registerHooks({
@@ -78,9 +81,11 @@ function emit(event: BridgeEvent) { state.bridge!.onEvent(event); }
 
 test("cached initialization is display-only until live init; queued events retain their snapshots", async () => {
   const before = state.reconciliations.length;
+  const beforeSnapshots = state.inboxSnapshots;
   const reader = await open();
   await reader.read();
   assert.equal(state.reconciliations.length, before);
+  assert.equal(state.inboxSnapshots, beforeSnapshots);
   assert.deepEqual(state.getHosts!(), []);
   emit({ type: "init", sessions: [], catalog: [], enrichments: new Map(), pendingInputs: new Map(), workers: new Map(), connection: {
     logicalUrl: "ws://fake", transport: "websocket", resolvedTarget: "ws://fake",
@@ -89,6 +94,7 @@ test("cached initialization is display-only until live init; queued events retai
   } });
   await reader.read();
   assert.equal(state.reconciliations.length, before + 1);
+  assert.equal(state.inboxSnapshots, beforeSnapshots + 1);
   assert.equal(state.getHosts!().length, 1);
   const session = { resource: "burst", title: "Burst", status: 1, provider: "fake", createdAt: "", modifiedAt: "" };
   emit({ type: "sessionAdded", session });
@@ -220,13 +226,20 @@ test("1000 mixed idle/running/input-needed events stay ordered within a 100ms p9
 test("an explicit pending-input removal cannot be resurrected by projection fallback", async () => {
   const reader = await open("ws://input-removal");
   await reader.read();
+  const before = state.reconciliations.length;
   const session = { resource: "pending", title: "Pending", status: 24, provider: "fake", createdAt: "", modifiedAt: "" };
   emit({ type: "sessionAdded", session, pendingInput: { requestId: "request-1", message: "Choose", questions: [] } });
   const initial = JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6));
   assert.equal(initial.card.pendingInput.requestId, "request-1");
+  assert.equal(state.inboxObservations.at(-1)?.observation?.type, "pending-input");
+  const observation = state.inboxObservations.at(-1)?.observation;
+  assert.equal(observation?.type === "pending-input" ? observation.requestId : undefined, "request-1");
   emit({ type: "sessionSummaryChanged", session, pendingInput: null });
   const removed = JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6));
   assert.equal(removed.card.pendingInput, undefined);
+  assert.equal(state.inboxObservations.at(-1)?.observation?.type, "catalog");
+  assert.equal(state.inboxObservations.at(-1)?.pendingInputCleared, true);
+  assert.equal(state.reconciliations.length, before);
   await reader.cancel();
 });
 

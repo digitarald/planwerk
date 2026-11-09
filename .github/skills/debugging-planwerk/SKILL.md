@@ -118,6 +118,12 @@ observation (legacy rows use their saved `observedAt`), not the latest catalog r
 hydrated pending requests, and orchestrator results. Only a matching hydrated
 request validates pending input or recovers its automatic resolution; cached
 completion refreshes repair presentation without claiming a fresh source check.
+Inbox service updates commit metadata and lifecycle writes together, publish only
+the final mutation per notice after commit, and schedule synthesis afterward.
+Failed projections roll back metadata repairs without notifying clients.
+Live initialization uses `projectLiveSnapshotToInbox` so catalog reconciliation
+and active-card projection share that boundary. Active summary events project
+once, rather than first publishing a separate catalog refresh.
 An off-board session is not necessarily deleted. Inspect the complete passive
 catalog before interpreting missing board membership or collecting cold evidence.
 Completion is valid only while the source session remains idle or archived. A later

@@ -7,6 +7,8 @@ export type InboxObservation =
   | { type: "pending-input"; observedAt: string; requestId: string }
   | { type: "orchestrator"; observedAt: string };
 
+export type InboxSessionObservation = Exclude<InboxObservation, { type: "orchestrator" }>;
+
 type SessionIdentity = Pick<InboxProvenance, "sessionTitle" | "projectName" | "workspacePath">;
 type InboxSource = Pick<InboxItemDraft, "kind" | "sourceKey" | "briefing">;
 

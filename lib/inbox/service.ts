@@ -21,7 +21,9 @@ import type { HeartbeatAction } from "../orchestrator/heartbeat.ts";
 import type { KanbanCard } from "../types.ts";
 import { isSessionOwnedByHost } from "../db/session-ownership.ts";
 import { reconcileInboxCatalog, type InboxCatalogEntry } from "./reconciliation.ts";
-import { mergeInboxContext, observeInboxBriefing, sessionIdentity, type InboxObservation } from "./observation.ts";
+import {
+  mergeInboxContext, observeInboxBriefing, sessionIdentity, type InboxSessionObservation,
+} from "./observation.ts";
 import { inboxEvents } from "./events.ts";
 import {
   inboxItemMatchesHost,
@@ -476,54 +478,85 @@ function publishProjectionMutation(mutation: InboxMutation): void {
   publishMutation(mutation);
 }
 
+interface InboxUpdate {
+  mutations: InboxMutation[];
+  evidenceByRequest?: Map<string, InboxSynthesisEvidence>;
+}
+
+function commitInboxUpdate(db: Database.Database, update: () => InboxUpdate): InboxMutation[] {
+  const committed = db.transaction(update).immediate();
+  const final = new Map<string, InboxMutation>();
+  for (const mutation of committed.mutations) {
+    const first = final.get(mutation.item.id);
+    final.set(mutation.item.id, {
+      ...mutation,
+      previous: first ? first.previous : mutation.previous,
+      inserted: first?.inserted ?? mutation.inserted,
+      changed: mutation.changed || first?.changed === true,
+    });
+  }
+  const mutations = [...final.values()];
+  for (const mutation of mutations) publishProjectionMutation(mutation);
+  if (committed.evidenceByRequest) scheduleSynthesis(mutations, committed.evidenceByRequest, db);
+  return mutations;
+}
+
+function writeInboxProjection(
+  hostUrl: string,
+  operations: InboxProjectionOperation[],
+  db: Database.Database,
+): InboxMutation[] {
+  const mutations: InboxMutation[] = [];
+  for (const unscopedOperation of operations) {
+    const operation = scopeInboxProjection(hostUrl, unscopedOperation);
+    if (operation.type === "upsert") {
+      mutations.push(upsertInboxItem(db, operation.item));
+    } else if (operation.type === "resolve-source") {
+      const mutation = resolveInboxSource(db, operation.sourceKey);
+      if (mutation) mutations.push(mutation);
+    } else {
+      mutations.push(...resolveInboxKind(
+        db,
+        operation.kind,
+        operation.cardId,
+        operation.exceptSourceKey,
+        hostUrl,
+      ));
+    }
+  }
+  return mutations;
+}
+
 export function applyInboxProjection(
   hostUrl: string,
   operations: InboxProjectionOperation[],
   db: Database.Database = getDb(),
 ): InboxMutation[] {
-  const transaction = db.transaction((): InboxMutation[] => {
-    const mutations: InboxMutation[] = [];
-    for (const unscopedOperation of operations) {
-      const operation = scopeInboxProjection(hostUrl, unscopedOperation);
-      if (operation.type === "upsert") {
-        mutations.push(upsertInboxItem(db, operation.item));
-      } else if (operation.type === "resolve-source") {
-        const mutation = resolveInboxSource(db, operation.sourceKey);
-        if (mutation) mutations.push(mutation);
-      } else {
-        mutations.push(...resolveInboxKind(
-          db,
-          operation.kind,
-          operation.cardId,
-          operation.exceptSourceKey,
-          hostUrl,
-        ));
-      }
-    }
-    return mutations;
-  });
-  const mutations = transaction.immediate();
-  for (const mutation of mutations) {
-    publishProjectionMutation(mutation);
-  }
-  return mutations;
+  return commitInboxUpdate(db, () => ({ mutations: writeInboxProjection(hostUrl, operations, db) }));
 }
 
-export function projectCardToInbox(
+function observeSessionItems(
+  db: Database.Database,
+  items: InboxItem[],
+  session: Pick<KanbanCard, "title" | "project">,
+  observation: InboxSessionObservation,
+): InboxMutation[] {
+  return items.map((item) => updateInboxBriefing(
+    db, item, observeInboxBriefing(item, sessionIdentity(session), observation),
+  ));
+}
+
+function writeCardProjection(
   hostUrl: string,
   card: KanbanCard,
-  previousCard?: KanbanCard,
-  db: Database.Database = getDb(),
-  context: { pendingInputCleared?: boolean; observation?: InboxObservation } = {},
-): void {
-  if (!isSessionOwnedByHost(db, card.id, hostUrl)) return;
+  previousCard: KanbanCard | undefined,
+  db: Database.Database,
+  context: { pendingInputCleared?: boolean; observation?: InboxSessionObservation },
+): { mutations: InboxMutation[]; evidenceByRequest: Map<string, InboxSynthesisEvidence> } {
   const currentItems = getSessionLinkedInboxItems(db, { hostUrl, cardId: card.id });
-  const now = new Date().toISOString();
-  for (const item of currentItems) {
-    publishMutation(updateInboxBriefing(db, item, observeInboxBriefing(
-      item, sessionIdentity(card), context.observation ?? { type: "cached" },
-    )));
-  }
+  const observation: InboxSessionObservation = context.observation ?? { type: "cached" };
+  const now = observation.type === "cached" ? new Date().toISOString() : observation.observedAt;
+  const observed = observeSessionItems(db, currentItems, card, observation);
   const hasPendingItem = currentItems.some((item) =>
     item.kind === "pending-input"
     && item.briefing.provenance.eventType !== "pending-input-unavailable"
@@ -545,16 +578,53 @@ export function projectCardToInbox(
       limit: 1,
     }).total > 0
   ) {
-    operations.push(...projectExistingCompletionRefresh(card, { hostUrl }));
+    operations.push(...projectExistingCompletionRefresh(card, { hostUrl, now }));
   }
-  const prepared = prepareSynthesisOperations(
-    hostUrl,
-    operations,
-    db,
-    card,
-  );
-  const mutations = applyInboxProjection(hostUrl, prepared.operations, db);
-  scheduleSynthesis(mutations, prepared.evidenceByRequest, db);
+  const prepared = prepareSynthesisOperations(hostUrl, operations, db, card);
+  return {
+    mutations: [...observed, ...writeInboxProjection(hostUrl, prepared.operations, db)],
+    evidenceByRequest: prepared.evidenceByRequest,
+  };
+}
+
+export function projectCardToInbox(
+  hostUrl: string,
+  card: KanbanCard,
+  previousCard?: KanbanCard,
+  db: Database.Database = getDb(),
+  context: { pendingInputCleared?: boolean; observation?: InboxSessionObservation } = {},
+): void {
+  if (!isSessionOwnedByHost(db, card.id, hostUrl)) return;
+  commitInboxUpdate(db, () => writeCardProjection(hostUrl, card, previousCard, db, context));
+}
+
+export function projectLiveSnapshotToInbox(
+  hostUrl: string,
+  catalog: readonly InboxCatalogEntry[] | undefined,
+  cards: readonly KanbanCard[],
+  db: Database.Database = getDb(),
+): void {
+  commitInboxUpdate(db, () => {
+    const observedAt = new Date().toISOString();
+    const mutations = catalog ? reconcileInboxCatalog(db, hostUrl, catalog, {
+      complete: true, now: observedAt,
+      ownsSession: (cardId) => isSessionOwnedByHost(db, cardId, hostUrl),
+    }) : [];
+    const evidenceByRequest = new Map<string, InboxSynthesisEvidence>();
+    for (const card of cards) {
+      if (!isSessionOwnedByHost(db, card.id, hostUrl)) continue;
+      const update = writeCardProjection(hostUrl, card, undefined, db, {
+        observation: card.pendingInput
+          ? { type: "pending-input", requestId: card.pendingInput.requestId, observedAt }
+          : { type: "catalog", observedAt },
+      });
+      mutations.push(...update.mutations);
+      for (const [requestId, evidence] of update.evidenceByRequest) {
+        evidenceByRequest.set(requestId, evidence);
+      }
+    }
+    return { mutations, evidenceByRequest };
+  });
 }
 
 export function reconcileInboxCatalogToInbox(
@@ -563,11 +633,11 @@ export function reconcileInboxCatalogToInbox(
   cardId?: string,
 ): void {
   const db = getDb();
-  for (const mutation of reconcileInboxCatalog(db, hostUrl, catalog, {
+  commitInboxUpdate(db, () => ({ mutations: reconcileInboxCatalog(db, hostUrl, catalog, {
     complete: true,
     cardId,
     ownsSession: (cardId) => isSessionOwnedByHost(db, cardId, hostUrl),
-  })) publishProjectionMutation(mutation);
+  }) }));
 }
 
 export function projectArchivedSessionToInbox(
@@ -576,16 +646,22 @@ export function projectArchivedSessionToInbox(
 ): void {
   const db = getDb();
   if (!isSessionOwnedByHost(db, session.resource, hostUrl)) return;
-  const operations = projectArchivedSession(session, { hostUrl });
-  const prepared = prepareSynthesisOperations(
-    hostUrl,
-    operations,
-    db,
-    undefined,
-    session,
-  );
-  const mutations = applyInboxProjection(hostUrl, prepared.operations, db);
-  scheduleSynthesis(mutations, prepared.evidenceByRequest, db);
+  commitInboxUpdate(db, () => {
+    const now = new Date().toISOString();
+    const operations = projectArchivedSession(session, { hostUrl, now });
+    if (operations.length === 0) return { mutations: [] };
+    const observed = observeSessionItems(
+      db, getSessionLinkedInboxItems(db, { hostUrl, cardId: session.resource }),
+      session, { type: "catalog", observedAt: now },
+    );
+    const prepared = prepareSynthesisOperations(
+      hostUrl, operations, db, undefined, session,
+    );
+    return {
+      mutations: [...observed, ...writeInboxProjection(hostUrl, prepared.operations, db)],
+      evidenceByRequest: prepared.evidenceByRequest,
+    };
+  });
 }
 
 export function projectRemovedSessionToInbox(
@@ -594,9 +670,9 @@ export function projectRemovedSessionToInbox(
 ): void {
   const db = getDb();
   if (!isSessionOwnedByHost(db, cardId, hostUrl)) return;
-  for (const mutation of reconcileInboxCatalog(db, hostUrl, [], {
+  commitInboxUpdate(db, () => ({ mutations: reconcileInboxCatalog(db, hostUrl, [], {
     complete: true, cardId,
-  })) publishProjectionMutation(mutation);
+  }) }));
 }
 
 export function projectHeartbeatToInbox(
@@ -605,15 +681,15 @@ export function projectHeartbeatToInbox(
   card?: KanbanCard,
 ): void {
   const db = getDb();
-  const prepared = prepareSynthesisOperations(
-    hostUrl,
-    projectHeartbeatAction(action, card, { hostUrl }),
-    db,
-    card,
-    action,
-  );
-  const mutations = applyInboxProjection(hostUrl, prepared.operations, db);
-  scheduleSynthesis(mutations, prepared.evidenceByRequest, db);
+  commitInboxUpdate(db, () => {
+    const prepared = prepareSynthesisOperations(
+      hostUrl, projectHeartbeatAction(action, card, { hostUrl }), db, card, action,
+    );
+    return {
+      mutations: writeInboxProjection(hostUrl, prepared.operations, db),
+      evidenceByRequest: prepared.evidenceByRequest,
+    };
+  });
 }
 
 export function performInboxAction(

@@ -26,6 +26,7 @@ import { validateLocalEventStreamRequest } from "@/lib/http/local-mutation";
 import {
   projectArchivedSessionToInbox,
   projectCardToInbox,
+  projectLiveSnapshotToInbox,
   projectHeartbeatToInbox,
   projectRemovedSessionToInbox,
   reconcileInboxCatalogToInbox,
@@ -478,11 +479,6 @@ function startHostBridge(partition: HostPartition): void {
           const removedActiveCard = projected.type === "cardRemoved"
             && partition.cards.some((card) => card.id === projected.cardId);
           try {
-            if (event.type === "sessionAdded" || event.type === "sessionSummaryChanged") {
-              reconcileInboxCatalogToInbox(partition.hostUrl, [{
-                session: event.session, enabled: isWorkspaceEnabled(event.session),
-              }], event.session.resource);
-            }
             if (
               event.type === "sessionRemoved" &&
               event.reason === "archived" &&
@@ -493,22 +489,18 @@ function startHostBridge(partition: HostPartition): void {
             } else if (event.type === "sessionRemoved") {
               projectRemovedSessionToInbox(partition.hostUrl, event.resource);
             } else if (projected.type === "init") {
-              if (event.type === "init" && event.catalog) {
-                reconcileInboxCatalogToInbox(partition.hostUrl, event.catalog.map((session) => ({
+              projectLiveSnapshotToInbox(partition.hostUrl,
+                event.type === "init" ? event.catalog?.map((session) => ({
                   session, enabled: isWorkspaceEnabled(session),
-                })));
-              }
-              const observedAt = new Date().toISOString();
-              for (const card of projected.cards) {
-                projectCardToInbox(partition.hostUrl, card, undefined, undefined, {
-                  observation: card.pendingInput
-                    ? { type: "pending-input", requestId: card.pendingInput.requestId, observedAt }
-                    : { type: "catalog", observedAt },
-                });
-              }
+                })) : undefined, projected.cards);
             } else if (projected.type === "cardRemoved" && projected.archivedSession) {
               if (removedActiveCard) {
                 projectArchivedSessionToInbox(partition.hostUrl, projected.archivedSession.session);
+              } else {
+                const session = projected.archivedSession.session;
+                reconcileInboxCatalogToInbox(partition.hostUrl, [{
+                  session, enabled: isWorkspaceEnabled(session),
+                }], session.resource);
               }
             } else if (projected.type === "cardChanged") {
               const previousCard = partition.cards.find(
@@ -527,7 +519,13 @@ function startHostBridge(partition: HostPartition): void {
                 },
               );
             } else if (projected.type === "cardRemoved") {
-              projectRemovedSessionToInbox(partition.hostUrl, projected.cardId);
+              if (event.type === "sessionAdded" || event.type === "sessionSummaryChanged") {
+                reconcileInboxCatalogToInbox(partition.hostUrl, [{
+                  session: event.session, enabled: isWorkspaceEnabled(event.session),
+                }], event.session.resource);
+              } else {
+                projectRemovedSessionToInbox(partition.hostUrl, projected.cardId);
+              }
             }
           } catch (error) {
             reportInboxProjectionError(event.type, error);

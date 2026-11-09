@@ -4,7 +4,9 @@ import { AHPStatus, type AHPSessionSummary } from "../ahp/types.ts";
 import type { HeartbeatAction } from "../orchestrator/heartbeat.ts";
 import type { KanbanCard, PendingInput } from "../types.ts";
 import { INBOX_ITEM_KINDS } from "./types.ts";
-import { observeInboxBriefing, sessionIdentity, type InboxObservation } from "./observation.ts";
+import {
+  observeInboxBriefing, sessionIdentity, type InboxObservation, type InboxSessionObservation,
+} from "./observation.ts";
 import { sessionRetirementReason, type InboxSessionState } from "./lifecycle.ts";
 import type {
   InboxBriefing,
@@ -17,7 +19,7 @@ interface ProjectionContext {
   hostUrl: string;
   now?: string;
   pendingInputCleared?: boolean;
-  observation?: InboxObservation;
+  observation?: InboxSessionObservation;
 }
 
 function digest(value: unknown): string {
