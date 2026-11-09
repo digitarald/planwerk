@@ -12,6 +12,8 @@ import type { CoordinatorGoal } from "../orchestrator/coordinator-goal-types.ts"
 import { serializeInboxItem } from "./contract.ts";
 import { inboxEvents } from "./events.ts";
 import { projectHeartbeatAction } from "./projector.ts";
+import { AHPStatus } from "../ahp/types.ts";
+import { INBOX_ITEM_KINDS } from "./types.ts";
 import type { InboxStreamEvent } from "./types.ts";
 
 const state = { db: new Database(":memory:"), owned: true, generations: 0, staleDecision: false };
@@ -41,6 +43,7 @@ const hooks = registerHooks({
 const {
   applyInboxProjection, projectCardToInbox, projectCoordinatorGoalToInbox,
   projectHeartbeatToInbox, projectArchivedSessionToInbox, projectRemovedSessionToInbox,
+  reconcileInboxCatalogToInbox,
 } = await import("./service.ts");
 const host = "ws://test";
 const observed = "2026-09-22T00:00:00.000Z";
@@ -210,6 +213,43 @@ test("archive and removal events retire heartbeat blockers immediately and notif
           && event.itemId === item.id && event.hostUrl === host));
       }
     } finally { unsubscribe(); }
+  }
+});
+
+test("live archive and reconnect use the same retirement policy; removal and disabled sources retire every linked kind", async () => {
+  for (const mode of ["archive", "reconnect", "missing", "disabled"] as const) {
+    reset();
+    const [operation] = projectHeartbeatAction({
+      type: "gate-completed", cardId: "session", gateType: "lint", status: "failed",
+    }, card(), { hostUrl: host, now: observed });
+    assert.ok(operation.type === "upsert");
+    const notices = applyInboxProjection(host, INBOX_ITEM_KINDS.map((kind) => ({
+      type: "upsert",
+      item: {
+        ...operation.item,
+        kind,
+        sourceKey: kind === "completion"
+          ? `session:session:completion:modified:${Date.parse(observed)}` : `notice:${kind}`,
+      },
+    })), state.db).map((mutation) => mutation.item);
+    const session = {
+      resource: "session", title: "Deployment", status: AHPStatus.Idle | AHPStatus.IsArchived,
+      provider: "test", createdAt: observed, modifiedAt: observed,
+    };
+    if (mode === "archive") projectArchivedSessionToInbox(host, session);
+    else if (mode === "missing") projectRemovedSessionToInbox(host, session.resource);
+    else reconcileInboxCatalogToInbox(host, [{ session, enabled: mode !== "disabled" }]);
+    await settle();
+    for (const notice of notices) {
+      const current = getInboxItemBySourceKey(state.db, notice.sourceKey)!;
+      const retained = (mode === "archive" || mode === "reconnect")
+        && ["completion", "conflict", "coordinator-action"].includes(notice.kind);
+      assert.equal(current.workflowState, retained ? "open" : "resolved", `${mode}:${notice.kind}`);
+      if (notice.kind === "gate-failure" || notice.kind === "review-escalation") {
+        assert.equal(current.briefing.freshness.sourceObservedAt, observed);
+      }
+    }
+    assert.equal(state.db.prepare("SELECT count(*) FROM inbox_item_actions").pluck().get(), 0);
   }
 });
 

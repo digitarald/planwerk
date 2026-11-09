@@ -7,8 +7,8 @@ import {
   resolveInboxSource,
   type InboxMutation,
 } from "../db/inbox-store.ts";
-import { SESSION_HANDOFF_KINDS } from "./types.ts";
 import { observeInboxBriefing, sessionIdentity } from "./observation.ts";
+import { sessionRetirementReason, type InboxSessionState } from "./lifecycle.ts";
 
 export interface InboxCatalogEntry {
   session: AHPSessionSummary;
@@ -35,18 +35,20 @@ export function reconcileInboxCatalog(
       if (!item.cardId || options.ownsSession?.(item.cardId) === false) continue;
       const source = sources.get(item.cardId);
       const status = source?.session.status ?? 0;
-      const needsInput = (status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded;
-      const archived = (status & AHPStatus.IsArchived) !== 0;
-      const obsolete = !source || !source.enabled
-        || (archived && SESSION_HANDOFF_KINDS.includes(item.kind))
-        || (item.kind === "pending-input" && !needsInput)
-        || (item.kind === "runtime-error" && !(status & AHPStatus.Error));
+      const state: InboxSessionState = !source ? { type: "missing" }
+        : !source.enabled ? { type: "disabled" }
+        : status & AHPStatus.IsArchived ? { type: "archived" }
+        : {
+            type: "active",
+            needsInput: (status & AHPStatus.InputNeeded) === AHPStatus.InputNeeded,
+            hasError: (status & AHPStatus.Error) !== 0,
+          };
       if (source) {
         mutations.push(updateInboxBriefing(db, item, observeInboxBriefing(
           item, sessionIdentity(source.session), { type: "catalog", observedAt: now },
         )));
       }
-      if (obsolete) {
+      if (sessionRetirementReason(item.kind, state)) {
         const mutation = resolveInboxSource(db, item.sourceKey, now);
         if (mutation) mutations.push(mutation);
       }

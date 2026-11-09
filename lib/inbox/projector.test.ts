@@ -8,7 +8,7 @@ import {
   projectCardSnapshot,
   projectExistingCompletionRefresh,
   projectHeartbeatAction,
-  projectRemovedSession,
+  projectSessionRetirement,
 } from "./projector.ts";
 
 function card(overrides: Partial<KanbanCard> = {}): KanbanCard {
@@ -379,8 +379,8 @@ test("archived no-code sessions still produce completion", () => {
   ));
 });
 
-test("removed sessions retire gate and review handoffs without clearing conflict authority or creating history", () => {
-  const operations = projectRemovedSession("card-1");
+test("archived sessions retire handoffs without clearing conflict authority or creating history", () => {
+  const operations = projectSessionRetirement("card-1", { type: "archived" });
   assert.ok(operations.every((operation) => operation.type === "resolve-kind"
     && operation.cardId === "card-1"));
   const resolvedKinds = operations.flatMap((operation) =>

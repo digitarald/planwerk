@@ -106,9 +106,11 @@ former.
 Session-linked inbox reconciliation is keyed by host and `card_id`, not
 `provenance.sourceType`: that field identifies the event producer, so gate failures
 and review escalations are `orchestrator` notices that still belong to sessions.
-`SESSION_HANDOFF_KINDS` shares retirement policy between live archive events and
-catalog reconnects. Archived sessions retire those handoffs without approving a
+`lib/inbox/lifecycle.ts` shares retirement decisions between live archive events and
+catalog reconnects. Archived sessions retire handoffs without approving a
 gate, clearing coherence authority, or erasing human action history.
+Missing or disabled sessions retire all linked notices; incomplete inventories and
+quarantined ownership cannot authorize this cleanup.
 Catalog/board observations repair identity for both producers, but cannot
 revalidate an orchestrator result: its `sourceObservedAt` stays at the actual event
 observation (legacy rows use their saved `observedAt`), not the latest catalog read.

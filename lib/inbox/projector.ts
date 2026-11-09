@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import { AHPStatus, type AHPSessionSummary } from "../ahp/types.ts";
 import type { HeartbeatAction } from "../orchestrator/heartbeat.ts";
 import type { KanbanCard, PendingInput } from "../types.ts";
-import { SESSION_HANDOFF_KINDS } from "./types.ts";
+import { INBOX_ITEM_KINDS } from "./types.ts";
 import { observeInboxBriefing, sessionIdentity, type InboxObservation } from "./observation.ts";
+import { sessionRetirementReason, type InboxSessionState } from "./lifecycle.ts";
 import type {
   InboxBriefing,
   InboxItemDraft,
@@ -546,7 +547,7 @@ export function projectArchivedSession(
     confidence: "high",
   });
   return [
-    ...projectRemovedSession(session.resource),
+    ...projectSessionRetirement(session.resource, { type: "archived" }),
     {
       type: "resolve-kind",
       kind: "completion",
@@ -567,12 +568,13 @@ export function projectArchivedSession(
   ];
 }
 
-export function projectRemovedSession(
+export function projectSessionRetirement(
   cardId: string,
+  state: InboxSessionState,
 ): InboxProjectionOperation[] {
-  return SESSION_HANDOFF_KINDS.map((kind) => ({
-    type: "resolve-kind", kind, cardId,
-  }));
+  return INBOX_ITEM_KINDS.flatMap((kind) => sessionRetirementReason(kind, state)
+    ? [{ type: "resolve-kind" as const, kind, cardId }]
+    : []);
 }
 
 function actionRevision(action: HeartbeatAction): string {
