@@ -44,6 +44,12 @@ const {
 } = await import("./service.ts");
 const host = "ws://test";
 const observed = "2026-09-22T00:00:00.000Z";
+const liveInput = {
+  observation: { type: "pending-input", requestId: "request", observedAt: observed },
+} as const;
+const liveCatalog = {
+  observation: { type: "catalog", observedAt: observed },
+} as const;
 function card(pending = true): KanbanCard {
   return {
     id: "session", title: "Deployment", phase: "build", runtime: "input-needed",
@@ -82,7 +88,7 @@ test("goal decisions deduplicate and resolve when paused or replaced by a sessio
   projectCoordinatorGoalToInbox({ ...goal, state: "paused" }, state.db);
   assert.equal(listInboxItems(state.db).total, 0);
   projectCoordinatorGoalToInbox(goal, state.db);
-  projectCardToInbox(host, card(), undefined, state.db, { sourceObserved: true });
+  projectCardToInbox(host, card(), undefined, state.db, liveInput);
   projectCoordinatorGoalToInbox({ ...goal, items: [{
     id: "work", goalId: goal.id, state: "awaiting-result", actionKey: "work",
     cardId: "session", workingDirectory: "/project", instructions: "Work", acceptanceCriteria: "Done", dependencies: [],
@@ -92,7 +98,7 @@ test("goal decisions deduplicate and resolve when paused or replaced by a sessio
 
 test("reconnect before question hydration preserves the same open request and generated briefing", async () => {
   reset();
-  projectCardToInbox(host, card(), undefined, state.db, { sourceObserved: true });
+  projectCardToInbox(host, card(), undefined, state.db, liveInput);
   await settle();
   const original = listInboxItems(state.db).items[0];
   assert.equal(original.briefing.provenance.sessionTitle, "Deployment");
@@ -101,7 +107,7 @@ test("reconnect before question hydration preserves the same open request and ge
   applyInboxAction(state.db, original.id, "pin", null, null);
   const before = getInboxItemBySourceKey(state.db, original.sourceKey)!;
   projectCardToInbox(host, card(false), undefined, state.db);
-  projectCardToInbox(host, card(), card(false), state.db, { sourceObserved: true });
+  projectCardToInbox(host, card(), card(false), state.db, liveInput);
   await settle();
   const current = listInboxItems(state.db).items[0];
   assert.equal(listInboxItems(state.db).total, 1);
@@ -115,18 +121,20 @@ test("reconnect before question hydration preserves the same open request and ge
 
 test("a confirmed question recovers automatic resolution but not a human resolution or snooze", async () => {
   reset();
-  projectCardToInbox(host, card(), undefined, state.db, { sourceObserved: true });
+  projectCardToInbox(host, card(), undefined, state.db, liveInput);
   await settle();
   const original = listInboxItems(state.db).items[0];
   resolveInboxSource(state.db, original.sourceKey);
-  projectCardToInbox(host, card(), undefined, state.db, { sourceObserved: true });
+  projectCardToInbox(host, card(), undefined, state.db);
+  assert.equal(getInboxItemBySourceKey(state.db, original.sourceKey)?.workflowState, "resolved");
+  projectCardToInbox(host, card(), undefined, state.db, liveInput);
   assert.equal(getInboxItemBySourceKey(state.db, original.sourceKey)?.workflowState, "open");
   applyInboxAction(state.db, original.id, "snooze", null, "2099-01-01T00:00:00Z");
-  projectCardToInbox(host, card(), undefined, state.db, { sourceObserved: true });
+  projectCardToInbox(host, card(), undefined, state.db, liveInput);
   assert.equal(getInboxItemBySourceKey(state.db, original.sourceKey)?.workflowState, "dismissed");
   applyInboxAction(state.db, original.id, "resolve", null, null);
   projectCardToInbox(host, card(false), undefined, state.db);
-  projectCardToInbox(host, card(), undefined, state.db, { sourceObserved: true });
+  projectCardToInbox(host, card(), undefined, state.db, liveInput);
   assert.equal(listInboxItems(state.db).total, 0);
   assert.equal(getInboxItemBySourceKey(state.db, original.sourceKey)?.workflowState, "resolved");
   await settle();
@@ -141,7 +149,7 @@ test("unavailable question notice is replaced once, never synthesized, and expli
   assert.equal(notice.briefing.recommendedAction?.intent, "open-session");
   assert.equal(notice.briefing.freshness.sourceObservedAt, undefined);
   assert.equal(state.generations, 0);
-  projectCardToInbox(host, card(), undefined, state.db, { sourceObserved: true });
+  projectCardToInbox(host, card(), undefined, state.db, liveInput);
   await settle();
   assert.equal(listInboxItems(state.db).total, 1);
   assert.notEqual(listInboxItems(state.db).items[0].id, notice.id);
@@ -156,7 +164,7 @@ test("cached reprojection cannot revalidate source facts and quarantined session
   const original = listInboxItems(state.db).items[0];
   assert.equal(original.briefing.freshness.sourceObservedAt, undefined);
   state.owned = false;
-  projectCardToInbox(host, { ...card(false), runtime: "idle" }, undefined, state.db, { sourceObserved: true });
+  projectCardToInbox(host, { ...card(false), runtime: "idle" }, undefined, state.db, liveCatalog);
   const current = getInboxItemBySourceKey(state.db, original.sourceKey)!;
   assert.equal(current.workflowState, "open");
   assert.equal(current.briefing.freshness.sourceObservedAt, undefined);
@@ -167,7 +175,7 @@ test("live card observations repair heartbeat identity without revalidating its 
   const [mutation] = applyInboxProjection(host, projectHeartbeatAction({
     type: "gate-completed", cardId: "session", gateType: "lint", status: "failed",
   }, undefined, { hostUrl: host, now: observed }), state.db);
-  projectCardToInbox(host, { ...card(false), runtime: "idle" }, undefined, state.db, { sourceObserved: true });
+  projectCardToInbox(host, { ...card(false), runtime: "idle" }, undefined, state.db, liveCatalog);
   const current = getInboxItemBySourceKey(state.db, mutation.item.sourceKey)!;
   assert.equal(current.briefing.provenance.sessionTitle, "Deployment");
   assert.equal(current.briefing.freshness.sourceObservedAt, observed);
@@ -208,7 +216,7 @@ test("archive and removal events retire heartbeat blockers immediately and notif
 test("a stale inbox decision cannot commit generated presentation or replace deterministic actions", async () => {
   reset();
   state.staleDecision = true;
-  projectCardToInbox(host, card(), undefined, state.db, { sourceObserved: true });
+  projectCardToInbox(host, card(), undefined, state.db, liveInput);
   await settle();
   const current = listInboxItems(state.db).items[0];
   assert.notEqual(current.title, "Generated choice");

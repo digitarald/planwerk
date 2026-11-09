@@ -3,11 +3,12 @@ import type Database from "better-sqlite3";
 import { AHPStatus, type AHPSessionSummary } from "../ahp/types.ts";
 import {
   getSessionLinkedInboxItems,
-  observeInboxSource,
+  updateInboxBriefing,
   resolveInboxSource,
   type InboxMutation,
 } from "../db/inbox-store.ts";
 import { SESSION_HANDOFF_KINDS } from "./types.ts";
+import { observeInboxBriefing, sessionIdentity } from "./observation.ts";
 
 export interface InboxCatalogEntry {
   session: AHPSessionSummary;
@@ -41,11 +42,9 @@ export function reconcileInboxCatalog(
         || (item.kind === "pending-input" && !needsInput)
         || (item.kind === "runtime-error" && !(status & AHPStatus.Error));
       if (source) {
-        mutations.push(observeInboxSource(db, item, {
-          sessionTitle: source.session.title,
-          projectName: source.session.project?.name,
-          workspacePath: source.session.project?.path,
-        }, item.kind === "pending-input" && needsInput ? undefined : now));
+        mutations.push(updateInboxBriefing(db, item, observeInboxBriefing(
+          item, sessionIdentity(source.session), { type: "catalog", observedAt: now },
+        )));
       }
       if (obsolete) {
         const mutation = resolveInboxSource(db, item.sourceKey, now);

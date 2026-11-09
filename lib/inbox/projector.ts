@@ -4,6 +4,7 @@ import { AHPStatus, type AHPSessionSummary } from "../ahp/types.ts";
 import type { HeartbeatAction } from "../orchestrator/heartbeat.ts";
 import type { KanbanCard, PendingInput } from "../types.ts";
 import { SESSION_HANDOFF_KINDS } from "./types.ts";
+import { observeInboxBriefing, sessionIdentity, type InboxObservation } from "./observation.ts";
 import type {
   InboxBriefing,
   InboxItemDraft,
@@ -15,7 +16,7 @@ interface ProjectionContext {
   hostUrl: string;
   now?: string;
   pendingInputCleared?: boolean;
-  sourceObserved?: boolean;
+  observation?: InboxObservation;
 }
 
 function digest(value: unknown): string {
@@ -157,24 +158,11 @@ function draft(
 function withSessionContext(
   item: InboxItemDraft,
   card: Pick<KanbanCard, "title" | "project"> | undefined,
-  context: ProjectionContext,
+  observation: InboxObservation,
 ): InboxItemDraft {
   return {
     ...item,
-    briefing: {
-      ...item.briefing,
-      freshness: {
-        ...item.briefing.freshness,
-        sourceObservedAt: context.sourceObserved === false
-          ? undefined : item.briefing.freshness.observedAt,
-      },
-      provenance: {
-        ...item.briefing.provenance,
-        sessionTitle: card?.title,
-        projectName: card?.project?.name,
-        workspacePath: card?.project?.path,
-      },
-    },
+    briefing: observeInboxBriefing(item, sessionIdentity(card), observation),
   };
 }
 
@@ -501,7 +489,9 @@ export function projectExistingCompletionRefresh(
   ) {
     return [];
   }
-  return completionOperations(card, context);
+  return completionOperations(card, context).map((operation) => operation.type === "upsert"
+    ? { ...operation, item: withSessionContext(operation.item, card, { type: "cached" }) }
+    : operation);
 }
 
 export function projectCardSnapshot(
@@ -521,8 +511,10 @@ export function projectCardSnapshot(
     return {
       ...operation,
       item: withSessionContext({
-        ...operation.item, recoverPendingInput: Boolean(card.pendingInput),
-      }, card, context),
+        ...operation.item,
+        recoverPendingInput: context.observation?.type === "pending-input"
+          && context.observation.requestId === card.pendingInput?.requestId,
+      }, card, context.observation ?? { type: "cached" }),
     };
   });
 }
@@ -553,13 +545,6 @@ export function projectArchivedSession(
     caveats: ["Archived completion does not imply that external gates passed."],
     confidence: "high",
   });
-  completionBriefing.provenance = {
-    ...completionBriefing.provenance,
-    sessionTitle: session.title,
-    projectName: session.project?.name,
-    workspacePath: session.project?.path,
-  };
-  completionBriefing.freshness.sourceObservedAt = observedAt(context);
   return [
     ...projectRemovedSession(session.resource),
     {
@@ -570,14 +555,14 @@ export function projectArchivedSession(
     },
     {
       type: "upsert",
-      item: draft(
+      item: withSessionContext(draft(
         "completion",
         sourceKey,
         revision,
         `${session.title || session.resource} finished`,
         completionBriefing,
         session.resource,
-      ),
+      ), session, { type: "catalog", observedAt: observedAt(context) }),
     },
   ];
 }
@@ -644,7 +629,7 @@ function orchestratorDraft(
     }),
     cardId,
     input.relatedCardIds,
-  ), input.card, context);
+  ), input.card, { type: "orchestrator", observedAt: observedAt(context) });
 }
 
 export function projectHeartbeatAction(

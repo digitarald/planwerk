@@ -498,9 +498,12 @@ function startHostBridge(partition: HostPartition): void {
                   session, enabled: isWorkspaceEnabled(session),
                 })));
               }
+              const observedAt = new Date().toISOString();
               for (const card of projected.cards) {
                 projectCardToInbox(partition.hostUrl, card, undefined, undefined, {
-                  sourceObserved: card.runtime !== "input-needed" || Boolean(card.pendingInput),
+                  observation: card.pendingInput
+                    ? { type: "pending-input", requestId: card.pendingInput.requestId, observedAt }
+                    : { type: "catalog", observedAt },
                 });
               }
             } else if (projected.type === "cardRemoved" && projected.archivedSession) {
@@ -518,8 +521,9 @@ function startHostBridge(partition: HostPartition): void {
                 undefined,
                 {
                   pendingInputCleared: projected.pendingInputCleared,
-                  sourceObserved: event.type !== "init" && "pendingInput" in event
-                    ? Boolean(event.pendingInput) : projected.card.runtime !== "input-needed",
+                  observation: "pendingInput" in event && event.pendingInput
+                    ? { type: "pending-input", requestId: event.pendingInput.requestId, observedAt: new Date().toISOString() }
+                    : { type: "catalog", observedAt: new Date().toISOString() },
                 },
               );
             } else if (projected.type === "cardRemoved") {

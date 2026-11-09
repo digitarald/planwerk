@@ -112,6 +112,10 @@ gate, clearing coherence authority, or erasing human action history.
 Catalog/board observations repair identity for both producers, but cannot
 revalidate an orchestrator result: its `sourceObservedAt` stays at the actual event
 observation (legacy rows use their saved `observedAt`), not the latest catalog read.
+`lib/inbox/observation.ts` distinguishes cached projections, live catalog observations,
+hydrated pending requests, and orchestrator results. Only a matching hydrated
+request validates pending input or recovers its automatic resolution; cached
+completion refreshes repair presentation without claiming a fresh source check.
 An off-board session is not necessarily deleted. Inspect the complete passive
 catalog before interpreting missing board membership or collecting cold evidence.
 Completion is valid only while the source session remains idle or archived. A later

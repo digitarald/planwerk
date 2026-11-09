@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { KanbanCard } from "../types.ts";
+import { observeInboxBriefing, sessionIdentity } from "./observation.ts";
 import {
   projectArchivedSession,
   projectCardSnapshot,
@@ -49,6 +50,35 @@ test("heartbeat notices capture session identity and event observation time", ()
     assert.equal(operation.item.briefing.provenance.workspacePath, "/project");
     assert.equal(operation.item.briefing.freshness.sourceObservedAt, context.now);
   }
+});
+
+test("only matching hydrated requests validate input; cached completion refreshes retain identity without validation", () => {
+  const pending = card({
+    runtime: "input-needed",
+    pendingInput: { requestId: "current", questions: [] },
+    project: { name: "Project", path: "/project" },
+  });
+  const operations = projectCardSnapshot(pending, undefined, context);
+  const operation = operations.find((operation) => operation.type === "upsert");
+  assert.ok(operation?.type === "upsert");
+  const item = operation.item;
+  for (const observation of [
+    { type: "cached" },
+    { type: "catalog", observedAt: context.now },
+    { type: "pending-input", requestId: "other", observedAt: context.now },
+  ] as const) {
+    assert.equal(observeInboxBriefing(item, sessionIdentity(pending), observation).freshness.sourceObservedAt, undefined);
+  }
+  assert.equal(observeInboxBriefing(item, sessionIdentity(pending), {
+    type: "pending-input", requestId: "current", observedAt: context.now,
+  }).freshness.sourceObservedAt, context.now);
+  const refresh = projectExistingCompletionRefresh({
+    ...pending, runtime: "idle", pendingInput: undefined, lastAgentMessage: "Result",
+  }, context).find((operation) => operation.type === "upsert");
+  assert.ok(refresh?.type === "upsert");
+  assert.equal(refresh.item.briefing.provenance.sessionTitle, pending.title);
+  assert.equal(refresh.item.briefing.provenance.projectName, "Project");
+  assert.equal(refresh.item.briefing.freshness.sourceObservedAt, undefined);
 });
 
 test("pending-input projection replaces stale requests and later resolves", () => {

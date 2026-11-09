@@ -9,7 +9,7 @@ import {
   getSessionLinkedInboxItems,
   hasInboxHumanResolution,
   listInboxItems,
-  observeInboxSource,
+  updateInboxBriefing,
   resolveInboxKind,
   resolveInboxSource,
   updateInboxPresentationIfCurrent,
@@ -21,6 +21,7 @@ import type { HeartbeatAction } from "../orchestrator/heartbeat.ts";
 import type { KanbanCard } from "../types.ts";
 import { isSessionOwnedByHost } from "../db/session-ownership.ts";
 import { reconcileInboxCatalog, type InboxCatalogEntry } from "./reconciliation.ts";
+import { mergeInboxContext, observeInboxBriefing, sessionIdentity, type InboxObservation } from "./observation.ts";
 import { inboxEvents } from "./events.ts";
 import {
   inboxItemMatchesHost,
@@ -196,15 +197,11 @@ function prepareSynthesisOperations(
         item: {
           ...operation.item,
           title: existing.title,
-          briefing: {
+          briefing: mergeInboxContext(existing.briefing, {
             ...existing.briefing,
             provenance: operation.item.briefing.provenance,
-            freshness: {
-              ...operation.item.briefing.freshness,
-              sourceObservedAt: operation.item.briefing.freshness.sourceObservedAt
-                ?? existing.briefing.freshness.sourceObservedAt,
-            },
-          },
+            freshness: operation.item.briefing.freshness,
+          }),
         },
       };
     }
@@ -517,19 +514,15 @@ export function projectCardToInbox(
   card: KanbanCard,
   previousCard?: KanbanCard,
   db: Database.Database = getDb(),
-  observation: { pendingInputCleared?: boolean; sourceObserved?: boolean } = {},
+  context: { pendingInputCleared?: boolean; observation?: InboxObservation } = {},
 ): void {
   if (!isSessionOwnedByHost(db, card.id, hostUrl)) return;
   const currentItems = getSessionLinkedInboxItems(db, { hostUrl, cardId: card.id });
   const now = new Date().toISOString();
   for (const item of currentItems) {
-    publishMutation(observeInboxSource(db, item, {
-      sessionTitle: card.title,
-      projectName: card.project?.name,
-      workspacePath: card.project?.path,
-    }, observation.sourceObserved === true && (item.kind !== "pending-input"
-      || (card.pendingInput && item.sourceKey.endsWith(`:pending-input:${card.pendingInput.requestId}`)))
-      ? now : undefined));
+    publishMutation(updateInboxBriefing(db, item, observeInboxBriefing(
+      item, sessionIdentity(card), context.observation ?? { type: "cached" },
+    )));
   }
   const hasPendingItem = currentItems.some((item) =>
     item.kind === "pending-input"
@@ -537,7 +530,7 @@ export function projectCardToInbox(
     && (item.workflowState !== "resolved" || hasInboxHumanResolution(db, item.id))
   );
   const operations = projectCardSnapshot(card, previousCard, {
-    hostUrl, sourceObserved: false, ...observation, now,
+    hostUrl, ...context, now,
   }).filter((operation) => !(hasPendingItem && operation.type === "upsert"
     && operation.item.briefing.provenance.eventType === "pending-input-unavailable"));
   if (
