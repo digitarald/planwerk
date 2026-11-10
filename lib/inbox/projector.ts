@@ -3,6 +3,11 @@ import { createHash } from "node:crypto";
 import { AHPStatus, type AHPSessionSummary } from "../ahp/types.ts";
 import type { HeartbeatAction } from "../orchestrator/heartbeat.ts";
 import type { KanbanCard, PendingInput } from "../types.ts";
+import { INBOX_ITEM_KINDS } from "./types.ts";
+import {
+  observeInboxBriefing, sessionIdentity, type InboxObservation, type InboxSessionObservation,
+} from "./observation.ts";
+import { sessionRetirementReason, type InboxSessionState } from "./lifecycle.ts";
 import type {
   InboxBriefing,
   InboxItemDraft,
@@ -14,7 +19,7 @@ interface ProjectionContext {
   hostUrl: string;
   now?: string;
   pendingInputCleared?: boolean;
-  sourceObserved?: boolean;
+  observation?: InboxSessionObservation;
 }
 
 function digest(value: unknown): string {
@@ -150,6 +155,17 @@ function draft(
     relatedCardIds,
     title,
     briefing: itemBriefing,
+  };
+}
+
+function withSessionContext(
+  item: InboxItemDraft,
+  card: Pick<KanbanCard, "title" | "project"> | undefined,
+  observation: InboxObservation,
+): InboxItemDraft {
+  return {
+    ...item,
+    briefing: observeInboxBriefing(item, sessionIdentity(card), observation),
   };
 }
 
@@ -476,7 +492,9 @@ export function projectExistingCompletionRefresh(
   ) {
     return [];
   }
-  return completionOperations(card, context);
+  return completionOperations(card, context).map((operation) => operation.type === "upsert"
+    ? { ...operation, item: withSessionContext(operation.item, card, { type: "cached" }) }
+    : operation);
 }
 
 export function projectCardSnapshot(
@@ -495,24 +513,11 @@ export function projectCardSnapshot(
     if (operation.type !== "upsert") return operation;
     return {
       ...operation,
-      item: {
+      item: withSessionContext({
         ...operation.item,
-        recoverPendingInput: Boolean(card.pendingInput),
-        briefing: {
-          ...operation.item.briefing,
-          freshness: {
-            ...operation.item.briefing.freshness,
-            sourceObservedAt: context.sourceObserved === false
-              ? undefined : observedAt(context),
-          },
-          provenance: {
-            ...operation.item.briefing.provenance,
-            sessionTitle: card.title,
-            projectName: card.project?.name,
-            workspacePath: card.project?.path,
-          },
-        },
-      },
+        recoverPendingInput: context.observation?.type === "pending-input"
+          && context.observation.requestId === card.pendingInput?.requestId,
+      }, card, context.observation ?? { type: "cached" }),
     };
   });
 }
@@ -543,15 +548,8 @@ export function projectArchivedSession(
     caveats: ["Archived completion does not imply that external gates passed."],
     confidence: "high",
   });
-  completionBriefing.provenance = {
-    ...completionBriefing.provenance,
-    sessionTitle: session.title,
-    projectName: session.project?.name,
-    workspacePath: session.project?.path,
-  };
-  completionBriefing.freshness.sourceObservedAt = observedAt(context);
   return [
-    ...projectRemovedSession(session.resource),
+    ...projectSessionRetirement(session.resource, { type: "archived" }),
     {
       type: "resolve-kind",
       kind: "completion",
@@ -560,36 +558,25 @@ export function projectArchivedSession(
     },
     {
       type: "upsert",
-      item: draft(
+      item: withSessionContext(draft(
         "completion",
         sourceKey,
         revision,
         `${session.title || session.resource} finished`,
         completionBriefing,
         session.resource,
-      ),
+      ), session, { type: "catalog", observedAt: observedAt(context) }),
     },
   ];
 }
 
-export function projectRemovedSession(
+export function projectSessionRetirement(
   cardId: string,
+  state: InboxSessionState,
 ): InboxProjectionOperation[] {
-  return [
-    { type: "resolve-kind", kind: "pending-input", cardId },
-    {
-      type: "resolve-source",
-      sourceKey: `session:${cardId}:runtime-error`,
-    },
-    {
-      type: "resolve-source",
-      sourceKey: `card:${cardId}:ready:review`,
-    },
-    {
-      type: "resolve-source",
-      sourceKey: `card:${cardId}:ready:ship`,
-    },
-  ];
+  return INBOX_ITEM_KINDS.flatMap((kind) => sessionRetirementReason(kind, state)
+    ? [{ type: "resolve-kind" as const, kind, cardId }]
+    : []);
 }
 
 function actionRevision(action: HeartbeatAction): string {
@@ -614,7 +601,7 @@ function orchestratorDraft(
 ): InboxItemDraft {
   const revision = actionRevision(action);
   const cardId = "cardId" in action ? action.cardId : undefined;
-  return draft(
+  return withSessionContext(draft(
     kind,
     sourceKey,
     revision,
@@ -646,7 +633,7 @@ function orchestratorDraft(
     }),
     cardId,
     input.relatedCardIds,
-  );
+  ), input.card, { type: "orchestrator", observedAt: observedAt(context) });
 }
 
 export function projectHeartbeatAction(

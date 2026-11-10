@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { KanbanCard } from "../types.ts";
+import { observeInboxBriefing, sessionIdentity } from "./observation.ts";
 import {
   projectArchivedSession,
   projectCardSnapshot,
   projectExistingCompletionRefresh,
   projectHeartbeatAction,
-  projectRemovedSession,
+  projectSessionRetirement,
 } from "./projector.ts";
 
 function card(overrides: Partial<KanbanCard> = {}): KanbanCard {
@@ -33,6 +34,52 @@ const context = {
   hostUrl: "ws://127.0.0.1:9000",
   now: "2026-09-22T00:10:00.000Z",
 };
+
+test("heartbeat notices capture session identity and event observation time", () => {
+  const session = card({ project: { name: "Project", path: "/project" } });
+  for (const action of [
+    { type: "gate-completed", cardId: session.id, gateType: "lint", status: "failed" },
+    { type: "plan-review-failed", cardId: session.id, reason: "Plan evidence missing" },
+  ] as const) {
+    const [operation] = projectHeartbeatAction(action, session, context);
+    assert.equal(operation.type, "upsert");
+    if (operation.type !== "upsert") continue;
+    assert.equal(operation.item.briefing.provenance.sourceType, "orchestrator");
+    assert.equal(operation.item.briefing.provenance.sessionTitle, session.title);
+    assert.equal(operation.item.briefing.provenance.projectName, "Project");
+    assert.equal(operation.item.briefing.provenance.workspacePath, "/project");
+    assert.equal(operation.item.briefing.freshness.sourceObservedAt, context.now);
+  }
+});
+
+test("only matching hydrated requests validate input; cached completion refreshes retain identity without validation", () => {
+  const pending = card({
+    runtime: "input-needed",
+    pendingInput: { requestId: "current", questions: [] },
+    project: { name: "Project", path: "/project" },
+  });
+  const operations = projectCardSnapshot(pending, undefined, context);
+  const operation = operations.find((operation) => operation.type === "upsert");
+  assert.ok(operation?.type === "upsert");
+  const item = operation.item;
+  for (const observation of [
+    { type: "cached" },
+    { type: "catalog", observedAt: context.now },
+    { type: "pending-input", requestId: "other", observedAt: context.now },
+  ] as const) {
+    assert.equal(observeInboxBriefing(item, sessionIdentity(pending), observation).freshness.sourceObservedAt, undefined);
+  }
+  assert.equal(observeInboxBriefing(item, sessionIdentity(pending), {
+    type: "pending-input", requestId: "current", observedAt: context.now,
+  }).freshness.sourceObservedAt, context.now);
+  const refresh = projectExistingCompletionRefresh({
+    ...pending, runtime: "idle", pendingInput: undefined, lastAgentMessage: "Result",
+  }, context).find((operation) => operation.type === "upsert");
+  assert.ok(refresh?.type === "upsert");
+  assert.equal(refresh.item.briefing.provenance.sessionTitle, pending.title);
+  assert.equal(refresh.item.briefing.provenance.projectName, "Project");
+  assert.equal(refresh.item.briefing.freshness.sourceObservedAt, undefined);
+});
 
 test("pending-input projection replaces stale requests and later resolves", () => {
   const pending = card({
@@ -332,21 +379,15 @@ test("archived no-code sessions still produce completion", () => {
   ));
 });
 
-test("removed sessions clear ephemeral briefings without creating completion", () => {
-  const operations = projectRemovedSession("card-1");
-  assert.deepEqual(operations, [
-    { type: "resolve-kind", kind: "pending-input", cardId: "card-1" },
-    {
-      type: "resolve-source",
-      sourceKey: "session:card-1:runtime-error",
-    },
-    {
-      type: "resolve-source",
-      sourceKey: "card:card-1:ready:review",
-    },
-    {
-      type: "resolve-source",
-      sourceKey: "card:card-1:ready:ship",
-    },
-  ]);
+test("archived sessions retire handoffs without clearing conflict authority or creating history", () => {
+  const operations = projectSessionRetirement("card-1", { type: "archived" });
+  assert.ok(operations.every((operation) => operation.type === "resolve-kind"
+    && operation.cardId === "card-1"));
+  const resolvedKinds = operations.flatMap((operation) =>
+    operation.type === "resolve-kind" ? [operation.kind] : []);
+  assert.ok(resolvedKinds.includes("gate-failure"));
+  assert.ok(resolvedKinds.includes("review-escalation"));
+  assert.ok(resolvedKinds.includes("pending-input"));
+  assert.ok(!resolvedKinds.includes("conflict"));
+  assert.ok(!resolvedKinds.includes("completion"));
 });

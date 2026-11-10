@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 
 import { priorityForInboxKind } from "../inbox/priority.ts";
+import { mergeInboxContext } from "../inbox/observation.ts";
 import {
   INBOX_ACTION_TYPES,
   type InboxActionType,
@@ -160,19 +161,7 @@ export function upsertInboxItem(
       && !hasInboxHumanResolution(db, existingRow.id);
     const priority = priorityForInboxKind(draft.kind);
     let nextTitle = draft.title;
-    let nextBriefing = existingBriefing ? {
-      ...draft.briefing,
-      provenance: {
-        ...existingBriefing.provenance,
-        ...Object.fromEntries(Object.entries(draft.briefing.provenance)
-          .filter(([, value]) => value !== undefined)),
-      },
-      freshness: {
-        ...draft.briefing.freshness,
-        sourceObservedAt: draft.briefing.freshness.sourceObservedAt
-          ?? existingBriefing.freshness.sourceObservedAt,
-      },
-    } : draft.briefing;
+    let nextBriefing = mergeInboxContext(existingBriefing, draft.briefing);
     if (existingRow?.source_revision === draft.sourceRevision) {
       const existing = mapItem(existingRow);
       const existingSynthesis = existing.briefing.synthesis;
@@ -328,38 +317,24 @@ export function hasInboxHumanResolution(db: Database.Database, itemId: string): 
   `).get(itemId));
 }
 
-export function getInboxSessionItems(
+export function getSessionLinkedInboxItems(
   db: Database.Database,
-  hostUrl: string,
-  cardId?: string,
+  { hostUrl, cardId }: { hostUrl: string; cardId?: string },
 ): InboxItem[] {
   const rows = db.prepare(`
     SELECT * FROM inbox_items
     WHERE json_extract(briefing_json, '$.provenance.hostUrl') = ?
-      AND json_extract(briefing_json, '$.provenance.sourceType') = 'ahp-session'
       AND card_id IS NOT NULL
       ${cardId === undefined ? "" : "AND card_id = ?"}
   `).all(...(cardId === undefined ? [hostUrl] : [hostUrl, cardId])) as InboxItemRow[];
   return rows.map(mapItem);
 }
 
-export function observeInboxSource(
+export function updateInboxBriefing(
   db: Database.Database,
   item: InboxItem,
-  identity: Pick<InboxBriefing["provenance"], "sessionTitle" | "projectName" | "workspacePath">,
-  sourceObservedAt?: string,
+  briefing: InboxBriefing,
 ): InboxMutation {
-  const briefing: InboxBriefing = {
-    ...item.briefing,
-    provenance: {
-      ...item.briefing.provenance,
-      ...Object.fromEntries(Object.entries(identity).filter(([, value]) => value !== undefined)),
-    },
-    freshness: {
-      ...item.briefing.freshness,
-      sourceObservedAt: sourceObservedAt ?? item.briefing.freshness.sourceObservedAt,
-    },
-  };
   if (JSON.stringify(briefing) === JSON.stringify(item.briefing)) {
     return { previous: item, item, changed: false, inserted: false };
   }

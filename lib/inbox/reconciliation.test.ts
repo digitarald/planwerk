@@ -8,6 +8,7 @@ import {
   purgeNonActionableInboxItems, upsertInboxItem,
 } from "../db/inbox-store.ts";
 import { reconcileInboxCatalog, type InboxCatalogEntry } from "./reconciliation.ts";
+import { projectHeartbeatAction } from "./projector.ts";
 import type { InboxItemDraft, InboxItemKind } from "./types.ts";
 
 const host = "ws://test";
@@ -33,6 +34,82 @@ function draft(cardId: string, kind: InboxItemKind = "pending-input", hostUrl = 
     },
   };
 }
+
+function legacyHeartbeatDraft(cardId: string, kind: "gate-failure" | "review-escalation", hostUrl = host): InboxItemDraft {
+  const action = kind === "gate-failure"
+    ? { type: "gate-completed", cardId, gateType: "lint", status: "failed" } as const
+    : { type: "plan-review-failed", cardId, reason: "Plan evidence missing" } as const;
+  const [operation] = projectHeartbeatAction(action, undefined, { hostUrl, now });
+  assert.equal(operation.type, "upsert");
+  if (operation.type !== "upsert") throw new Error("Expected heartbeat notice");
+  const item = operation.item;
+  item.sourceKey = `${hostUrl}:${item.sourceKey}`;
+  delete item.briefing.freshness.sourceObservedAt;
+  return item;
+}
+
+test("legacy heartbeat notices reconcile by session linkage, not event producer", () => {
+  const db = new Database(":memory:");
+  ensureInboxSchema(db);
+  const later = "2026-09-23T00:00:00.000Z";
+  try {
+    const fixtures = (["gate-failure", "review-escalation"] as const).flatMap((kind) =>
+      ["active", "archived", "disabled", "missing", "quarantined"].map((id) =>
+        legacyHeartbeatDraft(id, kind)));
+    const otherHost = legacyHeartbeatDraft("missing", "gate-failure", "ws://other");
+    const goal = { ...draft("goal", "coordinator-action"), cardId: undefined };
+    goal.briefing.provenance.sourceType = "orchestrator";
+    for (const item of [...fixtures, otherHost, goal]) upsertInboxItem(db, item, now);
+    const entries = [
+      source("active"), source("archived", AHPStatus.Idle | AHPStatus.IsArchived),
+      source("disabled", AHPStatus.Idle, false),
+    ];
+    const options = { complete: true, now: later, ownsSession: (id: string) => id !== "quarantined" };
+    reconcileInboxCatalog(db, host, entries, { ...options, complete: false });
+    assert.equal(listInboxItems(db).total, 12);
+    reconcileInboxCatalog(db, host, entries, options);
+    assert.equal(listInboxItems(db).total, 6);
+    for (const input of fixtures) {
+      const current = getInboxItemBySourceKey(db, input.sourceKey)!;
+      if (input.cardId === "active") {
+        assert.equal(current.workflowState, "open");
+        assert.equal(current.briefing.provenance.sessionTitle, "Title active");
+        assert.equal(current.briefing.freshness.sourceObservedAt, now);
+        assert.equal(current.updatedAt, now);
+      } else {
+        assert.equal(current.workflowState, input.cardId === "quarantined" ? "open" : "resolved");
+      }
+    }
+    assert.equal(reconcileInboxCatalog(db, host, entries, options).some((mutation) => mutation.changed), false);
+    assert.equal(getInboxItemBySourceKey(db, otherHost.sourceKey)?.workflowState, "open");
+    assert.equal(getInboxItemBySourceKey(db, goal.sourceKey)?.workflowState, "open");
+  } finally { db.close(); }
+});
+
+test("heartbeat metadata repair preserves human choices and never refreshes event evidence from the catalog", () => {
+  const db = new Database(":memory:");
+  ensureInboxSchema(db);
+  try {
+    for (const action of ["read", "pin", "snooze", "resolve"] as const) {
+      const input = legacyHeartbeatDraft(action, "gate-failure");
+      const initial = upsertInboxItem(db, input, now).item;
+      applyInboxAction(db, initial.id, action, null, action === "snooze" ? "2099-01-01T00:00:00Z" : null, now);
+      const before = getInboxItemBySourceKey(db, input.sourceKey)!;
+      reconcileInboxCatalog(db, host, [source(action)], {
+        complete: true, cardId: action, now: "2026-09-23T00:00:00.000Z",
+      });
+      const after = getInboxItemBySourceKey(db, input.sourceKey)!;
+      assert.equal(after.briefing.provenance.sessionTitle, `Title ${action}`);
+      assert.equal(after.briefing.freshness.sourceObservedAt, now);
+      assert.equal(after.workflowState, before.workflowState);
+      assert.equal(after.readAt, before.readAt);
+      assert.equal(after.pinnedAt, before.pinnedAt);
+      assert.equal(after.snoozedUntil, before.snoozedUntil);
+      assert.equal(after.updatedAt, before.updatedAt);
+    }
+    assert.equal(db.prepare("SELECT count(*) FROM inbox_item_actions").pluck().get(), 4);
+  } finally { db.close(); }
+});
 
 test("only complete live inventories reconcile missing, disabled, archived and resolved sources", () => {
   const db = new Database(":memory:");

@@ -235,7 +235,7 @@ export function enrichSessionToCard(
   // Legibility: when the gate is silently `pending` (no badge/spinner), surface
   // *why* the card can't advance so a busy card producing work doesn't look
   // mysteriously stuck. Purely informational — does not move the card.
-  if (nextPhase && card.gateStatus === "pending") {
+  if (nextPhase && card.gateStatus === "pending" && isCardAutomationEligible(card)) {
     card.gateBlocker = computeGateBlocker(
       session.resource,
       reviewedPhase,

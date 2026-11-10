@@ -11,6 +11,7 @@ export const INBOX_ITEM_KINDS = [
 ] as const;
 
 export type InboxItemKind = (typeof INBOX_ITEM_KINDS)[number];
+
 export type InboxPriorityBand = "urgent" | "high" | "normal" | "low";
 export type InboxWorkflowState = "open" | "resolved" | "dismissed";
 export type InboxReadState = "unread" | "read";
